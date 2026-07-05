@@ -1,0 +1,92 @@
+#+title: Datastore — kine/sqlite and etcd Backends
+#+state: ready
+#+FILETAGS: :core:
+
+* Summary
+
+The =kubenyx.datastore= module: the storage the (unmodified) kube-apiserver talks etcd-v3 gRPC to. Two backends: =kine-sqlite= (default for single control-plane node) and =etcd= (multi-node / heavy API load). The apiserver does not know or care which is running — that is the point.
+
+* Motivation
+
+etcd's raft bootstrap, WAL fsync floor, and keyspace-in-memory cache are the largest avoidable costs in a small stock cluster. kine speaks the etcd API subset Kubernetes uses, backed by sqlite, over a unix socket — k0s ships exactly this with unmodified upstream binaries, and k3s is CNCF-conformance-certified on the sqlite path. Startup drops to "open a sqlite file"; RAM drops materially; durability semantics stay sane (sqlite WAL, real fsync — unlike etcd-on-tmpfs hacks).
+
+Trade-off recorded honestly (vCluster load tests): under heavy API load sqlite is ~3x slower per request than etcd and burns more CPU; watch-heavy workloads stress kine's SQL-polling watches. That is why etcd stays a first-class backend, and why the default flips to etcd for multi-node.
+
+** Goals
+- Backend switch is one option; everything downstream (apiserver flags, readiness gating, state paths) follows automatically.
+- Single-node boot-to-apiserver-Ready < 5s on the kine path.
+- No TLS ceremony on loopback/unix-socket paths; full TLS on the etcd multi-node path.
+
+** Non-Goals
+- Postgres/MySQL/NATS kine backends (kine supports them; out of v0.1 surface — reachable via =extraFlags=).
+- etcd clustering/HA management (v0.1 runs one etcd; module must not hardcode loopback the way nixpkgs did).
+- Migration tooling between backends.
+
+* Proposal
+
+** kine-sqlite backend
+
+=kine.service=, =DynamicUser= + =StateDirectory=kine=:
+
+#+begin_src
+kine \
+  --endpoint 'sqlite:///var/lib/kine/state.db?_journal=WAL&cache=shared&_busy_timeout=30000' \
+  --listen-address unix:///run/kubenyx/kine.sock \
+  --compact-interval 0 \          # apiserver owns compaction (k0s stance)
+  --metrics-bind-address 0        # no metrics listener by default
+  --watch-progress-notify-interval 5s
+#+end_src
+
+apiserver gets =--etcd-servers=unix:///run/kubenyx/kine.sock=. No TLS: the socket is =0700= in =/run/kubenyx=, owned by the kine user, group-readable by the apiserver's group only.
+
+Readiness (for the notify wrapper, D10): etcdctl-style health — write/read a =/kubenyx-health= key through the socket (k0s pattern), or simply socket-connect + status RPC via =etcdctl --endpoints=unix://...= from cri-tools-free minimal closure (implementation picks the cheaper).
+
+** etcd backend
+
+=services.etcd= from nixpkgs is *not* reused (it drags its own option surface and defaults); Kubenyx renders its own unit for full control:
+
+- etcd 3.6 (v3.6 halved default memory via =snapshot-count=10000= default and compaction changes; keep defaults, expose =settings=).
+- Single-node default: loopback client URL, no peer TLS, apiserver via =https://127.0.0.1:2379= with etcd CA + client cert *only when* =listenExternal= is set; plain =http://127.0.0.1:2379= otherwise (KTHW-current stance; documented trade-off: local root can read secrets either way).
+- Multi-node: full etcd PKI from pki.org (etcd CA, server/peer certs), static initial-cluster from declared membership.
+- =kubenyx.datastore.etcd.unsafeNoFsync= (default false): maps to =--unsafe-no-fsync= for disposable dev clusters; option docs carry a red warning.
+- =GOMEMLIMIT= set from =MemoryHigh= when the user constrains the unit (MicroShift-validated pattern).
+
+** Options sketch
+
+#+begin_src nix
+kubenyx.datastore = {
+  backend = "kine-sqlite";        # | "etcd"
+  volatile = false;               # true (testing profile opt-in): state on
+                                  # tmpfs — fastest possible, disposable by
+                                  # design; cluster identity survives via
+                                  # PKI on disk, objects do not survive
+                                  # reboot. VM reboot-persistence test is
+                                  # skipped when volatile.
+  dataDir = null;                 # default per backend StateDirectory
+  kine.extraFlags = [ ];
+  etcd = {
+    package = pkgs.etcd_3_6;
+    listenExternal = false;       # true => TLS + real IPs (multi-node)
+    unsafeNoFsync = false;
+    settings = { };               # env-style ETCD_* passthrough
+  };
+};
+#+end_src
+
+Assertion: =backend == "kine-sqlite" -> single control-plane node=.
+
+* Design Details
+
+- kine's =--emulated-etcd-version= default tracks kine's build (3.6.x); left alone — apiserver 1.36 feature-detects correctly against it. Pin in module only if a skew bug appears.
+- apiserver watch cache stays ON for both backends; with kine, disabling it would multiply SQL watch polling (research finding).
+- sqlite file lives on real disk; WAL journal mode. No tmpfs by default — kine already removes the fsync-per-write amplification etcd has; tmpfs would add data loss for little gain.
+- Backup story (documented, not automated in v0.1): sqlite = single-file snapshot via =sqlite3 .backup=; etcd = =etcdctl snapshot save=.
+
+* Acceptance Criteria
+- VM test (kine): fresh boot reaches apiserver =/readyz= 200 with =--etcd-servers=unix://...= and no etcd process anywhere.
+- VM test (etcd): same test matrix passes with =backend = "etcd"=.
+- Restarting kine (or etcd) mid-test does not wedge the apiserver (Restart=always + apiserver reconnects; verified by killing the datastore and re-running a =kubectl get=).
+- Datastore state survives a full VM reboot (objects created pre-reboot are listed post-reboot) on both backends.
+
+* History
+- 2026-07-05: Drafted from fast-start research (kine flags verified from k0s/kine sources); moved to ready.

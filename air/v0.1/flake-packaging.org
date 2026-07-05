@@ -1,0 +1,98 @@
+#+title: Flake Shape & Module Layout
+#+state: ready
+#+FILETAGS: :packaging:
+
+* Summary
+
+The public face of Kubenyx: one flake, =nixpkgs= as the only input, a drop-in NixOS module with a deliberately small =kubenyx.*= option surface, and internal module decomposition mirroring the Air docs.
+
+* Motivation
+
+** Goals
+- =imports = [ kubenyx.nixosModules.default ]; kubenyx.enable = true;= is a complete single-node cluster config.
+- Option surface stays small (< 40 user-facing options) and task-oriented; nothing like nixpkgs' 145-option sprawl. Escape hatches (=extraFlags= / =settings= per component) absorb the long tail instead of dedicated options.
+- Per-component package overrides for development (kubernix pattern).
+- =nix flake check= runs the VM tests.
+
+** Non-Goals
+- Supporting non-flake (channels) consumption in v0.1.
+- Home-manager / darwin anything.
+- Backwards-compat shims for =services.kubernetes= options.
+
+* Proposal
+
+** Repository layout
+
+#+begin_example
+flake.nix
+modules/
+  default.nix          # aggregates; defines kubenyx.enable, kubenyx.role
+  options.nix          # shared option types (cidr, node submodule)
+  pki.nix
+  datastore.nix
+  control-plane.nix    # apiserver + kcm + scheduler
+  node.nix             # containerd, kubelet, sysctls, pause preload
+  network.nix          # CNI render, routes, kube-proxy, firewall
+  dns.nix              # coredns host/cluster
+  addons.nix           # applier + built-in bundle
+pkgs/
+  readiness-wrapper.nix
+  pause-image.nix
+  coredns-image.nix
+  kubenyx-utils.nix    # admin shell helpers (kubectl wrapper w/ kubeconfig)
+tests/
+  single-node.nix
+  single-node-etcd.nix
+  multi-node.nix
+lib/
+  default.nix          # cidr math (nodePodCidr, serviceIP n), asserts
+#+end_example
+
+** Top-level options
+
+#+begin_src nix
+kubenyx = {
+  enable = false;
+  profile = "testing";              # | "balanced" — moves defaults only (D12)
+  role = "server";                  # "server" (cp+worker) | "agent" (worker)
+  nodeName = config.networking.hostName;
+  controlPlaneEndpoint = null;      # required for role="agent"
+  nodes = { };                      # ordered attrset: { name = { address; index; }; }
+  packages = {
+    kubernetes = <trimmed build>;   # components: kubelet,apiserver,kcm,scheduler,proxy
+    kubectl / containerd / crun / cniPlugins / coredns / kine / etcd = ...;
+  };
+  # + the per-area namespaces from the other docs:
+  # kubenyx.pki.* / datastore.* / controlPlane.* / node.* / network.* /
+  # dns.* / addons.*
+};
+#+end_src
+
+=role= is thin sugar: "server" = control-plane + node modules on; "agent" = node-side only. It force-enables nothing else — no easyCerts-style coupling; every subsystem can be disabled or replaced individually (=kubenyx.dns.enable=, =kubenyx.network.kubeProxy.enable=, =kubenyx.network.cni.manage= all exist for advanced substitution).
+
+** Flake outputs
+
+- =nixosModules.default= / =nixosModules.kubenyx=
+- =packages.<system>.{pause-image,readiness-wrapper,coredns-image}=
+- =checks.<system>.{single-node,single-node-etcd,multi-node}= (VM tests)
+- =templates.default= — consumer flake skeleton with a commented single-node configuration
+- =devShells.default= — kubectl, jq, and test-driving helpers
+
+** Closure discipline
+
+=pkgs.kubernetes= is overridden with =components = [cmd/kubelet cmd/kube-apiserver cmd/kube-controller-manager cmd/kube-scheduler cmd/kube-proxy]= — kubeadm never enters the closure. Agent nodes get a further-trimmed build (kubelet+proxy only) via =packages.kubernetesAgent=. Closure size is printed by a =checks= job so regressions are visible in review.
+
+* Design Details
+
+- All inter-module wiring goes through =config.kubenyx.internal.*= read-only options (e.g. =internal.apiserverUrl=, =internal.pkiDir=, =internal.nodePodCidr=) so modules never reach into each other's implementation.
+- Assertions at eval time: node names RFC-1123; node indices unique and < 256; agent role requires =controlPlaneEndpoint=; kine backend requires single control-plane; service/cluster CIDRs disjoint.
+- =system.checks=-style build-time validation of rendered configs: containerd config checked with =containerd config dump= (nixpkgs module already does this); KubeletConfiguration/KubeProxyConfiguration checked by a strict-YAML parse; easykubenix-style ephemeral-apiserver manifest validation noted as v0.2 candidate.
+
+* Acceptance Criteria
+- A consumer flake using =templates.default= unchanged builds and boots a Ready single-node cluster in the VM test harness.
+- =nix flake check= passes: all VM tests + config-validation checks.
+- =nix path-info -S= closure report exists for the server and agent system profiles in CI output.
+- Option docs render (=nixosOptionsDoc=) without missing descriptions.
+
+* History
+- 2026-07-05: Drafted; moved to ready.

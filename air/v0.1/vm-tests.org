@@ -1,0 +1,56 @@
+#+title: NixOS VM Test Suite
+#+state: ready
+#+FILETAGS: :testing:
+
+* Summary
+
+The proof layer: NixOS VM tests (=nixos-lib.runTest=) that boot real Kubenyx clusters and drive them end-to-end. A module doc in this milestone is only marked =complete= when its acceptance criteria are covered here and green.
+
+* Motivation
+
+** Goals
+- Every user-facing claim ("drop-in", "zero pulls", "fast boot") has a test that fails when the claim regresses.
+- Tests run in =nix flake check= with no network access — which is itself the strongest possible proof of the zero-registry design (the Nix sandbox enforces it for free).
+- Boot-to-Ready timing captured on every run (trend visibility, not a hard gate in v0.1 — VM test hosts are too noisy for strict budgets).
+
+** Non-Goals
+- Conformance (Sonobuoy) runs — cannot run in the sandbox; documented as a manual out-of-band procedure.
+- Performance benchmarking proper (iperf, API load) — the harness hooks exist, running them belongs to a future milestone.
+
+* Proposal
+
+** Test matrix
+
+| Test                | Topology            | Datastore   | DNS     | Asserts                                        |
+|---------------------+---------------------+-------------+---------+------------------------------------------------|
+| =single-node=       | 1 server            | kine-sqlite | host    | full happy path (below)                        |
+| =single-node-etcd=  | 1 server            | etcd        | cluster | same happy path on the alternate backends      |
+| =multi-node=        | 1 server + 1 agent  | etcd        | host    | cross-node pod/service traffic, static routes  |
+
+** The happy path (single-node)
+
+1. Boot; wait for =kubenyx.target=; record =systemd-analyze= + time-to-=/readyz= + time-to-node-Ready.
+2. PKI assertions: second activation is a no-op (mtime comparison); anonymous API rejected; admin kubeconfig works; RBAC enforced.
+3. Workload: import a nix-built test image (busybox-class) via seedImages; =kubectl run= it; Running within budget; exec/logs work (proves apiserver→kubelet cert path).
+4. Service path: =kubectl expose=; curl VIP from another pod; hairpin from the pod itself; NodePort from the VM host.
+5. DNS: resolve =kubernetes.default= and cross-namespace name from a pod.
+6. Chaos smoke: =systemctl kill -s SIGKILL= kubelet, then datastore; cluster converges back to Ready; a fresh pod schedules.
+7. Reboot: VM reboots; pre-reboot objects still present; node returns to Ready without intervention.
+8. Audit: no flanneld/cilium/etcd (kine variant) processes; =ps= sweep.
+
+** Timing capture
+
+The test driver logs =T_apiserver_ready=, =T_node_ready=, =T_pod_running= to stdout in a grep-friendly =KUBENYX-METRIC key=value= format. CI keeps them visible in logs; no assertion beyond a generous sanity ceiling (e.g. node Ready < 120s in a nested-virt VM) to avoid flaky gates while still catching k3s#4340-class multi-minute regressions.
+
+** Harness details
+
+- =virtualisation.memorySize = 3072=, =cores = 2=, disk 8G (etcd/kine both fine; nixpkgs' old tests used 1536M — apiserver 1.36 wants more).
+- Multi-node test uses the test driver's VLAN; static routes as the module renders them; firewall ON in all tests.
+- Test images built with =dockerTools.streamLayeredImage= in the flake (no dockerhub anything).
+
+* Acceptance Criteria
+- =nix flake check= runs all three tests green in the sandbox (no network) on x86_64-linux.
+- A deliberate regression (e.g. removing the pause preload) fails the suite — verified once during implementation (mutation check).
+
+* History
+- 2026-07-05: Drafted; moved to ready.

@@ -1,0 +1,85 @@
+#+title: Node Runtime — containerd, crun, kubelet
+#+state: ready
+#+FILETAGS: :node:
+
+* Summary
+
+The node layer: containerd 2.x with crun as the default OCI runtime, a nix-built preloaded pause image, and a kubelet tuned for fast pod start and low idle cost. Delivered as =kubenyx.node.*= options layered on the existing =virtualisation.containerd= NixOS module.
+
+* Motivation
+
+** Goals
+- Fastest available pod-start path: crun (~2–5x faster create than runc), overlayfs, parallel image pulls, zero registry dependency for the sandbox image.
+- kubelet as a lean node agent: no static-pod watcher, no legacy ports, correct cgroup v2 wiring, systemd watchdog supervision.
+- Every NixOS-specific kubelet gotcha (PATH, resolv.conf, CNI dir, sysctls, kernel modules) handled by the module, invisibly.
+
+** Non-Goals
+- CRI-O support (containerd only in v0.1; the option namespace must not bake in containerd assumptions that would preclude adding it).
+- Lazy-pull snapshotters (stargz/nydus) — redundant with nix-preloaded images; erofs snapshotter revisit once non-experimental.
+- nix-snapshotter integration — tracked as a v0.2+ candidate.
+
+* Proposal
+
+** containerd
+
+Reuse =virtualisation.containerd= (Type=notify unit, Delegate=yes) and inject settings (v2 schema, matching the module's defaults; containerd 2.x auto-migrates):
+
+- =default_runtime_name = "crun"=; runtime =io.containerd.runc.v2= with =options.BinaryName = ${pkgs.crun}/bin/crun=, =SystemdCgroup = true=.
+- snapshotter =overlayfs=.
+- =sandbox_image = "kubenyx/pause:VERSION"= — built with =dockerTools.streamLayeredImage= from the =kubernetes.pause= output binary; imported by a =kubenyx-pause-import= oneshot (=ctr -n k8s.io image import=) before kubelet starts; containerd pins it (=pinned_images= / pinned label) so image GC never evicts it. No registry access is ever needed to start a pod sandbox.
+- NRI disabled (=io.containerd.nri.v1.nri.disable = true=).
+- CNI: =bin_dir = /opt/cni/bin=, =conf_dir = /etc/cni/net.d= (see networking.org for why the conventional mutable path).
+- =LimitNOFILE=1048576= added to the unit (nixpkgs module omits it).
+
+** kubelet
+
+Systemd service (=Restart=always=, =WatchdogSec=30s= — kubelet has native systemd watchdog support since 1.32). Full PATH injection: util-linux, iproute2, iptables/nftables, socat, conntrack-tools, kmod, e2fsprogs — kubelet shells out to these; missing PATH entries are the #1 hand-rolled kubelet failure on NixOS.
+
+KubeletConfiguration (rendered YAML, =kubenyx.node.kubelet.settings= merges over these defaults):
+
+#+begin_src yaml
+cgroupDriver: systemd
+containerRuntimeEndpoint: unix:///run/containerd/containerd.sock
+staticPodPath: ""                 # static-pod watcher fully disabled (D2)
+readOnlyPort: 0
+healthzBindAddress: 127.0.0.1
+authentication: { anonymous: {enabled: false}, webhook: {enabled: true},
+                  x509: {clientCAFile: <pki>/ca.crt} }
+authorization: { mode: Webhook }
+tlsCertFile / tlsPrivateKeyFile: <pki>   # pre-generated serving cert
+rotateCertificates: false          # see pki.org
+serializeImagePulls: false
+maxParallelImagePulls: 10
+failSwapOn: false
+memorySwap: { swapBehavior: NoSwap }
+clusterDNS: [<dns addr>]           # from dns-addons.org
+clusterDomain: cluster.local
+resolvConf: <auto>                 # /run/systemd/resolve/resolv.conf when resolved
+protectKernelDefaults: true        # module pre-sets every required sysctl
+nodeStatusReportFrequency: 5m
+featureGates: {}                   # EventedPLEG stays OFF (open correctness bugs)
+#+end_src
+
+CLI remainder: =--config=, =--kubeconfig=, =--node-ip=, =--hostname-override=<declared node name>= (must equal the cert CN suffix).
+
+** Host preparation (module-managed)
+
+- =boot.kernelModules = [ "br_netfilter" "overlay" ]=
+- sysctls: =vm.overcommit_memory=1=, =vm.panic_on_oom=0=, =kernel.panic=10=, =kernel.panic_on_oops=1=, =kernel.keys.root_max*=, =net.ipv4.ip_forward=1=, =net.bridge.bridge-nf-call-ip{,6}tables=1=, inotify/file-max/conntrack scale limits — the exact set =protectKernelDefaults= demands plus practical scale headroom (see [[file:../context/research/runtime-node.md]]).
+- Unique lowercase RFC-1123 hostname asserted at eval time.
+
+* Design Details
+
+- Pause image: single layer containing =${kubernetes.pause}/bin/pause= as entrypoint; tag derived from the store hash so a pause update re-imports automatically and stale tags never collide.
+- The import oneshot is =After=containerd.service=, =Before=kubelet.service=, no-ops (ctr images check) in <100ms when already imported.
+- =kubenyx.node.seedImages = [ <streamLayeredImage drvs> ]= generalizes the same mechanism for user workload images (airgapped operation).
+- crun/runc coexistence: runc stays installed (containerd module PATH); only the default handler changes, so RuntimeClasses for runc remain possible.
+
+* Acceptance Criteria
+- VM test: pod sandbox starts with *no* network access (registry unreachable) — proves pause preload and pin.
+- =kubectl get --raw /api/v1/nodes/<n>/proxy/configz= shows the rendered KubeletConfiguration values (cgroupDriver systemd, staticPodPath empty).
+- Pod running =crun= is observable via =crictl inspect= runtime info on the node.
+- kubelet survives a =systemd-analyze= check with watchdog active and restarts cleanly under =systemctl kill --signal=SIGKILL kubelet=.
+
+* History
+- 2026-07-05: Drafted from runtime research; moved to ready.

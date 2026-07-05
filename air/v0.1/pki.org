@@ -1,0 +1,92 @@
+#+title: Declarative PKI
+#+state: ready
+#+FILETAGS: :core:
+
+* Summary
+
+A NixOS module (=kubenyx.pki=) that materializes the complete cluster PKI — CAs, leaf certificates, service-account keypair, and kubeconfigs — from a single idempotent oneshot at activation time, using =openssl= only. No CA daemon, no network issuance, no tokens. Replaces the nixpkgs easyCerts/cfssl/certmgr design wholesale.
+
+* Motivation
+
+The nixpkgs module's PKI is its worst component: a cfssl HTTP CA on =0.0.0.0= (issuance was unauthenticated until Feb 2025), trust-on-first-use CA fetch, a single flat CA that makes the aggregation layer impossible (nixpkgs #196486), 30-day certs renewed by a daemon that restarts cluster components. Modern Kubernetes-the-Hard-Way generates the whole PKI with plain openssl from one declarative config — that shape maps directly onto Nix.
+
+** Goals
+- Zero-interaction PKI on first boot; stable (no-op) on every boot after.
+- Correct trust separation: distinct front-proxy CA slot from day one.
+- Every certificate identity carries the load-bearing CN/O that upstream RBAC and the Node authorizer key on.
+- User escape hatch: bring-your-own PKI directory.
+
+** Non-Goals
+- Networked issuance / dynamic node join (TLS bootstrap) — see architecture.org D3.
+- Automated in-place CA rotation (leaf re-issue is covered; CA rotation is regenerate-and-redeploy).
+
+* Proposal
+
+** Certificate inventory
+
+One cluster CA (ECDSA P-256, 10y). Leaves (1y default, option-tunable):
+
+| File                            | Kind   | CN                              | O                        | SANs                                  |
+|---------------------------------+--------+---------------------------------+--------------------------+---------------------------------------|
+| =ca.{crt,key}=                  | CA     | =kubenyx-ca=                    | —                        | —                                     |
+| =apiserver.{crt,key}=           | server | =kube-apiserver=                | —                        | see below                             |
+| =apiserver-kubelet-client=      | client | =kube-apiserver-kubelet-client= | —                        | —                                     |
+| =admin=                         | client | =kubenyx-admin=                 | =kubenyx:cluster-admins= | —                                     |
+| =controller-manager=            | client | =system:kube-controller-manager= | —                       | —                                     |
+| =scheduler=                     | client | =system:kube-scheduler=         | —                        | —                                     |
+| =kube-proxy=                    | client | =system:kube-proxy=             | —                        | —                                     |
+| =coredns=                       | client | =system:coredns=                | —                        | —                                     |
+| =kubelet-<node>= (client)       | client | =system:node:<node>=            | =system:nodes=           | —                                     |
+| =kubelet-<node>-server=         | server | =system:node:<node>=            | —                        | node name, node IPs                   |
+| =sa.{key,pub}=                  | keypair | —                              | —                        | —                                     |
+| =front-proxy-ca=, =front-proxy-client= | CA+client | (reserved slot)          | —                        | created only when aggregation enabled |
+
+apiserver SANs: =kubernetes=, =kubernetes.default=, =kubernetes.default.svc=, =kubernetes.default.svc.<clusterDomain>=, first IP of the service CIDR (e.g. =10.96.0.1=), node hostname + advertise IP, =127.0.0.1=, =localhost=, plus =kubenyx.pki.extraApiserverSANs=.
+
+Notes:
+- =kubenyx:cluster-admins= (not =system:masters=) for admin — bound to =cluster-admin= via a rendered ClusterRoleBinding in the addons bundle; revocable, unlike =system:masters=.
+- apiserver→kubelet client user is bound to the built-in =system:kubelet-api-admin= ClusterRole (addons bundle).
+- CoreDNS host mode authenticates with the =system:coredns= client cert; its (Cluster)Role ships in the addons bundle.
+- etcd backend adds an etcd CA + server/client pair only when =datastore.backend = "etcd"= with non-loopback listeners (multi-node).
+
+** Generation mechanics
+
+=kubenyx-pki.service=: oneshot, =Before== every consumer, =RemainAfterExit=true=. Pure bash + openssl (from the Nix store; script is a =writeShellApplication= — shellcheck'd at build time).
+
+- Idempotency: each artifact is generated only if missing *or* if its recorded generation parameters changed. A =params.json= fingerprint (SANs, key algo, names, CIDR-derived IPs) is compared; parameter change → regenerate the affected leaf (never the CA unless =kubenyx.pki.regenerate.ca= is toggled).
+- Expiry: leaves are regenerated when within 30 days of expiry (checked at every activation — a NixOS box that rebuilds occasionally never sees an expired cert; a box that doesn't rebuild for a year is out of scope for auto-renewal and documented as such).
+- Permissions: =/var/lib/kubenyx/pki= is =0700 root=. Each component gets a narrowed copy of exactly the material it needs via systemd =LoadCredential= (components run as =DynamicUser= where possible — see control-plane.org).
+- Kubeconfigs (=admin=, =controller-manager=, =scheduler=, =kubelet=, =kube-proxy=, =coredns=) are rendered by the same oneshot into =/var/lib/kubenyx/kubeconfigs/=; server URL is =https://127.0.0.1:6443= on the control-plane node and =https://<controlPlaneEndpoint>:6443= on workers.
+
+** Multi-node distribution
+
+The control-plane node generates the CA. Worker material is *derived from the same CA*, so workers need =ca.crt=, =ca.key= is never copied to workers — instead the control-plane node pre-generates each declared node's kubelet client/server certs (node list is static config), and the operator ships =/var/lib/kubenyx/pki/nodes/<node>/= to each worker via their secret channel (sops-nix, agenix, scp — documented recipe, not Kubenyx machinery). =kubenyx.pki.dir= lets any node consume a pre-populated directory and skip generation entirely (bring-your-own-PKI).
+
+** Options sketch
+
+#+begin_src nix
+kubenyx.pki = {
+  dir = "/var/lib/kubenyx/pki";        # consume-if-populated
+  keyType = "ec-p256";                 # | "rsa-4096"
+  leafValidityDays = 365;
+  renewBeforeDays = 30;
+  extraApiserverSANs = [ ];
+  frontProxy.enable = false;           # reserved aggregation slot
+};
+#+end_src
+
+* Design Details
+
+- openssl invocations follow current KTHW shape: one CA conf, per-leaf =-subj= + =-addext subjectAltName==, =x509 -req -CA ... -CAcreateserial=.
+- ECDSA P-256 default: smaller keys, faster handshakes and generation than RSA-4096; upstream supports ECDSA everywhere (kubeadm ships it as =encryption-algorithm: ECDSA-P256=). RSA option retained for exotic clients.
+- The oneshot must complete in well under a second for the no-op path (stat + one openssl date check per cert) — it is on the boot critical path.
+- kubelet client-cert rotation (=rotateCertificates=) stays *off* in v0.1: activation-time renewal covers the declared-membership model and keeps the CSR-approval surface out of the trust story. Revisit if dynamic join lands.
+
+* Acceptance Criteria
+- First boot of the VM test produces a full PKI and a Ready cluster with no manual step.
+- Second activation with unchanged config regenerates nothing (fingerprint no-op path proven by comparing mtimes in the VM test).
+- Changing =extraApiserverSANs= regenerates only the apiserver cert and restarts only the apiserver.
+- =kubectl --kubeconfig admin.kubeconfig auth can-i '*' '*'= is =yes= via the =kubenyx:cluster-admins= binding; a certificate with no O gets =forbidden= (RBAC actually enforced, i.e. authorization-mode is =Node,RBAC=, never =AlwaysAllow=).
+
+* History
+- 2026-07-05: Drafted from control-plane/PKI research; moved to ready.

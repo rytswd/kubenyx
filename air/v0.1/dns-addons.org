@@ -1,0 +1,70 @@
+#+title: DNS & Addon Delivery
+#+state: ready
+#+FILETAGS: :network:
+
+* Summary
+
+Cluster DNS via CoreDNS with two modes — =host= (default: CoreDNS as a systemd service per node, kubeconfig-backed) and =cluster= (orthodox in-cluster Deployment) — plus the generic addon mechanism: a systemd oneshot that server-side-applies a Nix-rendered manifest directory.
+
+* Motivation
+
+Host-mode DNS completes the "zero in-cluster workloads" story: with it, a Kubenyx cluster is fully functional (API, scheduling, services, DNS) without a single image pull. It also removes the DNS bootstrap loop (DNS does not depend on kube-proxy's dataplane) and takes pod DNS off conntrack — the NodeLocal-DNSCache benefits, without the DaemonSet. AKS ships this exact pattern as "LocalDNS" today.
+
+** Goals
+- =nslookup kubernetes.default= works from a pod in both modes.
+- Host mode: DNS ready before the first pod schedules; zero images.
+- Addons: declaring a manifest in Nix and rebuilding converges the cluster — no helm, no addon-manager, no manual kubectl.
+
+** Non-Goals
+- node-local caching *in front of* cluster-mode CoreDNS (host mode already covers the latency story).
+- Addon pruning on removal in v0.1 (ApplySet-based =--prune= is the v0.2 path; v0.1 documents "removing a manifest does not delete objects").
+
+* Proposal
+
+** Host mode (default)
+
+- =coredns.service= on every node (nixpkgs =coredns= package), bound to a dummy interface =kubenyx-dns0= at =169.254.20.10= (link-local, NodeLocal-DNSCache convention) port 53.
+- Corefile (Nix-rendered): =kubernetes cluster.local in-addr.arpa ip6.arpa= plugin with =kubeconfig /var/lib/kubenyx/kubeconfigs/coredns= (client cert =system:coredns=, RBAC from the addons bundle: watch on services/endpointslices/namespaces), =fallthrough=; =forward . <host resolv upstream>=; =cache 30=; =loop=; =errors=; =ready :8181=.
+- kubelet =clusterDNS = [ "169.254.20.10" ]=.
+- No =kube-dns= Service object exists in this mode (nothing references it; documented for tools that assume its presence).
+- Readiness: notify wrapper on =:8181/ready=; =Before=kubelet.service= ordering so DNS is up before any pod can start.
+
+** Cluster mode
+
+Vendored, pinned manifest set (k3s/kubeadm-lineage): ServiceAccount, ClusterRole(+Binding), ConfigMap, Deployment (1 replica default, =coredns/coredns= image — nix-built with dockerTools and preloaded via the seedImages mechanism, so even cluster mode pulls nothing), Service =kube-dns= at the 10th service-CIDR IP (=10.96.0.10=). kubelet =clusterDNS= points at the Service IP.
+
+** Addon applier
+
+=kubenyx-addons.service=: oneshot, =After=kube-apiserver.service= (real readiness via notify), runs:
+
+#+begin_src
+kubectl --kubeconfig <admin> apply --server-side --force-conflicts \
+  -f /nix/store/<hash>-kubenyx-addons/
+#+end_src
+
+- The directory is a =linkFarm= of rendered JSON manifests; any change changes the store path, restarts the unit on switch, reconverges.
+- Built-in bundle: bootstrap RBAC (admin group binding, =system:kubelet-api-admin= binding for the apiserver identity, CoreDNS RBAC) + cluster-mode CoreDNS when enabled.
+- User surface: =kubenyx.addons.manifests.<name> = <attrset or path>=; attrsets are =builtins.toJSON='d (server validates via SSA — no client-side schema machinery in v0.1).
+- Failure mode: =Restart=on-failure=, =RestartSec=5=, so a transiently unready API converges without operator action.
+
+** Options sketch
+
+#+begin_src nix
+kubenyx.dns  = { mode = "host"; address = "169.254.20.10"; extraCorefile = ""; };
+kubenyx.addons.manifests = { };   # attrsOf (attrs | path)
+#+end_src
+
+* Design Details
+
+- Host-mode upstream forwarding uses the *real* host resolver (=/run/systemd/resolve/resolv.conf= when resolved is on) — never the 127.0.0.53 stub (loop risk is exactly what the =loop= plugin guards).
+- CoreDNS's kubernetes plugin needs list/watch from every node in host mode; at v0.1 scale (≤ ~10 nodes) the apiserver watch cost is noise.
+- The dummy interface is created by systemd-networkd/netdev or a small oneshot; NOTRACK nftables rules for :53 on that address (NodeLocal pattern) included — DNS packets skip conntrack entirely.
+- Pods with =dnsPolicy: Default= bypass cluster DNS by design; documented.
+
+* Acceptance Criteria
+- Host mode VM test: pod resolves =kubernetes.default.svc.cluster.local= and an external name, with the registry unreachable (zero-image proof).
+- Cluster mode VM test: same resolutions pass with the preloaded coredns image; =kube-dns= Service exists at the conventional IP.
+- Adding a trivial manifest via =kubenyx.addons.manifests= + rebuild creates the object; changing it converges it (SSA field ownership verified — no conflict errors on repeated applies).
+
+* History
+- 2026-07-05: Drafted from networking/addons research; moved to ready.

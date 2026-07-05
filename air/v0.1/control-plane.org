@@ -1,0 +1,101 @@
+#+title: Control Plane — apiserver, controller-manager, scheduler
+#+state: ready
+#+FILETAGS: :core:
+
+* Summary
+
+Three systemd services running the unmodified nixpkgs binaries with a lean, secure, fast-start flag set distilled from k0s's production defaults plus single-node optimizations k0s only applies in =--single= mode. Readiness is made real via the notify wrapper (architecture.org D10).
+
+* Motivation
+
+** Goals
+- apiserver serving =/readyz= 200 within ~5s of unit start on the kine path; controller-manager and scheduler active within ~2s after that (=leader-elect=false= removes the lease-acquisition wait — one of the biggest single-node wins).
+- Secure by default: =Node,RBAC=, NodeRestriction, anonymous auth off (health checks use client certs via the wrapper), TLS >= 1.2.
+- Systemd-hardened units: =DynamicUser= where possible, credentials via =LoadCredential=, strict sandboxing (control-plane components touch no host state except their sockets and the datastore).
+
+** Non-Goals
+- HA / leader election topologies (options exist; untested in v0.1).
+- Secrets encryption-at-rest config (v0.2 candidate; trivial to add, needs a key-management story first).
+- Konnectivity — never needed: every Kubenyx control-plane node runs a kubelet-reachable network (flat network assumption, like kubeadm).
+
+* Proposal
+
+** kube-apiserver.service
+
+Flags (beyond PKI/kubeconfig paths from pki.org):
+
+#+begin_src
+--secure-port=6443
+--advertise-address=<node ip>
+--allow-privileged=true
+--authorization-mode=Node,RBAC
+--enable-admission-plugins=NodeRestriction
+--anonymous-auth=false
+--profiling=false
+--tls-min-version=VersionTLS12
+--service-cluster-ip-range=<serviceCidr>
+--service-account-issuer=https://kubernetes.default.svc
+--service-account-key-file=sa.pub  --service-account-signing-key-file=sa.key
+--etcd-servers=<from datastore module>
+--event-ttl=<eventTTL, default 1h; VM tests use 10m>
+--goaway-chance=0                  # explicit: never on single apiserver
+#+end_src
+
+Deliberately *not* set (research-backed): =--runtime-config= trimming (modest win, breaks kubectl expectations; =coordination=, =discovery=, =apps=, =rbac=, =storage= groups are all load-bearing), =--enable-priority-and-fairness=false= (keep overload protection; option exposed for benchmarking), watch-cache disabling (never — protects the datastore, essential with kine).
+
+** kube-controller-manager.service
+
+#+begin_src
+--kubeconfig/--authentication-kubeconfig/--authorization-kubeconfig=<kcm kubeconfig>
+--client-ca-file=ca.crt  --root-ca-file=ca.crt
+--service-account-private-key-file=sa.key
+--cluster-signing-cert-file=ca.crt  --cluster-signing-key-file=ca.key
+--use-service-account-credentials=true
+--allocate-node-cidrs=true --cluster-cidr=<clusterCidr> --node-cidr-mask-size=24
+--service-cluster-ip-range=<serviceCidr>
+--controllers=*                    # kubenyx.controlPlane.kcm.disabledControllers appends -names
+--leader-elect=false               # single control-plane node default
+--bind-address=127.0.0.1
+--profiling=false
+--terminated-pod-gc-threshold=1000
+#+end_src
+
+=allocate-node-cidrs= stays on even though the CNI uses static subnets (networking.org): it keeps =node.spec.podCIDR= truthful for observability and third-party tooling; the declared node index and KCM's allocation are reconciled by allocating in declaration order — see networking.org for the exact mechanism and its failure mode.
+
+** kube-scheduler.service
+
+KubeSchedulerConfiguration file: kubeconfig + =leaderElect: false=. =--bind-address=127.0.0.1 --profiling=false=. Nothing else — the scheduler genuinely needs nothing else.
+
+** Supervision & ordering
+
+- All three: =Restart=always=, =RestartSec=2=, =Type=notify= via the Kubenyx readiness wrapper polling: apiserver =/readyz= (client-cert curl), KCM =:10257/healthz=, scheduler =:10259/healthz=.
+- apiserver: hard =After=<datastore>.service= + =Requires=.
+- KCM/scheduler: =After=kube-apiserver.service= (real readiness thanks to notify) — no crash-loop noise in the journal on a clean boot.
+- Startup-race mitigation (k3s#4340 class): the VM test asserts time-to-Ready with a budget that would catch a scheduler/taint backoff regression (see vm-tests.org).
+- =GOMEMLIMIT= per unit derived from =MemoryHigh= when the user sets one; off otherwise (defaults must not degrade big-machine performance).
+
+** Options sketch
+
+#+begin_src nix
+kubenyx.controlPlane = {
+  apiserver = { extraFlags = []; eventTTL = "1h"; priorityAndFairness = true; };
+  kcm       = { extraFlags = []; disabledControllers = []; };
+  scheduler = { extraFlags = []; };
+  leaderElect = false;   # flips all three for future HA
+};
+#+end_src
+
+* Design Details
+
+- Bootstrap RBAC objects (admin group binding, apiserver→kubelet =system:kubelet-api-admin= binding, CoreDNS RBAC) ship in the addons bundle (dns-addons.org), applied by the same server-side-apply oneshot — no bespoke bootstrap path.
+- Systemd hardening baseline for all three: =DynamicUser=yes=, =ProtectSystem=strict=, =ProtectHome=yes=, =PrivateTmp=yes=, =NoNewPrivileges=yes=, =RestrictAddressFamilies= =AF_UNIX AF_INET AF_INET6=, certs via =LoadCredential=. The apiserver additionally needs =AmbientCapabilities== nothing (port 6443 > 1024).
+- The readiness wrapper is a ~50-line shell script (=writeShellApplication=): exec component in background, poll health URL with curl + client cert, =systemd-notify --ready=, then =wait=; propagates signals. =NotifyAccess=all=.
+
+* Acceptance Criteria
+- =systemctl start kubenyx.target= blocks until the API is actually serving; immediately afterwards =kubectl get --raw /readyz= is 200.
+- Anonymous requests to =:6443= are rejected (401), health checks included — proving the wrapper authenticates.
+- =kubectl auth can-i list pods --as=system:anonymous= is =no=; NodeRestriction is listed in =--enable-admission-plugins= via configz.
+- Boot-to-apiserver-ready and boot-to-node-Ready timings recorded by the VM test and printed in test output (baseline tracking, see vm-tests.org).
+
+* History
+- 2026-07-05: Drafted from control-plane + fast-start research (k0s arg maps verified from source); moved to ready.

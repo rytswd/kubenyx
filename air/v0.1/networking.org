@@ -1,0 +1,87 @@
+#+title: Networking — Zero-Daemon CNI, kube-proxy, Multi-Node Routes
+#+state: ready
+#+FILETAGS: :network:
+
+* Summary
+
+Pod networking with no network daemons: a Nix-rendered =bridge=+=host-local=+=portmap= CNI conflist with deterministic per-node pod subnets, NixOS static routes for cross-node traffic (flannel host-gw datapath, zero flanneld), and kube-proxy in nftables mode for Services.
+
+* Motivation
+
+Same-node pod traffic over a plain bridge is the theoretical performance maximum — one veth pair per pod, in-kernel forwarding, no encapsulation, no policy engine, and nothing to start, pull, or wait for at boot. On a LAN, flannel host-gw's entire runtime contribution is N−1 static routes, which NixOS expresses declaratively. Cilium's genuine advantages (socket LB, policy, observability) only pay off at scales v0.1 does not target.
+
+** Goals
+- Pod-to-pod on one node at native veth speed; cross-node at host-gw speed (~ −10% of raw NIC, per published comparisons).
+- Nothing network-related pulls an image or runs an agent.
+- =kubectl expose= works: nftables kube-proxy, O(1) service dispatch, GA since 1.33, SIG-Network's recommended mode.
+- Correct-by-construction sysctls/modules (=br_netfilter= + =bridge-nf-call-iptables= — the classic silent-failure pair).
+
+** Non-Goals
+- NetworkPolicy enforcement (bridge CNI does not implement it; documented loudly; Cilium integration is the v0.2+ answer for policy users).
+- Encrypted cross-node traffic (WireGuard mesh recipe documented as a NixOS-level pattern in module docs, not v0.1 machinery).
+- IPv6 / dual-stack (option-shape must not preclude it: CIDRs are lists internally from day one).
+
+* Proposal
+
+** Addressing
+
+- =kubenyx.network.clusterCidr= default =10.244.0.0/16=.
+- =kubenyx.nodes= is an ordered attrset of declared members; node at index N owns =10.244.N.0/24= (computed in Nix; exposed read-only as =kubenyx.network.nodePodCidr=). Single-node: index 0, no ambiguity.
+- KCM =allocate-node-cidrs= allocation order is *not* guaranteed to match declaration order — so the module does NOT rely on it for the datapath (conflist + routes come from Nix). =node.spec.podCIDR= may therefore disagree with the actual subnet on multi-node clusters; recorded limitation in v0.1 (mitigation candidates for v0.2: a tiny patch-podcidr oneshot, or =--allocate-node-cidrs=false=).
+
+** CNI conflist (rendered to /etc/cni/net.d/10-kubenyx.conflist)
+
+bridge (=cni0=, isGateway, isDefaultGateway, hairpinMode) + host-local IPAM over the node's subnet + portmap. Loopback handled by containerd implicitly. =ipMasq=false= in the plugin; masquerade is done by a single Kubenyx nftables rule that NATs *only* traffic leaving =clusterCidr= for non-cluster destinations (avoids double-NAT of pod-to-pod cross-node).
+
+** CNI binaries
+
+=/opt/cni/bin= as a real directory (tmpfiles), Nix plugins symlinked in; containerd =bin_dir= points there. Rationale: DaemonSet-shipped CNIs (future Cilium option) install their binaries into the conventional path; keeping the convention costs nothing now and saves a migration later.
+
+** kube-proxy.service
+
+Stock binary, systemd service on every node, KubeProxyConfiguration:
+
+#+begin_src yaml
+mode: nftables
+clusterCIDR: <clusterCidr>
+clientConnection: { kubeconfig: <kube-proxy kubeconfig> }
+metricsBindAddress: 127.0.0.1:10249
+#+end_src
+
+=After=kube-apiserver= on the control-plane node; on workers it simply retries (Restart=always).
+
+** Cross-node routes
+
+For every peer M: =10.244.M.0/24 via <nodeM.address>= rendered into =networking.interfaces.<iface>.ipv4.routes= (or networkd). Requires L2 adjacency — asserted in module docs, not enforceable in eval.
+
+** Firewall integration
+
+The module opens exactly what the cluster needs (6443 to declared CIDRs and/or tailnet-style allowlist, 10250 between members, nothing else) via =networking.firewall= — it must work with the firewall *on* (the wiki's "disable your firewall" advice is precisely what we refuse to ship). Bridge/pod forwarding allowed via =trustedInterfaces = [ "cni0" ]= plus explicit forward rules for the cluster CIDR.
+
+** Options sketch
+
+#+begin_src nix
+kubenyx.network = {
+  clusterCidr = "10.244.0.0/16";
+  serviceCidr = "10.96.0.0/16";
+  iface = null;                  # autodetected default-route iface if null
+  kubeProxy.enable = true;       # false only sensible with external LB CNI
+  kubeProxy.extraConfig = { };
+};
+#+end_src
+
+* Design Details
+
+- nftables masquerade rule lives in its own table (=table ip kubenyx-nat=) so it composes with both the NixOS firewall and kube-proxy's tables.
+- =max_conf_num = 1= left at containerd default; our conflist sorts first (=10-=) and is the only one installed by the module.
+- hostPort support via portmap capability is kept because it costs one binary and some users' ingress story depends on it.
+- Conntrack sysctl floor (=nf_conntrack_max=) set in node-runtime.org's sysctl block; kube-proxy's own conntrack tuning left at defaults.
+
+* Acceptance Criteria
+- Single-node VM test: two pods ping each other; pod reaches its own Service VIP (hairpin proven); =kubectl expose= + curl from another pod works; NodePort reachable from the host.
+- Multi-node VM test (2 nodes): cross-node pod-to-pod works over static routes; a Service with endpoints on both nodes round-robins.
+- All of the above with =networking.firewall.enable = true=.
+- No process named flanneld/cilium/kube-router exists; =ps= audit in test.
+
+* History
+- 2026-07-05: Drafted from networking research; moved to ready.

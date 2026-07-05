@@ -1,0 +1,109 @@
+#+title: Kubenyx Architecture — Cross-Cutting Decisions
+#+state: ready
+#+FILETAGS: :core:
+
+* Summary
+
+The decision record for Kubenyx v0.1. Every module-level document in this milestone builds on the decisions below; if an implementation needs to deviate, re-plan here first.
+
+Kubenyx = stock upstream Kubernetes binaries, run as plain systemd services on NixOS, configured entirely from Nix, optimized for boot-to-Ready latency and idle footprint, importable as a single flake module.
+
+* Motivation
+
+Primary use case (user steer, 2026-07-05): a *k3s alternative for real cluster testing* — spin up honest, stock-Kubernetes clusters on NixOS machines fast, tear them down, modify them declaratively, and pay nothing for production ceremony that a test environment doesn't need. Production readiness is an explicit later goal: v0.1 must not paint us into a corner (no loopback hardcoding, PKI/HA-capable shapes), but it optimizes for the test-cluster experience first. Unlike k3s, multiple moving parts are fine — Nix's declarative composition is the tool that keeps many parts manageable, and it is also the performance lever (every part is independently swappable and tunable).
+
+** Goals
+- Drop-in: =imports = [ kubenyx.nixosModules.default ]= plus a handful of options yields a working single-node cluster after one rebuild.
+- Extreme performance: boot-to-Ready competitive with or better than k3s; minimal idle CPU wakeups and RSS; fast pod start (crun, preloaded pause, parallel pulls). Test clusters may trade durability for speed — see D13 profiles.
+- 100% stock Kubernetes: every k8s binary is the unmodified nixpkgs build; the API surface is conformant. Performance comes from wiring, not forks.
+- Multi-node capable with static, declarative cluster membership.
+- Zero imperative lifecycle: no init commands, no join scripts, no cert ceremonies; =nixos-rebuild switch= is the entire interface.
+
+** Non-Goals (v0.1)
+- HA control plane (multiple apiservers, VIPs) — design must not preclude it (no loopback-etcd hardcoding, PKI supports SAN lists), but v0.1 ships single control-plane-node topologies.
+- Dynamic node join (TLS bootstrap tokens) — Nix is the trust channel; membership is declared, not discovered.
+- Aggregation layer / metrics-server — deferred; PKI reserves a distinct front-proxy CA slot so enabling it later is a flag flip, not a redesign (avoids nixpkgs issue #196486).
+- In-cluster upgrades, cloud providers, ingress controllers, storage provisioners.
+
+* Proposal — Decision Record
+
+** D1. Stock binaries from nixpkgs, per-component overridable
+=pkgs.kubernetes= (1.36.x) built with only the components we run; kubeadm excluded from the closure. Every component package is an option (=kubenyx.packages.*=) so a dev can drop in a locally-built binary (pattern stolen from kubernix).
+
+** D2. Everything is a systemd service; no static pods
+apiserver, controller-manager, scheduler, kube-proxy, kubelet, containerd, datastore, CoreDNS all run as systemd units. kubelet runs with =staticPodPath= empty — the static-pod watcher is disabled entirely. This is the core performance advantage over kubeadm: the control plane needs zero container images and zero pulls; binaries come from the Nix store.
+
+** D3. Declarative offline PKI, generated on-host at activation
+A first-boot (and idempotent thereafter) oneshot generates: cluster CA, apiserver serving cert, per-identity client certs, SA keypair, kubelet serving certs — KTHW-style openssl generation, no CA daemon, no network issuance. Distinct front-proxy CA slot reserved (empty until aggregation is enabled). Multi-node: the control-plane node's generated CA is distributed via the user's secret channel (sops-nix/agenix/manual) through a documented =kubenyx.pki.dir= interface; Kubenyx never runs a network CA. Details: [[file:pki.org]].
+
+** D4. Datastore is selectable; kine+sqlite is the single-node default
+=kubenyx.datastore.backend = "kine-sqlite" (default) | "etcd"=. kine speaks the etcd v3 API to an *unmodified* kube-apiserver over a unix socket (k0s does exactly this) and removes raft + WAL-fsync startup cost — the largest single step toward k3s-class startup while staying stock. etcd (3.6, tuned single-node flags) remains first-class for multi-node and for users who want the boring choice. Details: [[file:datastore.org]].
+
+** D5. containerd 2.x + crun, layered on =virtualisation.containerd=
+Reuse the nixpkgs containerd module; inject Kubenyx settings: crun as default runtime via =io.containerd.runc.v2= + =BinaryName=, systemd cgroups, overlayfs snapshotter, NRI disabled, nix-built pause image preloaded with =ctr image import= and pinned. Details: [[file:node-runtime.org]].
+
+** D6. Zero-daemon CNI with deterministic addressing
+Nix renders a =bridge= + =host-local= + =portmap= conflist per node; node N gets pod CIDR =10.244.N.0/24= (derived from declared node index, not allocated at runtime). Multi-node pod routing = NixOS static routes (flannel host-gw datapath with zero daemons). No CNI DaemonSet, no network agent, nothing to pull or wait for. Details: [[file:networking.org]].
+
+** D7. kube-proxy in nftables mode, as a systemd service
+GA since 1.33, O(1) service dispatch, SIG-Network's recommended replacement for iptables/IPVS. Runs on every node from a KubeProxyConfiguration file. Details: [[file:networking.org]].
+
+** D8. CoreDNS runs on the host by default
+=kubenyx.dns.mode = "host" (default) | "cluster"=. Host mode: CoreDNS as a systemd service with a kubeconfig-backed =kubernetes= plugin, bound to a link-local dummy address on every node (NodeLocal-DNSCache pattern); kubelet's =clusterDNS= points at it. Result: zero in-cluster workloads for a functioning cluster, no DNS bootstrap loop, no DNS conntrack. Cluster mode renders the orthodox Deployment+Service for users who want it. Details: [[file:dns-addons.org]].
+
+** D9. Addons = server-side apply of a Nix-rendered manifest directory
+A systemd oneshot runs =kubectl apply --server-side --force-conflicts= against a Nix store directory of rendered manifests once =/readyz= is up. The unit's store path changes when manifests change, so =nixos-rebuild switch= reconverges automatically. No addon-manager, no helm. Manifests are authored as Nix attrsets (=builtins.toJSON=).
+
+** D10. Readiness gating via a tiny notify wrapper
+k8s components do not support sd_notify (kubernetes#8311). Kubenyx ships a small wrapper: =Type=notify=, wrapper execs the component, polls its health endpoint (=/readyz= or =/healthz=), then =READY=1=. Datastore → apiserver is a hard =After==; everything else gets correct ordered startup without crash-loop noise, and =systemctl start kubenyx.target= means "cluster is actually ready". kubelet additionally uses its native systemd watchdog (1.32+, =WatchdogSec=).
+
+** D11. Performance defaults are on by default
+Single-node: =leader-elect=false= (removes multi-second lease waits), =profiling=false=, NodeRestriction admission, tuned event TTL, parallel image pulls, no swap for pods, tuned sysctls, GOMEMLIMIT where it measurably helps (see [[file:../context/research/fast-start.md]]). Every tuning default is an option with the stock value documented, so users can revert any of them.
+
+** D12. Performance profiles
+=kubenyx.profile = "testing" (default) | "balanced"=. The profile only moves defaults; every underlying option remains individually settable.
+- =testing= (the primary use case): kine-sqlite, =leader-elect=false=, =event-ttl=10m=, aggressive restart timings, optional =datastore.volatile= (state on tmpfs — cluster is rebuilt from Nix anyway, and a test cluster's state is disposable by definition), relaxed PodSecurity defaults.
+- =balanced=: durable datastore defaults (etcd or kine on disk with fsync), stock event TTL, PodSecurity on — the base camp for the future production milestone.
+Security posture that costs nothing stays on in *both* profiles (=Node,RBAC=, NodeRestriction, no anonymous auth, TLS everywhere): a test cluster with =AlwaysAllow= would invalidate the testing itself.
+
+** D13. Flake shape
+Single flake, =nixpkgs= as the only input. Outputs: =nixosModules.default= (the drop-in), =nixosModules.kubenyx= (alias), =packages= (pause image, readiness wrapper, kubeconfig helper), =checks= (VM tests), =templates= (consumer quick-start). Public option namespace: =kubenyx.*= — small, task-oriented surface (target: < 40 options), with =extraFlags= / =settings= escape hatches per component. Details: [[file:flake-packaging.org]].
+
+* Design Details
+
+** Component/service topology (single node)
+
+#+begin_example
+  kubenyx.target
+  ├── kine.service            (or etcd.service)         [datastore]
+  ├── kube-apiserver.service  After=kine  Type=notify(/readyz)
+  ├── kube-controller-manager.service  After=apiserver
+  ├── kube-scheduler.service           After=apiserver
+  ├── containerd.service      (independent start)
+  ├── kubelet.service         After=containerd (+ pause preload PreStart)
+  ├── kube-proxy.service      After=apiserver
+  ├── coredns.service         (host mode; independent, kubeconfig-backed)
+  └── kubenyx-addons.service  oneshot, After=apiserver readiness
+#+end_example
+
+Startup is deliberately wide: datastore, containerd, kubelet and CoreDNS all start in parallel with the control plane; only the apiserver has a hard datastore dependency.
+
+** Network layout defaults
+- Service CIDR =10.96.0.0/16= (apiserver ClusterIP =10.96.0.1=, cluster DNS =10.96.0.10=)
+- Cluster (pod) CIDR =10.244.0.0/16=; node N owns =10.244.N.0/24=
+- Cluster domain =cluster.local=
+
+** Filesystem layout
+- =/var/lib/kubenyx/pki/= — generated CAs, certs, keys (0700, root)
+- =/var/lib/kubenyx/kubeconfigs/= — component + admin kubeconfigs
+- =/var/lib/kine/= or =/var/lib/etcd/= — datastore state
+- =/etc/cni/net.d/= — rendered conflist; =/opt/cni/bin/= — plugin symlinks
+- =/run/kubenyx/= — sockets, runtime state
+
+* Acceptance Criteria
+- All module documents in this milestone reference these decisions rather than restating them, and none contradicts them.
+- Any deviation discovered during implementation is recorded here under History → Design Divergence before the deviating code lands.
+
+* History
+- 2026-07-05: Drafted from the five-report research pass; moved to ready. Decisions D1–D12 recorded.
+- 2026-07-05: User steer folded in — primary use case is a k3s alternative for real cluster testing; production readiness deferred to a later milestone. Added D12 performance profiles (=testing= default); flake-shape decision renumbered to D13.

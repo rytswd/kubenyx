@@ -1,0 +1,40 @@
+#+title: v0.1 — Kubenyx: Drop-in Stock Kubernetes for NixOS
+
+* Purpose
+
+This directory holds the v0.1 milestone: a bootable, single-node-first, multi-node-capable Kubernetes cluster built from *stock upstream binaries* (nixpkgs =kubernetes= 1.36.x), wired as plain systemd services by NixOS modules, delivered as a Nix flake. No kubeadm, no k3s/k0s, no =services.kubernetes= from nixpkgs.
+
+This OVERVIEW is a navigation aid only — it carries no acceptance criteria and is excluded from =airctl status= counts.
+
+* Shared Motivation
+
+The nixpkgs =services.kubernetes= module is effectively unmaintained and architecturally broken (networked cfssl CA with token auth, single flat CA that makes the aggregation layer impossible, single-master by construction, imperative join flow, kubectl-loop addon manager — see [[file:../context/research/prior-art.md][research: prior art]] for the full evidence). k3s/k0s are fast but are patched/bundled distributions, not stock Kubernetes. Kubenyx fills the empty niche: a declarative, stock-binary, performance-first distribution where =nixos-rebuild switch= is the only lifecycle command.
+
+Performance thesis: stock Kubernetes is slow to start mostly because of how it is *deployed* (image pulls, static pods, raft/fsync, leader-election waits, un-tuned defaults), not because of the binaries themselves. Nix store binaries + systemd + tuned flags + a sqlite-backed datastore option close most of the gap to k3s. See [[file:../context/research/fast-start.md][research: fast start]].
+
+* Document Map
+
+Read =architecture.org= first — it records the cross-cutting decisions every other document builds on.
+
+| Document              | Scope                                                        |
+|-----------------------+--------------------------------------------------------------|
+| [[file:architecture.org][architecture.org]]      | Cross-cutting design decisions (ADR-style)                   |
+| [[file:pki.org][pki.org]]               | Declarative PKI: CAs, leaf certs, kubeconfigs, rotation      |
+| [[file:datastore.org][datastore.org]]         | Datastore module: etcd and kine/sqlite backends              |
+| [[file:control-plane.org][control-plane.org]]     | apiserver / controller-manager / scheduler systemd services  |
+| [[file:node-runtime.org][node-runtime.org]]      | containerd + crun, kubelet, sysctls, pause image preload     |
+| [[file:networking.org][networking.org]]        | Zero-daemon CNI, kube-proxy (nftables), multi-node routes    |
+| [[file:dns-addons.org][dns-addons.org]]        | CoreDNS (host-mode default), declarative addon applier       |
+| [[file:flake-packaging.org][flake-packaging.org]]   | Flake outputs, module layout, public option surface          |
+| [[file:vm-tests.org][vm-tests.org]]          | NixOS VM test suite proving the end-to-end flows             |
+
+Research reference (raw findings, kept verbatim): =air/context/research/{prior-art,control-plane-pki,runtime-node,networking-addons,fast-start}.md=
+
+* Implementation Order
+
+1. =flake-packaging= (skeleton) → =pki= → =datastore= → =control-plane=
+2. =node-runtime= → =networking= → =dns-addons=
+3. =vm-tests= throughout; a doc is only =complete= when its VM test passes.
+
+* History
+- 2026-07-05: Milestone created after the initial research pass.
