@@ -46,6 +46,7 @@ in
   };
 
   testScript = ''
+    import re
     import time
 
     def bench(vm, ready_cmd, label):
@@ -53,9 +54,18 @@ in
         vm.start()
         vm.wait_until_succeeds(ready_cmd, timeout=3600)
         elapsed = time.time() - t0
+        # Primary metric: the identical kubelet line both distros log, on the
+        # in-VM monotonic clock — kubectl polling under TCG adds ~1min of
+        # driver-side noise that would otherwise drown the signal.
+        journal = vm.succeed(
+            "journalctl --no-pager -o short-monotonic | grep -a 'just became ready' | head -1"
+        )
+        m = re.search(r"\[\s*([0-9.]+)\]", journal)
+        in_vm = float(m.group(1)) if m else elapsed
+        print(f"KUBENYX-METRIC {label}_node_ready_invm={in_vm:.1f}s")
         print(f"KUBENYX-METRIC {label}_node_ready={elapsed:.1f}s")
         vm.shutdown()
-        return elapsed
+        return in_vm
 
     t_k3s = bench(
         k3svm,
