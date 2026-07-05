@@ -1,0 +1,173 @@
+# Addon delivery (air/v0.1/dns-addons.org): server-side apply of a
+# Nix-rendered manifest directory. The unit's store path changes whenever a
+# manifest changes, so `nixos-rebuild switch` reconverges the cluster.
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+let
+  cfg = config.kubenyx;
+  kc = cfg.internal.kubeconfigDir;
+
+  # Bootstrap RBAC: the revocable admin group, apiserver->kubelet access,
+  # and CoreDNS's read permissions. Applied with the system:masters
+  # bootstrap identity — the only place it is ever used.
+  builtinManifests = lib.optionalAttrs (!cfg.controlPlane.kcm.useServiceAccountCredentials) {
+    # With the shared kcm identity (testing profile), every controller acts
+    # as system:kube-controller-manager, whose built-in role is scoped for
+    # the per-controller-SA mode. cluster-admin here grants nothing kcm
+    # doesn't already hold — it possesses the cluster CA signing key.
+    "rbac-kcm-shared-identity" = {
+      apiVersion = "rbac.authorization.k8s.io/v1";
+      kind = "ClusterRoleBinding";
+      metadata.name = "kubenyx:kcm-shared-identity";
+      roleRef = {
+        apiGroup = "rbac.authorization.k8s.io";
+        kind = "ClusterRole";
+        name = "cluster-admin";
+      };
+      subjects = [
+        {
+          apiGroup = "rbac.authorization.k8s.io";
+          kind = "User";
+          name = "system:kube-controller-manager";
+        }
+      ];
+    };
+  }
+  // {
+    "rbac-admin" = {
+      apiVersion = "rbac.authorization.k8s.io/v1";
+      kind = "ClusterRoleBinding";
+      metadata.name = "kubenyx:cluster-admins";
+      roleRef = {
+        apiGroup = "rbac.authorization.k8s.io";
+        kind = "ClusterRole";
+        name = "cluster-admin";
+      };
+      subjects = [
+        {
+          apiGroup = "rbac.authorization.k8s.io";
+          kind = "Group";
+          name = "kubenyx:cluster-admins";
+        }
+      ];
+    };
+    "rbac-apiserver-kubelet" = {
+      apiVersion = "rbac.authorization.k8s.io/v1";
+      kind = "ClusterRoleBinding";
+      metadata.name = "kubenyx:apiserver-kubelet";
+      roleRef = {
+        apiGroup = "rbac.authorization.k8s.io";
+        kind = "ClusterRole";
+        name = "system:kubelet-api-admin";
+      };
+      subjects = [
+        {
+          apiGroup = "rbac.authorization.k8s.io";
+          kind = "User";
+          name = "kube-apiserver-kubelet-client";
+        }
+      ];
+    };
+    "rbac-coredns-role" = {
+      apiVersion = "rbac.authorization.k8s.io/v1";
+      kind = "ClusterRole";
+      metadata.name = "kubenyx:coredns";
+      rules = [
+        {
+          apiGroups = [ "" ];
+          resources = [
+            "services"
+            "namespaces"
+          ];
+          verbs = [
+            "list"
+            "watch"
+          ];
+        }
+        {
+          apiGroups = [ "discovery.k8s.io" ];
+          resources = [ "endpointslices" ];
+          verbs = [
+            "list"
+            "watch"
+          ];
+        }
+      ];
+    };
+    "rbac-coredns-binding" = {
+      apiVersion = "rbac.authorization.k8s.io/v1";
+      kind = "ClusterRoleBinding";
+      metadata.name = "kubenyx:coredns";
+      roleRef = {
+        apiGroup = "rbac.authorization.k8s.io";
+        kind = "ClusterRole";
+        name = "kubenyx:coredns";
+      };
+      subjects = [
+        {
+          apiGroup = "rbac.authorization.k8s.io";
+          kind = "User";
+          name = "system:coredns";
+        }
+      ];
+    };
+  };
+
+  renderManifest = name: m: if lib.isPath m || lib.isDerivation m then m else pkgs.writeText "${name}.json" (builtins.toJSON m);
+
+  manifestDir = pkgs.linkFarm "kubenyx-addons" (
+    lib.mapAttrsToList (name: m: {
+      name = "${name}.json";
+      path = renderManifest name m;
+    }) (builtinManifests // cfg.addons.manifests)
+  );
+
+  applyScript = pkgs.writeShellApplication {
+    name = "kubenyx-apply-addons";
+    runtimeInputs = [ cfg.packages.kubectl ];
+    text = ''
+      export KUBECONFIG=${kc}/bootstrap.kubeconfig
+      for attempt in 1 2 3 4 5; do
+        if kubectl apply --server-side --force-conflicts -f ${manifestDir}/; then
+          exit 0
+        fi
+        echo "kubenyx-addons: apply failed (attempt $attempt), retrying" >&2
+        sleep 2
+      done
+      exit 1
+    '';
+  };
+in
+{
+  options.kubenyx.addons.manifests = lib.mkOption {
+    type = lib.types.attrsOf (
+      lib.types.oneOf [
+        (pkgs.formats.json { }).type
+        lib.types.path
+      ]
+    );
+    default = { };
+    example = lib.literalExpression ''
+      { my-app = { apiVersion = "v1"; kind = "Namespace"; metadata.name = "my-app"; }; }
+    '';
+    description = "Manifests (attrsets or rendered files) server-side-applied after the API is ready.";
+  };
+
+  config = lib.mkIf (cfg.enable && cfg.role == "server") {
+    systemd.services.kubenyx-addons = {
+      description = "Kubenyx addon manifests (server-side apply)";
+      wantedBy = [ "kubenyx.target" ];
+      after = [ "kube-apiserver.service" ];
+      requires = [ "kube-apiserver.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = lib.getExe applyScript;
+      };
+    };
+  };
+}

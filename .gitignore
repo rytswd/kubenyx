@@ -1,0 +1,6 @@
+# Test/benchmark run artifacts (local only)
+test-run*.log
+bench-vm-*.log
+.result-*
+result-nb
+.test-tmp/
