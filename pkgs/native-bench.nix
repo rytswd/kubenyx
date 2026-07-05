@@ -58,6 +58,15 @@ writeShellApplication {
         -CAcreateserial -days 365 -extfile "$pki/$name.ext" -out "$pki/$name.crt" 2>/dev/null
     }
     cert apiserver "/CN=kube-apiserver" serverAuth "DNS:localhost,DNS:kubernetes,IP:127.0.0.1,IP:10.96.0.1"
+    # Front-proxy CA + client, matching modules/pki.nix (the real boot pays
+    # for these, so the bench must too).
+    genkey "$pki/front-proxy-ca.key"
+    openssl req -x509 -new -key "$pki/front-proxy-ca.key" -days 3650 -subj "/CN=fp-ca" -out "$pki/front-proxy-ca.crt"
+    genkey "$pki/front-proxy-client.key"
+    openssl req -new -key "$pki/front-proxy-client.key" -subj "/CN=front-proxy-client" -out "$pki/fpc.csr"
+    printf 'extendedKeyUsage=clientAuth\n' > "$pki/fpc.ext"
+    openssl x509 -req -in "$pki/fpc.csr" -CA "$pki/front-proxy-ca.crt" -CAkey "$pki/front-proxy-ca.key" \
+      -set_serial 0x1 -days 365 -extfile "$pki/fpc.ext" -out "$pki/front-proxy-client.crt" 2>/dev/null
     cert admin "/O=system:masters/CN=bench-admin" clientAuth ""
     cert kcm "/CN=system:kube-controller-manager" clientAuth ""
     cert sched "/CN=system:kube-scheduler" clientAuth ""
@@ -100,6 +109,14 @@ writeShellApplication {
       --enable-admission-plugins=NodeRestriction
       --anonymous-auth=false
       --profiling=false
+      --tls-min-version=VersionTLS12
+      --requestheader-client-ca-file="$pki/front-proxy-ca.crt"
+      --requestheader-allowed-names=front-proxy-client
+      --requestheader-username-headers=X-Remote-User
+      --requestheader-group-headers=X-Remote-Group
+      --requestheader-extra-headers-prefix=X-Remote-Extra-
+      --proxy-client-cert-file="$pki/front-proxy-client.crt"
+      --proxy-client-key-file="$pki/front-proxy-client.key"
       --client-ca-file="$pki/ca.crt"
       --tls-cert-file="$pki/apiserver.crt" --tls-private-key-file="$pki/apiserver.key"
       --kubelet-client-certificate="$pki/kubelet-client.crt"
@@ -140,7 +157,7 @@ writeShellApplication {
       --service-account-private-key-file="$pki/sa.key" \
       --cluster-signing-cert-file="$pki/ca.crt" --cluster-signing-key-file="$pki/ca.key" \
       --use-service-account-credentials=false \
-      --allocate-node-cidrs=true --cluster-cidr=10.244.0.0/16 \
+      --allocate-node-cidrs=false \
       --service-cluster-ip-range=10.96.0.0/16 \
       --controllers='*' --leader-elect=false \
       --bind-address=127.0.0.1 --secure-port=20257 --profiling=false \

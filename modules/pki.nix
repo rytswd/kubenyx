@@ -163,6 +163,17 @@ let
 
       cert_wait
 
+      # Package a one-stop credential directory per remote worker: the
+      # operator ships $pki/nodes/<name>/ to that agent's /var/lib/kubenyx/pki
+      # over their own secret channel. The CA *key* never leaves this node.
+      for d in "$pki"/nodes/*/; do
+        n=$(basename "$d")
+        if [ "$n" != "$node_name" ]; then
+          cp -f "$pki/ca.crt" "$pki/kube-proxy.crt" "$pki/kube-proxy.key" \
+                "$pki/coredns.crt" "$pki/coredns.key" "$d"
+        fi
+      done
+
       # Kubeconfigs — regenerated only when the underlying cert or the
       # embedded server URL changed. Rendered with a heredoc, not kubectl:
       # forking a 50MB Go binary 4x per kubeconfig is measurable boot time.
@@ -216,6 +227,80 @@ let
       cert_wait
     '';
   };
+  agentScript = pkgs.writeShellApplication {
+    name = "kubenyx-pki-agent";
+    runtimeInputs = [ pkgs.openssl ];
+    text = ''
+      umask 077
+      node_name=${lib.escapeShellArg cfg.nodeName}
+      pki=${lib.escapeShellArg pki}
+      kc=${lib.escapeShellArg kcDir}
+      mkdir -p "$pki" "$kc"
+      chmod 0700 "$pki" "$kc"
+
+      # The operator ships this node's credential directory (generated on
+      # the control-plane node under $pki/nodes/<name>/) to $pki here. This
+      # unit must NOT block boot waiting for it: it exits cleanly when
+      # material is missing and a path unit re-runs it on arrival; consumers
+      # restart-loop until their kubeconfigs exist.
+      needed=(ca.crt kubelet.crt kubelet.key kubelet-server.crt kubelet-server.key \
+              kube-proxy.crt kube-proxy.key coredns.crt coredns.key)
+      missing=""
+      for f in "''${needed[@]}"; do
+        [ -s "$pki/$f" ] || missing="$missing $f"
+      done
+      if [ -n "$missing" ]; then
+        echo "kubenyx-pki-agent: waiting for PKI material in $pki (missing:$missing)" >&2
+        echo "kubenyx-pki-agent: on the server, ship /var/lib/kubenyx/pki/nodes/$node_name/ here" >&2
+        exit 0
+      fi
+      # Shipped transports rarely preserve modes; enforce ours.
+      chmod 0600 "$pki"/*.crt "$pki"/*.key
+      # Renewal is re-shipping (the server re-issues within its window and
+      # the path unit re-renders here); surface approaching expiry loudly.
+      if ! openssl x509 -checkend $((14 * 86400)) -noout -in "$pki/kubelet.crt" 2>/dev/null; then
+        echo "kubenyx-pki-agent: WARNING: kubelet.crt expires within 14 days — re-ship this node's credentials from the server" >&2
+      fi
+
+      write_kubeconfig() {
+        local out=$1 user=$2 crt=$3 key=$4
+        if [ -s "$out" ] && [ "$out" -nt "$pki/$crt" ] && [ "$out" -nt "$pki/ca.crt" ] \
+           && grep -q "server: ${cfg.internal.apiserverUrl}$" "$out"; then
+          return 0
+        fi
+        local ca64 crt64 key64
+        ca64=$(openssl base64 -A < "$pki/ca.crt")
+        crt64=$(openssl base64 -A < "$pki/$crt")
+        key64=$(openssl base64 -A < "$pki/$key")
+        cat > "$out.tmp" <<EOF
+      apiVersion: v1
+      kind: Config
+      clusters:
+      - name: kubenyx
+        cluster:
+          certificate-authority-data: $ca64
+          server: ${cfg.internal.apiserverUrl}
+      users:
+      - name: $user
+        user:
+          client-certificate-data: $crt64
+          client-key-data: $key64
+      contexts:
+      - name: default
+        context:
+          cluster: kubenyx
+          user: $user
+      current-context: default
+      EOF
+        chmod 0600 "$out.tmp"
+        mv "$out.tmp" "$out"
+      }
+
+      write_kubeconfig "$kc/kubelet.kubeconfig" "system:node:$node_name" kubelet.crt kubelet.key
+      write_kubeconfig "$kc/kube-proxy.kubeconfig" system:kube-proxy kube-proxy.crt kube-proxy.key
+      write_kubeconfig "$kc/coredns.kubeconfig" system:coredns coredns.crt coredns.key
+    '';
+  };
 in
 {
   options.kubenyx.pki = {
@@ -240,9 +325,10 @@ in
     };
   };
 
-  config = lib.mkIf (cfg.enable && cfg.role == "server") {
+  config = lib.mkIf cfg.enable {
     systemd.services.kubenyx-pki = {
-      description = "Kubenyx PKI generation";
+      description =
+        if cfg.role == "server" then "Kubenyx PKI generation" else "Kubenyx PKI (agent material)";
       wantedBy = [ "kubenyx.target" ];
       # network-online: node-IP autodetection must see the real address on
       # the very first boot, or the apiserver/kubelet SANs are wrong and the
@@ -254,8 +340,21 @@ in
       wants = [ "network-online.target" ];
       serviceConfig = {
         Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = lib.getExe pkiScript;
+        # Agents: RemainAfterExit=false so the path unit below can re-trigger
+        # the renderer when credential material arrives or is re-shipped.
+        RemainAfterExit = cfg.role == "server";
+        TimeoutStartSec = 300;
+        ExecStart = lib.getExe (if cfg.role == "server" then pkiScript else agentScript);
+      };
+    };
+
+    # Agents: re-render kubeconfigs whenever the shipped credential
+    # directory changes — first arrival and every renewal re-ship.
+    systemd.paths.kubenyx-pki = lib.mkIf (cfg.role == "agent") {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = {
+        PathModified = pki;
+        Unit = "kubenyx-pki.service";
       };
     };
   };

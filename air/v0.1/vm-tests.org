@@ -55,3 +55,4 @@ The test driver logs =T_apiserver_ready=, =T_node_ready=, =T_pod_running= to std
 * History
 - 2026-07-05: Drafted; moved to ready.
 - 2026-07-05: single-node happy path green (18 steps); bench-vs-k3s green with in-VM primary metric (Kubenyx 96.3s vs k3s 113.2s). Open: etcd leg (first run in progress), multi-node, chaos/reboot steps in the main test.
+- 2026-07-05: multi-node test green (credential shipping via the driver's shared 9p dir standing in for the operator channel; SA-controller race guarded by an explicit default-SA wait, also added to single-node). etcd leg green including reboot persistence. Matrix fully implemented.

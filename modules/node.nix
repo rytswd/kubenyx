@@ -13,6 +13,10 @@ let
   pki = cfg.internal.pkiDir;
   kc = cfg.internal.kubeconfigDir;
 
+  # Servers keep per-node material under nodes/<name>/; an agent's shipped
+  # credential dir is flat at the PKI root.
+  kubeletPkiDir = if cfg.role == "server" then "${pki}/nodes/${cfg.nodeName}" else pki;
+
   pauseImage = pkgs.callPackage ../pkgs/pause-image.nix { kubernetes = cfg.packages.kubernetes; };
   pauseRef = "kubenyx.local/pause:1";
 
@@ -31,8 +35,8 @@ let
       x509.clientCAFile = "${pki}/ca.crt";
     };
     authorization.mode = "Webhook";
-    tlsCertFile = "${pki}/nodes/${cfg.nodeName}/kubelet-server.crt";
-    tlsPrivateKeyFile = "${pki}/nodes/${cfg.nodeName}/kubelet-server.key";
+    tlsCertFile = "${kubeletPkiDir}/kubelet-server.crt";
+    tlsPrivateKeyFile = "${kubeletPkiDir}/kubelet-server.key";
     rotateCertificates = false; # activation-time renewal instead (pki.org)
     serializeImagePulls = false;
     maxParallelImagePulls = 10;
@@ -171,7 +175,8 @@ in
       after = [
         "containerd.service"
         "network-online.target"
-      ] ++ lib.optional (cfg.role == "server") "kubenyx-pki.service";
+        "kubenyx-pki.service"
+      ];
       wants = [ "network-online.target" ];
       # kubelet shells out constantly; a thin PATH is the #1 hand-rolled
       # kubelet failure on NixOS.

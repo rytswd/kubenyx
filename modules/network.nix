@@ -155,7 +155,7 @@ in
     systemd.services.kube-proxy = lib.mkIf net.kubeProxy.enable {
       description = "Kubernetes service proxy (nftables)";
       wantedBy = [ "kubenyx.target" ];
-      after = lib.optional (cfg.role == "server") "kube-apiserver.service";
+      after = [ "kubenyx-pki.service" ] ++ lib.optional (cfg.role == "server") "kube-apiserver.service";
       path = with pkgs; [
         nftables
         conntrack-tools

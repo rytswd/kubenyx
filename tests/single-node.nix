@@ -62,6 +62,8 @@ in
     assert before == after, f"PKI regenerated on no-op activation: {before} vs {after}"
 
     # --- workload (zero registry access) -------------------------------------
+    # Pod admission needs the default ServiceAccount, created async by kcm.
+    machine.wait_until_succeeds("kubectl -n default get serviceaccount default", timeout=600)
     machine.succeed("kubectl run web --image=kubenyx.local/test:1 --restart=Never")
     machine.wait_until_succeeds(
         "kubectl get pod web -o jsonpath='{.status.phase}' | grep -q Running", timeout=900

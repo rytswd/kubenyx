@@ -49,3 +49,10 @@
 - EventedPLEG stays off (open correctness bugs through 1.34).
 - containerd settings are TOML schema v2 in the nixpkgs module; v3 keys
   merge oddly with the module defaults — stay on v2 or mkForce.
+- kubelet 1.36 spams "Unable to register mirror pod because node is not
+  registered yet" at 10/s until node registration — upstream
+  `fastStaticPodsRegistration` polls unconditionally even with zero
+  static pods. Harmless noise; do not chase it.
+- NixOS test driver assigns VLAN IPs by *alphabetical* node order
+  (agent=.1, server=.2 in the multi-node test) — declared kubenyx node
+  addresses must match or components dial the wrong machine.

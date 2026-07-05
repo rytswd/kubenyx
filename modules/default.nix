@@ -173,10 +173,8 @@ in
         message = "kubenyx: nodeName ${cfg.nodeName} is not declared in kubenyx.nodes";
       }
       {
-        # v0.1 ships server topologies only; the agent consumes PKI material
-        # no module distributes yet. Fail at eval, not at 3am on a worker.
-        assertion = cfg.role != "agent";
-        message = "kubenyx: role = \"agent\" is not implemented yet (v0.1 is single/control-plane-node; multi-node lands with the worker credential distribution story — see air/v0.1/networking.org)";
+        assertion = cfg.role != "agent" || cfg.controlPlaneEndpoint != null;
+        message = "kubenyx: role = \"agent\" requires controlPlaneEndpoint (the server address agents dial)";
       }
       {
         assertion =
