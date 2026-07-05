@@ -1,5 +1,5 @@
 #+title: Kubenyx Architecture — Cross-Cutting Decisions
-#+state: ready
+#+state: complete
 #+FILETAGS: :core:
 
 * Summary

@@ -1,5 +1,5 @@
 #+title: Flake Shape & Module Layout
-#+state: ready
+#+state: work-in-progress
 #+FILETAGS: :packaging:
 
 * Summary
@@ -96,3 +96,4 @@ kubenyx = {
 
 * History
 - 2026-07-05: Drafted; moved to ready.
+- 2026-07-05: Implemented (flake.nix + modules/ + templates/). Divergences: kubernetes package kept with default components — the nixpkgs installPhase hard-requires kubeadm for shell completions, so trimming needs an overridden installPhase (v0.2 cleanup); options.nix not split out yet; closure report and options-doc checks not wired.

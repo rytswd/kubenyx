@@ -1,5 +1,5 @@
 #+title: DNS & Addon Delivery
-#+state: ready
+#+state: work-in-progress
 #+FILETAGS: :network:
 
 * Summary
@@ -27,7 +27,7 @@ Host-mode DNS completes the "zero in-cluster workloads" story: with it, a Kubeny
 - Corefile (Nix-rendered): =kubernetes cluster.local in-addr.arpa ip6.arpa= plugin with =kubeconfig /var/lib/kubenyx/kubeconfigs/coredns= (client cert =system:coredns=, RBAC from the addons bundle: watch on services/endpointslices/namespaces), =fallthrough=; =forward . <host resolv upstream>=; =cache 30=; =loop=; =errors=; =ready :8181=.
 - kubelet =clusterDNS = [ "169.254.20.10" ]=.
 - No =kube-dns= Service object exists in this mode (nothing references it; documented for tools that assume its presence).
-- Readiness: notify wrapper on =:8181/ready=; =Before=kubelet.service= ordering so DNS is up before any pod can start.
+- Readiness: notify wrapper on =:8181/ready=. Deliberately NOT ordered before kubelet (divergence, see History): CoreDNS's own readiness waits on the addons RBAC chain, so ordering kubelet after it serialized the whole boot; node registration doesn't need DNS and DNS converges long before the first pod runs.
 
 ** Cluster mode
 
@@ -68,3 +68,6 @@ kubenyx.addons.manifests = { };   # attrsOf (attrs | path)
 
 * History
 - 2026-07-05: Drafted from networking/addons research; moved to ready.
+- 2026-07-05: Implementation: dropped the =Before=kubelet= ordering (measured boot serialization behind the addons RBAC chain); host mode verified end-to-end in the single-node VM test (zero images, pod resolution of cluster names with the registry unreachable). Cluster mode not yet implemented — v0.1 ships host mode; the matrix row for cluster DNS moves to the etcd test once built.
+- 2026-07-05: The addon applier is also the delivery path for the kcm shared-identity binding (control-plane.org History) — applied with the bootstrap identity immediately after first readyz.
+- 2026-07-05: Implemented (modules/dns.nix, modules/addons.nix); host mode + applier verified in VM test. Open: cluster mode rendering.

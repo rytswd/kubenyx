@@ -1,5 +1,5 @@
 #+title: Control Plane — apiserver, controller-manager, scheduler
-#+state: ready
+#+state: work-in-progress
 #+FILETAGS: :core:
 
 * Summary
@@ -101,3 +101,4 @@ kubenyx.controlPlane = {
 - 2026-07-05: Drafted from control-plane + fast-start research (k0s arg maps verified from source); moved to ready.
 - 2026-07-05: Measured on real hardware (native bench, 64-core box): =--use-service-account-credentials=true= costs +4.9s of serial per-controller token minting at every kcm start (control-plane total 8.1s -> 3.2s with it off). New option =kcm.useServiceAccountCredentials= defaults to false under the testing profile, true under balanced.
 - 2026-07-05: apiserver gained the requestheader/front-proxy flag block by default (see pki.org History). Native baseline numbers: apiserver /readyz cold 2.35s, warm 1.63s; kcm+scheduler healthy +0.2s; first end-to-end write (default SA in a fresh namespace) 3.1s total. Remaining cold-start tail is upstream post-start-hook poll intervals (~1s granularity), not flag-tunable.
+- 2026-07-05: Implemented (modules/control-plane.nix) and verified: notify-wrapper readiness, anonymous 401, boot timings recorded. Post-review: scheduler loopback+profiling-off+authn/z kubeconfigs, SuccessExitStatus=143 on wrapper units, healthz probe identity. Open ACs: NodeRestriction configz assertion.

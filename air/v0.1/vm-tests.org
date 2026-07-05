@@ -1,5 +1,5 @@
 #+title: NixOS VM Test Suite
-#+state: ready
+#+state: work-in-progress
 #+FILETAGS: :testing:
 
 * Summary
@@ -54,3 +54,4 @@ The test driver logs =T_apiserver_ready=, =T_node_ready=, =T_pod_running= to std
 
 * History
 - 2026-07-05: Drafted; moved to ready.
+- 2026-07-05: single-node happy path green (18 steps); bench-vs-k3s green with in-VM primary metric (Kubenyx 96.3s vs k3s 113.2s). Open: etcd leg (first run in progress), multi-node, chaos/reboot steps in the main test.

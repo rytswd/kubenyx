@@ -1,5 +1,5 @@
 #+title: Datastore — kine/sqlite and etcd Backends
-#+state: ready
+#+state: work-in-progress
 #+FILETAGS: :core:
 
 * Summary
@@ -92,3 +92,4 @@ Assertion: =backend == "kine-sqlite" -> single control-plane node=.
 - 2026-07-05: Drafted from fast-start research (kine flags verified from k0s/kine sources); moved to ready.
 - 2026-07-05: Security review finding incorporated: an unauthenticated localhost datastore is an RBAC/admission bypass for ANY local process (including hostNetwork pods), not merely root-readable state. The kine socket therefore lives in a =0700= directory, and the etcd backend requires client certificates even on loopback (PKI mints =etcd-server= + =apiserver-etcd-client=). The "localhost plaintext" option described above is retired.
 - 2026-07-05: Native benchmarks: sqlite =_synchronous= mode made no measurable difference on NVMe (fsync is not the bottleneck); the DSN keeps WAL + busy_timeout only.
+- 2026-07-05: Implemented (modules/datastore.nix); kine leg verified in the single-node test (no etcd process audit passes). Post-review: etcd peer port TLS+client-cert auth. Open: etcd-backend VM test leg (built, first run in progress), reboot persistence.

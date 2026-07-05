@@ -1,5 +1,5 @@
 #+title: Node Runtime — containerd, crun, kubelet
-#+state: ready
+#+state: work-in-progress
 #+FILETAGS: :node:
 
 * Summary
@@ -71,7 +71,7 @@ CLI remainder: =--config=, =--kubeconfig=, =--node-ip=, =--hostname-override=<de
 * Design Details
 
 - Pause image: single layer containing =${kubernetes.pause}/bin/pause= as entrypoint; tag derived from the store hash so a pause update re-imports automatically and stale tags never collide.
-- The import oneshot is =After=containerd.service=, =Before=kubelet.service=, no-ops (ctr images check) in <100ms when already imported.
+- The import oneshot is =After=containerd.service= and runs *in parallel with* kubelet (divergence: registration doesn't need the pause image, only the first sandbox does, and kubelet retries sandbox creation — serializing cost measurable boot time).
 - =kubenyx.node.seedImages = [ <streamLayeredImage drvs> ]= generalizes the same mechanism for user workload images (airgapped operation).
 - crun/runc coexistence: runc stays installed (containerd module PATH); only the default handler changes, so RuntimeClasses for runc remain possible.
 
@@ -83,3 +83,5 @@ CLI remainder: =--config=, =--kubeconfig=, =--node-ip=, =--hostname-override=<de
 
 * History
 - 2026-07-05: Drafted from runtime research; moved to ready.
+- 2026-07-05: Implemented and verified (single-node VM test: pod start with no network access proves preload+pin; crun as default runtime; watchdog active). Divergences: seed-images parallel to kubelet (above); kubelet settings merge is =lib.recursiveUpdate= so nested overrides don't wipe siblings.
+- 2026-07-05: Implemented (modules/node.nix); zero-registry pod start proven in VM test. Open ACs: configz inspection, crictl runtime assert, kubelet SIGKILL restart test.

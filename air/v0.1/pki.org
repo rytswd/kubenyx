@@ -1,5 +1,5 @@
 #+title: Declarative PKI
-#+state: ready
+#+state: work-in-progress
 #+FILETAGS: :core:
 
 * Summary
@@ -96,3 +96,4 @@ kubenyx.pki = {
   - The oneshot orders after =network-online.target=: node-IP autodetection must see the real address on first boot or SANs are wrong and the next activation regenerates them.
   - Leaf issuance and kubeconfig writes run in parallel (random serials instead of =-CAcreateserial=, so no shared =.srl= file); measured ~0.5s serial -> parallel win on the boot path.
   - Consumers reference the PKI unit via =Wants=/=After==, never =Requires=: a PKI no-op rerun (every =nixos-rebuild switch=) must not bounce the control plane through restart propagation.
+- 2026-07-05: Implemented (modules/pki.nix) and verified: first-boot full PKI, no-op idempotency (mtime-proven in VM test), RBAC posture. Post-review hardening: umask 077, escaped option interpolation, parallel issuance with random serials, ensure_cert generalized over CAs (front-proxy leaf now renews), kubeconfigs rendered by heredoc (not kubectl) and regenerated on server-URL change, dedicated kubenyx-healthz probe identity. Open ACs: SAN-change targeted regeneration test.

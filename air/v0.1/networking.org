@@ -1,5 +1,5 @@
 #+title: Networking — Zero-Daemon CNI, kube-proxy, Multi-Node Routes
-#+state: ready
+#+state: work-in-progress
 #+FILETAGS: :network:
 
 * Summary
@@ -86,3 +86,4 @@ kubenyx.network = {
 * History
 - 2026-07-05: Drafted from networking research; moved to ready.
 - 2026-07-05: Divergence — KCM allocate-node-cidrs turned off entirely (see Addressing section); the original 'keep it truthful' stance did not survive contact with the allocator's behavior.
+- 2026-07-05: Implemented (modules/network.nix); single-node service path, hairpin, NodePort and firewall-on all green. Post-review: blanket cni0 trust replaced with targeted pod->host rules (6443 + DNS only); node-index CIDR bounds assertion added. Open: multi-node test (blocked on the agent credential story; role=agent currently fails at eval by design).
