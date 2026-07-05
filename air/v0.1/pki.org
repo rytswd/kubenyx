@@ -39,7 +39,7 @@ One cluster CA (ECDSA P-256, 10y). Leaves (1y default, option-tunable):
 | =kubelet-<node>= (client)       | client | =system:node:<node>=            | =system:nodes=           | —                                     |
 | =kubelet-<node>-server=         | server | =system:node:<node>=            | —                        | node name, node IPs                   |
 | =sa.{key,pub}=                  | keypair | —                              | —                        | —                                     |
-| =front-proxy-ca=, =front-proxy-client= | CA+client | (reserved slot)          | —                        | created only when aggregation enabled |
+| =front-proxy-ca=, =front-proxy-client= | CA+client | =kubenyx-front-proxy-ca= / =front-proxy-client= | — | always created (see History 2026-07-05) |
 
 apiserver SANs: =kubernetes=, =kubernetes.default=, =kubernetes.default.svc=, =kubernetes.default.svc.<clusterDomain>=, first IP of the service CIDR (e.g. =10.96.0.1=), node hostname + advertise IP, =127.0.0.1=, =localhost=, plus =kubenyx.pki.extraApiserverSANs=.
 
@@ -90,3 +90,9 @@ kubenyx.pki = {
 
 * History
 - 2026-07-05: Drafted from control-plane/PKI research; moved to ready.
+- 2026-07-05: Implementation divergences folded back in:
+  - A =bootstrap= client cert (=O=system:masters=, CN =kubenyx-bootstrap=) was added — the addon applier needs an identity that works *before* the RBAC bundle installs the admin group binding (kubeadm's super-admin analog). It is used only by =kubenyx-addons.service=.
+  - Front-proxy CA + client cert are now generated *always* (not a reserved slot): two cheap certs silence kube-controller-manager's requestheader ConfigMap retry loop and make the aggregation layer (metrics-server) a flag-flip.
+  - The oneshot orders after =network-online.target=: node-IP autodetection must see the real address on first boot or SANs are wrong and the next activation regenerates them.
+  - Leaf issuance and kubeconfig writes run in parallel (random serials instead of =-CAcreateserial=, so no shared =.srl= file); measured ~0.5s serial -> parallel win on the boot path.
+  - Consumers reference the PKI unit via =Wants=/=After==, never =Requires=: a PKI no-op rerun (every =nixos-rebuild switch=) must not bounce the control plane through restart propagation.

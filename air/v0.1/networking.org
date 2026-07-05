@@ -27,7 +27,7 @@ Same-node pod traffic over a plain bridge is the theoretical performance maximum
 
 - =kubenyx.network.clusterCidr= default =10.244.0.0/16=.
 - =kubenyx.nodes= is an ordered attrset of declared members; node at index N owns =10.244.N.0/24= (computed in Nix; exposed read-only as =kubenyx.network.nodePodCidr=). Single-node: index 0, no ambiguity.
-- KCM =allocate-node-cidrs= allocation order is *not* guaranteed to match declaration order — so the module does NOT rely on it for the datapath (conflist + routes come from Nix). =node.spec.podCIDR= may therefore disagree with the actual subnet on multi-node clusters; recorded limitation in v0.1 (mitigation candidates for v0.2: a tiny patch-podcidr oneshot, or =--allocate-node-cidrs=false=).
+- KCM CIDR allocation is *disabled* (=--allocate-node-cidrs=false=): implementation testing showed the allocator hands out order-unstable subnets (observed =10.244.12.0/24= for the first node after allocator retries), which would make =node.spec.podCIDR= actively wrong next to the Nix-owned datapath. An empty podCIDR is more honest than a wrong one. v0.2 candidate: a patch-podcidr oneshot that writes the Nix-computed subnet into =node.spec.podCIDR= for tooling that reads it.
 
 ** CNI conflist (rendered to /etc/cni/net.d/10-kubenyx.conflist)
 
@@ -85,3 +85,4 @@ kubenyx.network = {
 
 * History
 - 2026-07-05: Drafted from networking research; moved to ready.
+- 2026-07-05: Divergence — KCM allocate-node-cidrs turned off entirely (see Addressing section); the original 'keep it truthful' stance did not survive contact with the allocator's behavior.

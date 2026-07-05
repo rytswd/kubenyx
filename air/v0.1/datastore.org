@@ -46,7 +46,7 @@ Readiness (for the notify wrapper, D10): etcdctl-style health — write/read a =
 =services.etcd= from nixpkgs is *not* reused (it drags its own option surface and defaults); Kubenyx renders its own unit for full control:
 
 - etcd 3.6 (v3.6 halved default memory via =snapshot-count=10000= default and compaction changes; keep defaults, expose =settings=).
-- Single-node default: loopback client URL, no peer TLS, apiserver via =https://127.0.0.1:2379= with etcd CA + client cert *only when* =listenExternal= is set; plain =http://127.0.0.1:2379= otherwise (KTHW-current stance; documented trade-off: local root can read secrets either way).
+- Single-node default: loopback client URL, no peer TLS, apiserver via =https://127.0.0.1:2379= with etcd CA + client cert *only when* =listenExternal= is set; client-cert auth on loopback too (see History: security review).
 - Multi-node: full etcd PKI from pki.org (etcd CA, server/peer certs), static initial-cluster from declared membership.
 - =kubenyx.datastore.etcd.unsafeNoFsync= (default false): maps to =--unsafe-no-fsync= for disposable dev clusters; option docs carry a red warning.
 - =GOMEMLIMIT= set from =MemoryHigh= when the user constrains the unit (MicroShift-validated pattern).
@@ -90,3 +90,5 @@ Assertion: =backend == "kine-sqlite" -> single control-plane node=.
 
 * History
 - 2026-07-05: Drafted from fast-start research (kine flags verified from k0s/kine sources); moved to ready.
+- 2026-07-05: Security review finding incorporated: an unauthenticated localhost datastore is an RBAC/admission bypass for ANY local process (including hostNetwork pods), not merely root-readable state. The kine socket therefore lives in a =0700= directory, and the etcd backend requires client certificates even on loopback (PKI mints =etcd-server= + =apiserver-etcd-client=). The "localhost plaintext" option described above is retired.
+- 2026-07-05: Native benchmarks: sqlite =_synchronous= mode made no measurable difference on NVMe (fsync is not the bottleneck); the DSN keeps WAL + busy_timeout only.
