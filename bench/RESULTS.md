@@ -5,6 +5,41 @@ x86_64, NVMe, no virtualization) via `nix run .#native-bench`. VM = NixOS
 test driver under QEMU TCG (no KVM on this box) — absolute VM numbers are
 meaningless, only kubenyx-vs-k3s ratios in identical VMs count.
 
+## 2026-07-06 — Rust boot-path tools: ratio 0.76, native 2.7s
+
+Round 4 head-to-head (same harness as round 2, in-VM kubelet-line metric):
+
+| Metric | k3s | Kubenyx |
+|---|---|---|
+| node Ready (in-VM clock) | 115.8 s | **87.7 s** |
+| ratio | — | **0.76** (was 1.01 → 0.85 → 0.76) |
+
+Native control plane: PKI **6 ms** (was 530 ms — rcgen in one process vs
+~80 openssl forks), apiserver cold `/readyz` 2.30 s, warm 1.78 s, first
+end-to-end write **2.70 s** (was 3.10 s).
+
+What changed:
+
+- `kubenyx-pki` (Rust): entire PKI + kubeconfigs in ~5 ms; also the agent
+  renderer.
+- `kubenyx-ready` (Rust): 10 ms fork-free rustls readiness probes with
+  sd_notify (was 200 ms curl-fork polling), plus a unix-socket probe mode.
+- PKI starts at local-fs time when the node address is declared (no
+  network-online wait) — pulled the whole control-plane chain ~15 s
+  earlier in VM boots.
+- Datastores are now Type=notify ("started" = accepting connections):
+  round 3 exposed the apiserver racing kine's dead socket and — worse —
+  `kubenyx-addons` with `Requires=` having its job canceled forever after
+  one transient apiserver failure. The applier now retries internally.
+
+A/B: `--enable-priority-and-fairness=false` gains nothing (±25 ms) — APF
+stays on.
+
+Real-hardware extrapolation for the 20 s target: PKI 6 ms + datastore
+~50 ms + apiserver 2.3 s + kubelet/containerd init in parallel +
+registration ≈ **4–6 s single-node cluster-ready from service start**;
+agents boot in parallel and add no serial cost.
+
 ## 2026-07-05 — VM head-to-head round 2: Kubenyx beats k3s
 
 Identical 4-core/4GB airgapped VMs, sequential boots, k3s 1.35.6 with its

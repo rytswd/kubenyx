@@ -131,12 +131,14 @@ let
     runtimeInputs = [ cfg.packages.kubectl ];
     text = ''
       export KUBECONFIG=${kc}/bootstrap.kubeconfig
-      for attempt in 1 2 3 4 5; do
-        if kubectl apply --server-side --force-conflicts -f ${manifestDir}/; then
+      # Retry generously: a oneshot's job is canceled forever if a hard
+      # dependency fails once, so resilience lives here, not in Requires=.
+      for attempt in $(seq 1 120); do
+        if kubectl apply --server-side --force-conflicts --request-timeout=10s -f ${manifestDir}/; then
           exit 0
         fi
         echo "kubenyx-addons: apply failed (attempt $attempt), retrying" >&2
-        sleep 2
+        sleep 3
       done
       exit 1
     '';
@@ -162,10 +164,11 @@ in
       description = "Kubenyx addon manifests (server-side apply)";
       wantedBy = [ "kubenyx.target" ];
       after = [ "kube-apiserver.service" ];
-      requires = [ "kube-apiserver.service" ];
+      wants = [ "kube-apiserver.service" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        TimeoutStartSec = 600;
         ExecStart = lib.getExe applyScript;
       };
     };

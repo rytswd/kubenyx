@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["kubenyx-pki", "kubenyx-ready"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

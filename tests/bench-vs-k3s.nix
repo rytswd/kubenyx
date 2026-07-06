@@ -23,6 +23,12 @@ in
         kubenyx = {
           enable = true;
           dns.upstream = [ ];
+          # Declared address: PKI (and with it the whole control-plane
+          # chain) starts at local-fs time instead of network-online.
+          nodes.kubenyxvm = {
+            index = 0;
+            address = "192.168.1.1";
+          };
         };
       };
 

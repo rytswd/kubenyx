@@ -12,7 +12,7 @@ let
   cfg = config.kubenyx;
   dns = cfg.dns;
   kc = cfg.internal.kubeconfigDir;
-  wrap = lib.getExe cfg.internal.readyWrap;
+  wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
 
   upstream =
     if dns.upstream == null then cfg.internal.hostResolvConf else lib.concatStringsSep " " dns.upstream;

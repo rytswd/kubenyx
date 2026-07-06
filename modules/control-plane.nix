@@ -13,7 +13,7 @@ let
   pki = cfg.internal.pkiDir;
   kc = cfg.internal.kubeconfigDir;
   k8s = cfg.packages.kubernetes;
-  wrap = lib.getExe cfg.internal.readyWrap;
+  wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
 
   usingKine = cfg.datastore.backend == "kine-sqlite";
 

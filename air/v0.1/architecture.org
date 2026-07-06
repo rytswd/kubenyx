@@ -66,7 +66,18 @@ Single-node: =leader-elect=false= (removes multi-second lease waits), =profiling
 - =balanced=: durable datastore defaults (etcd or kine on disk with fsync), stock event TTL, PodSecurity on — the base camp for the future production milestone.
 Security posture that costs nothing stays on in *both* profiles (=Node,RBAC=, NodeRestriction, no anonymous auth, TLS everywhere): a test cluster with =AlwaysAllow= would invalidate the testing itself.
 
-** D13. Flake shape
+** D13. Boot-path tools in Rust
+The two hottest boot-path components are purpose-built Rust binaries
+(=rust/=, packaged as =kubenyx-tools=): =kubenyx-pki= generates the entire
+PKI + kubeconfigs in one ~5ms process (measured 6ms vs 530ms for the
+openssl-forking shell script — ~80 execs eliminated), and =kubenyx-ready=
+provides sd_notify readiness with 10ms fork-free rustls probes (vs 200ms
+curl-fork polling) plus a unix-socket probe mode that gates the datastores
+(Type=notify: "started" means "accepting connections"). Stock Kubernetes
+is untouched — the Rust lives entirely in Kubenyx's wiring layer, exactly
+where D1 says performance must come from.
+
+** D14. Flake shape
 Single flake, =nixpkgs= as the only input. Outputs: =nixosModules.default= (the drop-in), =nixosModules.kubenyx= (alias), =packages= (pause image, readiness wrapper, kubeconfig helper), =checks= (VM tests), =templates= (consumer quick-start). Public option namespace: =kubenyx.*= — small, task-oriented surface (target: < 40 options), with =extraFlags= / =settings= escape hatches per component. Details: [[file:flake-packaging.org]].
 
 * Design Details
@@ -107,3 +118,4 @@ Startup is deliberately wide: datastore, containerd, kubelet and CoreDNS all sta
 * History
 - 2026-07-05: Drafted from the five-report research pass; moved to ready. Decisions D1–D12 recorded.
 - 2026-07-05: User steer folded in — primary use case is a k3s alternative for real cluster testing; production readiness deferred to a later milestone. Added D12 performance profiles (=testing= default); flake-shape decision renumbered to D13.
+- 2026-07-06: Aggressive optimization pass: D13 added (Rust boot-path tools); PKI's network-online dependency made conditional on address autodetection; datastore readiness gating and addon-applier self-retry added after the early-start exposed an apiserver-vs-kine socket race and a Requires=-canceled addons job. Head-to-head ratio vs k3s: 0.76 (from 1.01 at first measurement). Flake-shape decision renumbered to D14.

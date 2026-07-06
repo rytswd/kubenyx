@@ -15,6 +15,7 @@ let
   cfg = config.kubenyx;
   ds = cfg.datastore;
   pki = cfg.internal.pkiDir;
+  wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
 
   kineSock = "/run/kubenyx/kine/kine.sock";
   volatileDir = "/run/kubenyx/volatile-state"; # tmpfs; shared name for both backends
@@ -92,8 +93,17 @@ in
           description = "kine etcd-shim (sqlite)";
           wantedBy = [ "kubenyx.target" ];
           serviceConfig = {
+            # Type=notify via the socket probe: "started" must mean
+            # "accepting connections", or the apiserver races a dead socket
+            # and burns its storage-health timeout on first boot.
+            Type = "notify";
+            NotifyAccess = "all";
             ExecStart = lib.escapeShellArgs (
               [
+                wrap
+                "--url"
+                "unix://${kineSock}"
+                "--"
                 (lib.getExe' cfg.packages.kine "kine")
                 "--endpoint"
                 kineDsn
@@ -112,6 +122,7 @@ in
             );
             Restart = "always";
             RestartSec = 2;
+            SuccessExitStatus = "143"; # notify-wrapper exit on orderly stop
             StateDirectory = lib.mkIf (!ds.volatile) "kine";
           };
         };
@@ -124,8 +135,21 @@ in
           after = [ "kubenyx-pki.service" ];
           wants = [ "kubenyx-pki.service" ];
           serviceConfig = {
+            Type = "notify";
+            NotifyAccess = "all";
+            TimeoutStartSec = 120;
             ExecStart = lib.escapeShellArgs (
               [
+                wrap
+                "--url"
+                "https://127.0.0.1:2379/readyz"
+                "--cacert"
+                "${pki}/ca.crt"
+                "--cert"
+                "${pki}/apiserver-etcd-client.crt"
+                "--key"
+                "${pki}/apiserver-etcd-client.key"
+                "--"
                 (lib.getExe' cfg.packages.etcd "etcd")
                 "--name"
                 "kubenyx"
@@ -167,6 +191,7 @@ in
             );
             Restart = "always";
             RestartSec = 2;
+            SuccessExitStatus = "143"; # notify-wrapper exit on orderly stop
             StateDirectory = lib.mkIf (!ds.volatile) "etcd";
           };
         };

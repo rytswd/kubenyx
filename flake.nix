@@ -19,7 +19,7 @@
       lib = import ./lib { inherit (nixpkgs) lib; };
 
       packages = forAllSystems (pkgs: {
-        readiness-wrapper = pkgs.callPackage ./pkgs/readiness-wrapper.nix { };
+        kubenyx-tools = pkgs.callPackage ./pkgs/kubenyx-tools.nix { };
         pause-image = pkgs.callPackage ./pkgs/pause-image.nix { };
         test-image = pkgs.callPackage ./pkgs/test-image.nix { };
         native-bench = pkgs.callPackage ./pkgs/native-bench.nix { kine = pkgs.kine; };

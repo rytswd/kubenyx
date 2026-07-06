@@ -1,0 +1,14 @@
+[package]
+name = "kubenyx-pki"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "ring", "x509-parser"] }
+x509-parser = "0.16"
+base64 = "0.22"
+if-addrs = "0.13"
+time = "0.3"
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+getrandom = "0.2"

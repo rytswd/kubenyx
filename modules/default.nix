@@ -143,11 +143,12 @@ in
           ((cfg.nodes.${cfg.nodeName} or { index = 0; }).index);
         description = "Pod subnet owned by this node.";
       };
-      readyWrap = lib.mkOption {
+      tools = lib.mkOption {
         type = lib.types.package;
         readOnly = true;
         internal = true;
-        default = pkgs.callPackage ../pkgs/readiness-wrapper.nix { };
+        default = pkgs.callPackage ../pkgs/kubenyx-tools.nix { };
+        description = "Rust boot-path tools: kubenyx-pki, kubenyx-ready.";
       };
       hostResolvConf = lib.mkOption {
         type = lib.types.str;

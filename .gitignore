@@ -4,3 +4,6 @@ bench-vm-*.log
 .result-*
 result-nb
 .test-tmp/
+
+# Rust build artifacts
+rust/target/

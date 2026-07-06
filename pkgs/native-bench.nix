@@ -6,6 +6,7 @@
 {
   lib,
   writeShellApplication,
+  callPackage,
   kubernetes,
   kine,
   kubectl,
@@ -20,6 +21,7 @@ writeShellApplication {
     kubectl
     openssl
     curl
+    (callPackage ./kubenyx-tools.nix { })
   ];
   text = ''
     work=$(mktemp -d)
@@ -39,53 +41,13 @@ writeShellApplication {
 
     now_ms() { date +%s%3N; }
 
-    # --- PKI (same shapes as modules/pki.nix) --------------------------------
+    # --- PKI (the real generator: Rust kubenyx-pki, one process) -------------
     t_pki0=$(now_ms)
-    pki=$work/pki && mkdir -p "$pki"
-    genkey() { openssl ecparam -name prime256v1 -genkey -noout -out "$1"; }
-    genkey "$pki/ca.key"
-    openssl req -x509 -new -key "$pki/ca.key" -days 3650 -subj "/CN=kubenyx-ca" -out "$pki/ca.crt"
-    cert() {
-      local name=$1 subj=$2 eku=$3 san=$4
-      genkey "$pki/$name.key"
-      openssl req -new -key "$pki/$name.key" -subj "$subj" -out "$pki/$name.csr"
-      {
-        echo "keyUsage=critical,digitalSignature,keyEncipherment"
-        echo "extendedKeyUsage=$eku"
-        [ -n "$san" ] && echo "subjectAltName=$san"
-      } > "$pki/$name.ext"
-      openssl x509 -req -in "$pki/$name.csr" -CA "$pki/ca.crt" -CAkey "$pki/ca.key" \
-        -CAcreateserial -days 365 -extfile "$pki/$name.ext" -out "$pki/$name.crt" 2>/dev/null
-    }
-    cert apiserver "/CN=kube-apiserver" serverAuth "DNS:localhost,DNS:kubernetes,IP:127.0.0.1,IP:10.96.0.1"
-    # Front-proxy CA + client, matching modules/pki.nix (the real boot pays
-    # for these, so the bench must too).
-    genkey "$pki/front-proxy-ca.key"
-    openssl req -x509 -new -key "$pki/front-proxy-ca.key" -days 3650 -subj "/CN=fp-ca" -out "$pki/front-proxy-ca.crt"
-    genkey "$pki/front-proxy-client.key"
-    openssl req -new -key "$pki/front-proxy-client.key" -subj "/CN=front-proxy-client" -out "$pki/fpc.csr"
-    printf 'extendedKeyUsage=clientAuth\n' > "$pki/fpc.ext"
-    openssl x509 -req -in "$pki/fpc.csr" -CA "$pki/front-proxy-ca.crt" -CAkey "$pki/front-proxy-ca.key" \
-      -set_serial 0x1 -days 365 -extfile "$pki/fpc.ext" -out "$pki/front-proxy-client.crt" 2>/dev/null
-    cert admin "/O=system:masters/CN=bench-admin" clientAuth ""
-    cert kcm "/CN=system:kube-controller-manager" clientAuth ""
-    cert sched "/CN=system:kube-scheduler" clientAuth ""
-    cert kubelet-client "/CN=kube-apiserver-kubelet-client" clientAuth ""
-    genkey "$pki/sa.key"
-    openssl ec -in "$pki/sa.key" -pubout -out "$pki/sa.pub" 2>/dev/null
-
-    kcfg() {
-      local out=$1 user=$2 crt=$3 key=$4
-      KUBECONFIG=$out kubectl config set-cluster b --server=https://127.0.0.1:16443 \
-        --certificate-authority="$pki/ca.crt" --embed-certs=true >/dev/null
-      KUBECONFIG=$out kubectl config set-credentials "$user" \
-        --client-certificate="$crt" --client-key="$key" --embed-certs=true >/dev/null
-      KUBECONFIG=$out kubectl config set-context d --cluster=b --user="$user" >/dev/null
-      KUBECONFIG=$out kubectl config use-context d >/dev/null
-    }
-    kcfg "$work/admin.kubeconfig" admin "$pki/admin.crt" "$pki/admin.key"
-    kcfg "$work/kcm.kubeconfig" kcm "$pki/kcm.crt" "$pki/kcm.key"
-    kcfg "$work/sched.kubeconfig" sched "$pki/sched.crt" "$pki/sched.key"
+    pki=$work/pki
+    kubenyx-pki --mode server --pki-dir "$pki" --kubeconfig-dir "$work" \
+      --node-name bench --node-address 127.0.0.1 \
+      --api-url https://127.0.0.1:16443 --service-ip 10.96.0.1 \
+      --node bench=127.0.0.1
     t_pki1=$(now_ms)
     echo "KUBENYX-METRIC pki_ms=$((t_pki1 - t_pki0))"
 
@@ -119,8 +81,8 @@ writeShellApplication {
       --proxy-client-key-file="$pki/front-proxy-client.key"
       --client-ca-file="$pki/ca.crt"
       --tls-cert-file="$pki/apiserver.crt" --tls-private-key-file="$pki/apiserver.key"
-      --kubelet-client-certificate="$pki/kubelet-client.crt"
-      --kubelet-client-key="$pki/kubelet-client.key"
+      --kubelet-client-certificate="$pki/apiserver-kubelet-client.crt"
+      --kubelet-client-key="$pki/apiserver-kubelet-client.key"
       --service-cluster-ip-range=10.96.0.0/16
       --service-account-issuer=https://kubernetes.default.svc
       --service-account-key-file="$pki/sa.pub"
@@ -145,14 +107,21 @@ writeShellApplication {
     echo "KUBENYX-METRIC apiserver_ready_ms=$((t_api - t0))"
 
     # --- kcm + scheduler --------------------------------------------------------
+    # Kubenyx's addon applier installs these immediately after readyz; the
+    # shared kcm identity and the admin group depend on them.
+    KUBECONFIG=$work/bootstrap.kubeconfig kubectl create clusterrolebinding kcm-shared \
+      --clusterrole=cluster-admin --user=system:kube-controller-manager >/dev/null
+    KUBECONFIG=$work/bootstrap.kubeconfig kubectl create clusterrolebinding admins \
+      --clusterrole=cluster-admin --group=kubenyx:cluster-admins >/dev/null
+
     kcm_extra=()
     if [ -n "''${KCM_EXTRA_FLAGS:-}" ]; then
       read -ra kcm_extra <<< "$KCM_EXTRA_FLAGS"
     fi
     kube-controller-manager \
-      --kubeconfig="$work/kcm.kubeconfig" \
-      --authentication-kubeconfig="$work/kcm.kubeconfig" \
-      --authorization-kubeconfig="$work/kcm.kubeconfig" \
+      --kubeconfig="$work/controller-manager.kubeconfig" \
+      --authentication-kubeconfig="$work/controller-manager.kubeconfig" \
+      --authorization-kubeconfig="$work/controller-manager.kubeconfig" \
       --client-ca-file="$pki/ca.crt" --root-ca-file="$pki/ca.crt" \
       --service-account-private-key-file="$pki/sa.key" \
       --cluster-signing-cert-file="$pki/ca.crt" --cluster-signing-key-file="$pki/ca.key" \
@@ -168,7 +137,7 @@ writeShellApplication {
     apiVersion: kubescheduler.config.k8s.io/v1
     kind: KubeSchedulerConfiguration
     clientConnection:
-      kubeconfig: $work/sched.kubeconfig
+      kubeconfig: $work/scheduler.kubeconfig
     leaderElection:
       leaderElect: false
     EOF
