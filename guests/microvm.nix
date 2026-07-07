@@ -77,6 +77,14 @@ lib.mkMerge [
       datastore.volatile = true;
     };
 
+    # ---- snapshot/restore hygiene ---------------------------------------------
+    # Firecracker exposes an ACPI VMGenID device (FCVMGID), but nothing loads
+    # the driver by default — without it a restored clone KEEPS the snapshot's
+    # CRNG state, so every clone draws identical randomness. With the module
+    # the kernel reseeds on restore ("crng reseeded due to virtual machine
+    # fork"). No cost on ordinary boots.
+    boot.kernelModules = [ "vmgenid" ];
+
     # ---- boot leanness -------------------------------------------------------
     documentation.enable = false;
     nix.enable = false; # guests are built, never build
@@ -120,6 +128,23 @@ lib.mkMerge [
         # top-level keys freely.
         systemd-random-seed.enable = false; # nothing to save/restore per boot
         systemd-networkd-persistent-state.enable = false; # volatile guest
+
+        # Post-restore wall-clock correction: a restored snapshot keeps
+        # monotonic time (kvmclock state travels with the snapshot) but
+        # CLOCK_REALTIME is stale by the snapshot→restore gap and nothing
+        # in the guest fixes it (firecracker attaches no VMCLOCK device —
+        # verified; no RTC). kubenyx-snap sends UDP time pokes from the
+        # host right after /snapshot/load; this daemon steps the clock.
+        # Steps only on >500ms offset, so it is a no-op on ordinary boots.
+        kubenyx-clockstep = {
+          description = "Step the wall clock from host time pokes after a snapshot restore";
+          wantedBy = [ "multi-user.target" ];
+          serviceConfig = {
+            ExecStart = "${lib.getExe' cfg.internal.tools "kubenyx-clockstep"} --allow-from 10.100.0.1";
+            Restart = "always";
+            RestartSec = 1;
+          };
+        };
 
         # Grep-able readiness marker with the in-guest monotonic time — the
         # benchmark interface for every variant. Polls with curl (cheap even
