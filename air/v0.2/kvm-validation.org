@@ -1,0 +1,81 @@
+#+title: KVM Validation Plan (EC2)
+#+state: ready
+#+FILETAGS: :testing:
+
+* Summary
+
+The step-by-step plan for validating Kubenyx on a real KVM host (an EC2 metal instance): prove the single-digit-second microVM claim with measured numbers, re-run the whole VM test matrix at hardware speed, get a KVM-clean kubenyx-vs-k3s ratio, and open the Firecracker snapshot/restore work. Everything measurable today was measured under TCG emulation on the KVM-less dev box; this doc closes the gap between those numbers and the real-hardware claims recorded in =bench/RESULTS.md=.
+
+* Motivation
+
+** Goals
+- Replace every "extrapolated at the 12–15x TCG factor" claim in =bench/RESULTS.md= with a measured KVM number.
+- Verify the firecracker and cloud-hypervisor runners actually run (they only *build* on the dev box).
+- Establish the baseline for snapshot/restore (sub-second cluster resume).
+
+** Non-Goals
+- CI automation of KVM runs (manual first; automate once numbers are stable).
+- Multi-node microVM meshes.
+
+* Prerequisites
+
+- EC2 instance with =/dev/kvm=: any x86_64 =*.metal= type (e.g. =c5.metal=, =m5zn.metal=, =i3.metal=). Nitro non-metal instances have no nested virtualization — check with =ls /dev/kvm= before anything else.
+- NixOS AMI, or any Linux + the Nix installer with flakes enabled. The runner needs only Nix and =/dev/kvm= (firecracker/cloud-hypervisor/qemu all come from the flake closure).
+- Clone of this repo; =nix build .#packages.x86_64-linux.microvm-firecracker= to prime the store (the squashfs store disk is ~1–2 GB; build once, boot many).
+
+* Plan
+
+** Phase 1 — microVM single-digit-seconds claim
+
+Host tap (once per boot):
+#+begin_src sh
+sudo ip tuntap add kubenyx-tap0 mode tap
+sudo ip addr add 10.100.0.1/24 dev kubenyx-tap0
+sudo ip link set kubenyx-tap0 up
+#+end_src
+
+Run and measure (the guest prints its own monotonic timings to the console — no host-side instrumentation needed):
+#+begin_src sh
+nix run .#microvm-firecracker   # then grep the console output for:
+#   KUBENYX-PHASE kine up=...       KUBENYX-PHASE kube-apiserver up=...
+#   KUBENYX-CLUSTER-READY uptime=...s
+#+end_src
+
+Repeat 5x for variance; repeat with =.#microvm-cloud-hypervisor= (same tap, run one at a time — they share the tap id/MAC/IP by design). Record the phase table in =bench/RESULTS.md= next to the TCG table.
+
+Expected (extrapolation to falsify): kine ~2s, apiserver ~3.5–4s, node Ready ~4.5s, marker ~6s. Pass bar: *marker < 10s*; stretch: < 7s. If the TCG factor was wrong, the honest number replaces the claim either way.
+
+** Phase 2 — full test matrix at hardware speed
+
+=/dev/kvm= makes the existing NixOS test driver use KVM automatically (=accel=kvm:tcg=):
+#+begin_src sh
+nix build .#checks.x86_64-linux.single-node.driver -o d && d/bin/nixos-test-driver
+# then single-node-etcd, multi-node
+#+end_src
+
+Everything must stay green; record the KVM-clock =KUBENYX-METRIC= lines. Expect the whole matrix in minutes instead of hours — from here on, KVM is the preferred grind loop and the dev-box TCG runs become the fallback.
+
+** Phase 3 — kubenyx-vs-k3s ratio, KVM-clean
+
+#+begin_src sh
+nix build .#checks.x86_64-linux.bench-vs-k3s.driver -o b && b/bin/nixos-test-driver
+#+end_src
+
+The in-VM "just became ready" metric already removes polling noise; KVM removes the emulation distortion. Record the new ratio (TCG history: 1.01 → 0.85 → 0.76 → 0.73). Pass bar: ratio stays < 1.0; expected: comparable to or better than 0.73 since Kubenyx's boot is more CPU-bound than k3s's.
+
+** Phase 4 — Firecracker snapshot/restore (the endgame)
+
+Boot the firecracker variant to =KUBENYX-CLUSTER-READY=, then via the firecracker API socket: pause → =/snapshot/create= (memory + vmstate) → later =/snapshot/load= into a fresh firecracker process. Target: *resume-to-usable-API < 1s*. Open design questions to answer on the box before writing the implementation doc:
+- Clock resync after restore (kvmclock; do apiserver cert lifetimes and lease renewals tolerate the jump — leases will be expired, components must recover).
+- Network state: tap reattach, TCP connections dead — components' Restart/reconnect behavior should self-heal; verify.
+- Whether kine/sqlite state in the memory snapshot is coherent (it is in-VM tmpfs, so yes by construction).
+- microvm.nix support: it does not wrap the snapshot API today; expect a small runner extension (likely a =kubenyx-snap= script speaking to the firecracker API socket — candidate for a third Rust tool).
+
+* Acceptance Criteria
+- Phase 1 table recorded in =bench/RESULTS.md=; firecracker marker < 10s across 5 runs.
+- Phase 2: single-node, etcd, multi-node green under KVM with recorded metrics.
+- Phase 3: ratio recorded; < 1.0.
+- Phase 4: findings written up in a new =snapshot-restore.org= (implementation doc), whatever the outcome.
+
+* History
+- 2026-07-07: Drafted ahead of the EC2 KVM session; moved to ready.
