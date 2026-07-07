@@ -33,3 +33,14 @@ Full NixOS test VMs pay for BIOS, initrd, udev and a general-purpose userspace b
 * History
 - 2026-07-06: Drafted and implemented; qemu variant validation in progress.
 - 2026-07-07: qemu variant verified end-to-end under TCG: =KUBENYX-CLUSTER-READY uptime=76.61s= with the full phase trace on the console (kine 28s, apiserver 47s, node Ready ~53s). Guest observability added: per-unit =ExecStartPost= phase markers and a wall-clock DEGRADED self-diagnosis in the report service. Main-module hardening extracted from the debugging: =--advertise-address=/=--node-ip= from declared addresses; networkd-unit-based static addressing in the variants (scripted networking loses to microvm.nix's own networkd units).
+- 2026-07-07 (KVM session): firecracker + cloud-hypervisor variants
+  verified on real KVM — measured, not extrapolated: =7.77s= median
+  cluster-ready (firecracker, etcd-mem), =7.90s= cloud-hypervisor.
+  Guest changed to =datastore.backend = "etcd-mem"= (kine retired from
+  the boot path), plus initrd store warmup and kubenyx.target pulled to
+  sysinit (~3.5s of the win; etcd-mem itself ~0.5s wall). Firecracker
+  variant carries snapshot-safe kernel params (AMX/CET —
+  [[file:snapshot-restore.org][snapshot-restore.org]]). cloud-hypervisor
+  runner pinned to one virtio-net queue pair: microvm.nix hardcodes
+  =num_queues=2*vcpu=, which refuses the plain single-queue shared tap
+  (MultiQueueNoTapSupport). Full tables: bench/RESULTS.md 2026-07-07.

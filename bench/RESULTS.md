@@ -3,7 +3,133 @@
 Newest entries first. Native = bare processes on the dev box (64-core
 x86_64, NVMe, no virtualization) via `nix run .#native-bench`. VM = NixOS
 test driver under QEMU TCG (no KVM on this box) — absolute VM numbers are
-meaningless, only kubenyx-vs-k3s ratios in identical VMs count.
+meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
+EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
+numbers are real.
+
+## 2026-07-07 — KVM session: 8.5s cluster-ready, 75ms snapshot restore
+
+First run on real hardware (EC2 metal, KVM). Every extrapolated claim
+below this entry is now superseded by a measured number.
+
+### Phase 1 — microVM boot, measured (in-guest clock)
+
+The honest correction first: the "12–15× TCG factor" was optimistic.
+Actual factor ≈ 6.5× (76.6s TCG → 11.85s KVM); the **<10s bar failed
+on the stock tree** and passed only with the boot work landed this
+session:
+
+| Tree + datastore | cluster-ready median (range) | runs |
+|---|---|---|
+| stock (d95e763), firecracker + kine | 11.85 s (10.83–12.92) | 5 |
+| stock, cloud-hypervisor + kine | 11.70 s (11.55–11.81) | 5 |
+| merged tree, firecracker + kine (A/B control) | 8.31 s (8.16–8.40) | 3 |
+| merged tree, firecracker + **etcd-mem** | **7.77 s** (7.75–7.87) | 3 |
+| merged tree, cloud-hypervisor + etcd-mem | 7.90 s smoke | 1 |
+
+Attribution (A/B on the identical merged tree, only the backend
+switched): the guest-profile boot work bundled in the etcd-mem change
+(initrd store warmup, kubenyx.target pulled to sysinit,
+DefaultDependencies pruning) is worth ~3.5 s; **etcd-mem itself is
+worth ~0.5 s of wall clock** (8.31 → 7.77) — kine's ~2.4s init burns in
+parallel with kubelet/containerd, so only part of it was on the
+critical path. Datastore-up phase: kine 7.03s → etcd-mem 5.0s.
+
+etcd-mem is the new Rust in-memory etcd shim (~2.3 MiB, tonic gRPC over
+a unix socket) replacing kine in the microVM guests (kine is retired
+from the boot path per user steer; it also loses the 38MB Go binary
+from the store disk). Validation on KVM caught three real bugs the TCG
+box never reached (WatchResponse proto field 8→11, initial revision
+0→1, hard-wired etcd.service Requires) — see the etcd-mem commit
+message. The ~5s datastore-up stamp is boot-path unit scheduling; shim
+init itself is <10 ms.
+
+Cloud-hypervisor's runner requested num_queues=8 and refused the plain
+single-queue tap (MultiQueueNoTapSupport) — the flake now pins one
+queue pair; boot-path cost none.
+
+### Phase 2 — test matrix at hardware speed
+
+All green. TCG grind loop (hours) → KVM minutes:
+
+| Check | Result | Wall clock |
+|---|---|---|
+| single-node | PASS | 36.8 s (apiserver 19.8s, node Ready 30.0s, pod 33.2s) |
+| single-node-etcd | PASS | 153 s |
+| multi-node | PASS | 38.4 s (after the 9p fix below) |
+
+KVM exposed a real test bug TCG could never reach: the multi-node
+credential ship via the 9p shared dir fails deterministically at
+hardware speed — the agent guest caches the negative dentry for
+`/tmp/shared/agent-pki` and never revalidates (even a 60s retry loop
+never converged). The ship is now driver-mediated (tar|base64 through
+the test driver), which also matches the operator-channel semantics
+the test simulates. Second harness gotcha for the record: the test
+driver keys ALL its runtime state (vde socket dirs, `vm-state-<name>`,
+`shared-xchg`) off `XDG_RUNTIME_DIR` with no per-run namespace —
+concurrent drivers collide, vde_switch dies silently, and the loser
+hangs forever at "start all VLans" (this, not test code, is why two
+matrix legs stalled on the first concurrent run). Concurrent driver
+runs each need their own `XDG_RUNTIME_DIR`.
+
+### Phase 3 — kubenyx-vs-k3s, KVM-clean
+
+Three runs (in-VM clock; last one on an otherwise idle box):
+
+| Run | k3s | Kubenyx | ratio |
+|---|---|---|---|
+| stock tree, concurrent load | 24.4 s | 17.2 s | 0.71 |
+| merged tree, concurrent load | 23.5 s | 18.7 s | 0.80 |
+| merged tree, quiet box | 26.1 s | **17.4 s** | **0.67** |
+
+TCG history: 1.01 → 0.85 → 0.76 → 0.73. At ~20 s boots, ±1 s of in-VM
+variance moves the ratio ±0.05, so the honest KVM statement is
+**0.67–0.80** — kubenyx is stable at 17–19 s while k3s wanders 23–26 s.
+KVM removes the emulation distortion and the ratio *improves* —
+Kubenyx's boot is more CPU-bound than k3s's, as predicted.
+
+### Phase 4 — firecracker snapshot/restore: 75 ms to a live cluster
+
+Snapshot a cluster-ready guest (pause → /snapshot/create), restore into
+a fresh firecracker process: median **74.5 ms** from /snapshot/load
+request to the first apiserver TLS response (3 restores from one
+snapshot; ~88 ms including VMM process spawn). Target was <1s — beaten
+13×. vmstate 68 KB + mem file 3.5 GB (demand-paged, warm host cache).
+
+The one real discovery: on AMX hosts (Granite Rapids) a restored guest
+kernel-panics in XRSTORS (#GP) — the fresh VMM never re-acquires AMX
+xstate permission, and IA32_XSS/CET supervisor state doesn't restore
+either. Fix shipped in the firecracker variant's kernel params:
+`clearcpuid=amx_tile,amx_int8,amx_bf16 noxsaves` (no measured boot
+cost). Full findings + kubenyx-snap design: air/v0.2/snapshot-restore.org.
+
+### Phase 4b — kubenyx-snap: recreation productized at 66 ms
+
+The flow above is now `nix run`-able tooling (third Rust tool pair):
+
+| Step | Measured |
+|---|---|
+| `kubenyx-snap take` (one-time) | 9.1 s boot + **2.7 s** snapshot write (tmpfs) |
+| `kubenyx-snap cycle -n 5` | median **65.6 ms** load→serving-apiserver, range 25–72 ms |
+| guest wall clock after resume | correct to the second (`KUBENYX-CLOCKSTEP stepped=149s` on a deliberately aged snapshot) |
+
+Recreating a cluster is ~120× cheaper than cold-booting one (7.8 s →
+0.066 s). Two guest gaps found and fixed while productizing:
+
+- **No time source in the guest**: firecracker 1.15 attaches no VMCLOCK
+  ACPI device (in-guest probe; the earlier session note claiming
+  ptp_vmclock was loaded was wrong) and there is no RTC — after restore
+  CLOCK_REALTIME stays stale forever. `kubenyx-snap resume` now sends
+  UDP time pokes; the in-guest `kubenyx-clockstep` daemon steps the
+  clock (>500 ms offset only, so ordinary boots are untouched).
+- **Clones shared CRNG state**: the FCVMGID device was present but the
+  `vmgenid` driver never loaded, so restored clones kept the snapshot's
+  entropy pool. `boot.kernelModules = [ "vmgenid" ]` fixes the reseed.
+
+Implementation gotcha for the record: firecracker's API server ignores
+`Connection: close` — read responses by Content-Length or every call
+stalls to your socket timeout (this masqueraded as a 10 s
+/snapshot/load until diagnosed).
 
 ## 2026-07-07 — Round 5: ratio 0.73 (declared-address flags fixed)
 

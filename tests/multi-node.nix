@@ -63,11 +63,21 @@ in
     server.wait_for_unit("kubenyx-pki.service", timeout=300)
 
     # Ship the agent's packaged credential directory (operator channel).
-    server.succeed("cp -r /var/lib/kubenyx/pki/nodes/agent /tmp/shared/agent-pki")
-    # Deliberately no chmod: the 9p copy lands 0644 and the module must
-    # enforce 0600 itself. The path unit re-triggers the renderer on arrival.
+    # Driver-mediated transfer, not the 9p shared dir: the guest kernel
+    # caches the negative dentry for /tmp/shared/agent-pki and never
+    # revalidates it, so the agent stays blind to the server's write
+    # (first KVM run failed here every time; TCG never got fast enough
+    # to see it — even a 60s retry loop never converged).
+    pki_blob = server.succeed(
+        "tar c -C /var/lib/kubenyx/pki/nodes agent | base64 -w0"
+    ).strip()
+    # Deliberately chmod 644: credentials must land loose so the module
+    # proves it enforces 0600 itself (tar would preserve the server's
+    # modes). The path unit re-triggers the renderer on arrival.
     agent.succeed(
-        "mkdir -p /var/lib/kubenyx/pki && cp /tmp/shared/agent-pki/* /var/lib/kubenyx/pki/"
+        f"echo '{pki_blob}' | base64 -d | tar x -C /tmp"
+        " && chmod 644 /tmp/agent/*"
+        " && mkdir -p /var/lib/kubenyx/pki && cp /tmp/agent/* /var/lib/kubenyx/pki/"
     )
     # Operator flow: ship, then start the renderer (the path unit also
     # catches later re-ships, but an explicit start is deterministic).

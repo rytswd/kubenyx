@@ -1,5 +1,5 @@
 #+title: KVM Validation Plan (EC2)
-#+state: ready
+#+state: complete
 #+FILETAGS: :testing:
 
 * Summary
@@ -79,3 +79,13 @@ Boot the firecracker variant to =KUBENYX-CLUSTER-READY=, then via the firecracke
 
 * History
 - 2026-07-07: Drafted ahead of the EC2 KVM session; moved to ready.
+- 2026-07-07: Executed on EC2 metal (Xeon 6975P-C, 384 cores). All four
+  phases done — full numbers in bench/RESULTS.md. Highlights: the
+  12–15× TCG factor was really ~6.5×, so the <10s bar FAILED with kine
+  (11.85s median) and passed only after replacing it with the Rust
+  etcd-mem shim (8.53s median; 7.56s with the final committed tree).
+  Matrix all green in minutes. Ratio 0.71, KVM-clean (best yet).
+  Snapshot/restore proven at 74.5 ms resume-to-API — 13× under the 1s
+  target — with one real discovery (AMX/CET xstate panic on restore;
+  boot-args fix shipped). Findings + kubenyx-snap spec:
+  [[file:snapshot-restore.org][snapshot-restore.org]]. Complete.

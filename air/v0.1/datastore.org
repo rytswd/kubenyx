@@ -95,3 +95,12 @@ Assertion: =backend == "kine-sqlite" -> single control-plane node=.
 - 2026-07-05: Implemented (modules/datastore.nix); kine leg verified in the single-node test (no etcd process audit passes). Post-review: etcd peer port TLS+client-cert auth. Open: etcd-backend VM test leg (built, first run in progress), reboot persistence.
 - 2026-07-05: etcd-backend VM test green: client-cert auth rejects unauthenticated local probes, pods run, and objects survive a full VM reboot. Both backend legs of the matrix now pass.
 - 2026-07-06: Both backends are now =Type=notify= via =kubenyx-ready= ("started" = accepting connections: unix-socket probe for kine, authenticated /readyz for etcd). The early-PKI boot exposed the apiserver racing kine's not-yet-listening socket — and, downstream, the addon applier's job being canceled forever by =Requires== after one transient apiserver failure (applier now retries internally with request timeouts).
+- 2026-07-07: Third backend: =etcd-mem= — a Rust in-memory etcd gRPC
+  shim (~2.3 MiB, kubenyx-tools workspace) for volatile single-node
+  clusters, replacing kine on the microVM boot path (kine was the
+  measured bottleneck at every stage; user steer: drop it). Same
+  unix-socket/0700-dir access model as kine, =Type=notify= via its own
+  sd_notify. Datastore-up 5.19s vs kine 7.03s in the firecracker guest;
+  KVM-validated (bench/RESULTS.md 2026-07-07; three bugs fixed during
+  validation — see the etcd-mem commit). kine-sqlite remains the
+  default for persistent clusters.

@@ -10,6 +10,11 @@ v0.2 pushes the testing-first mission (architecture.org, user steer 2026-07-05) 
 |----------+-------|
 | [[file:microvm.org][microvm.org]] | Firecracker/cloud-hypervisor/qemu microVM guest profile and runners |
 | [[file:kvm-validation.org][kvm-validation.org]] | EC2/KVM validation plan: measured microVM numbers, matrix at hardware speed, snapshot/restore groundwork |
+| [[file:snapshot-restore.org][snapshot-restore.org]] | Firecracker snapshot/restore findings (75ms resume measured) and the kubenyx-snap tool spec |
 
 * History
 - 2026-07-06: Milestone opened with the microVM work.
+- 2026-07-07: KVM validation executed on EC2 metal: etcd-mem replaces
+  kine (8.5s cluster-ready, single-digit claim now measured, not
+  extrapolated), matrix green, ratio 0.71, snapshot/restore proven at
+  75ms. kubenyx-snap implementation is the open work item.

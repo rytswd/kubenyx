@@ -1,8 +1,12 @@
+# Nix build outputs (any `nix build` in the repo drops these GC roots)
+result
+result-*
+.result-*
+result-nb
+
 # Test/benchmark run artifacts (local only)
 test-*.log
 bench-vm-*.log
-.result-*
-result-nb
 .test-tmp/
 
 # Rust build artifacts
@@ -10,3 +14,12 @@ rust/target/
 
 # MicroVM run logs (local only)
 microvm-*.log
+
+# MicroVM control sockets and kubenyx-snap run artifacts
+*.sock
+resume-console.log
+take-console.log
+snapshot/
+
+# Fetched per-boot cluster credentials (host-side kubectl)
+*.kubeconfig
