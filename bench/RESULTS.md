@@ -5,6 +5,55 @@ x86_64, NVMe, no virtualization) via `nix run .#native-bench`. VM = NixOS
 test driver under QEMU TCG (no KVM on this box) — absolute VM numbers are
 meaningless, only kubenyx-vs-k3s ratios in identical VMs count.
 
+## 2026-07-07 — Round 5: ratio 0.73 (declared-address flags fixed)
+
+The review of the microVM delta caught the bench VM declaring k3svm's
+VLAN IP (alphabetical assignment strikes again — the multi-node test
+documented the rule; the bench repeated the mistake, inert until
+`--node-ip` made it load-bearing). With the correct address, the full-VM
+head-to-head improves again:
+
+| Metric | k3s | Kubenyx |
+|---|---|---|
+| node Ready (in-VM clock) | 109.7 s | **79.7 s** |
+| ratio | — | **0.73** (1.01 → 0.85 → 0.76 → 0.73) |
+
+## 2026-07-07 — MicroVM guest: cluster-ready at 76.6s under pure TCG
+
+New `nix run`-able microVM variants (microvm.nix input): firecracker and
+cloud-hypervisor for KVM hosts, qemu/q35+`cpu=max` for KVM-less machines
+(validated here end-to-end under TCG — software-emulating every guest
+instruction). In-guest phase trace, TCG clock:
+
+| Phase | uptime |
+|---|---|
+| kine accepting connections | 28.2 s |
+| kubelet started | 32.6 s |
+| apiserver `/readyz` | **47.0 s** |
+| addons applied | 60.8 s |
+| coredns ready | 65.8 s |
+| node Ready (kubelet log, run 7) | ~53 s |
+| `KUBENYX-CLUSTER-READY` marker | **76.6 s** |
+
+The full NixOS test VM needs ~150 s+ to node-Ready under identical
+emulation — the stripped guest (tmpfs root over squashfs store, no
+initrd frills, no DHCP wait, volatile datastore, per-boot 6 ms PKI)
+roughly halves it. Real-hardware translation at the observed 12–15×
+TCG factor: kernel+userspace ~2 s, apiserver ~3.8 s, node Ready ~4.5 s,
+marker ~6 s — **single-digit seconds to a fresh cluster per launch** on
+any KVM machine via `nix run .#microvm-firecracker`.
+
+Debug findings that also hardened the main modules:
+- kube-apiserver exits when no default route exists and
+  `--advertise-address` is unset → declared node addresses now ship as
+  `--advertise-address` (control plane) and `--node-ip` (kubelet).
+- microvm.nix guests run systemd-networkd with their own generated
+  units; scripted `networking.interfaces` config silently loses — the
+  variants write `systemd.network.networks` matching the NIC MAC.
+- The `kubenyx-healthz` identity deliberately has zero RBAC grants:
+  it passes only always-allowed /healthz-class paths. Reading a node
+  object requires a bound identity (the report probe uses admin).
+
 ## 2026-07-06 — Rust boot-path tools: ratio 0.76, native 2.7s
 
 Round 4 head-to-head (same harness as round 2, in-VM kubelet-line metric):

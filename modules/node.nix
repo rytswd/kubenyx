@@ -17,6 +17,11 @@ let
   # credential dir is flat at the PKI root.
   kubeletPkiDir = if cfg.role == "server" then "${pki}/nodes/${cfg.nodeName}" else pki;
 
+  thisNode = cfg.nodes.${cfg.nodeName} or {
+    address = null;
+    index = 0;
+  };
+
   pauseImage = pkgs.callPackage ../pkgs/pause-image.nix { kubernetes = cfg.packages.kubernetes; };
   pauseRef = "kubenyx.local/pause:1";
 
@@ -200,6 +205,9 @@ in
               "--kubeconfig=${kc}/kubelet.kubeconfig"
               "--hostname-override=${cfg.nodeName}"
             ]
+            # Declared address kills node-IP autodetection, which needs a
+            # default route (absent in static-net microVMs).
+            ++ lib.optional (thisNode.address != null) "--node-ip=${thisNode.address}"
             ++ node.kubelet.extraFlags
           )
         );

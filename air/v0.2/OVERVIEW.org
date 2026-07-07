@@ -1,0 +1,14 @@
+#+title: v0.2 — Instant Test Clusters
+
+* Purpose
+
+v0.2 pushes the testing-first mission (architecture.org, user steer 2026-07-05) past what full VMs can deliver: disposable Kubenyx clusters that appear in single-digit seconds via microVMs, with everything volatile by design.
+
+* Document Map
+
+| Document | Scope |
+|----------+-------|
+| [[file:microvm.org][microvm.org]] | Firecracker/cloud-hypervisor/qemu microVM guest profile and runners |
+
+* History
+- 2026-07-06: Milestone opened with the microVM work.

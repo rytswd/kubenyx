@@ -25,9 +25,12 @@ in
           dns.upstream = [ ];
           # Declared address: PKI (and with it the whole control-plane
           # chain) starts at local-fs time instead of network-online.
+          # The driver assigns VLAN IPs alphabetically: k3svm sorts before
+          # kubenyxvm, so this VM owns .2 (declaring the wrong address now
+          # breaks kubelet registration via --node-ip).
           nodes.kubenyxvm = {
             index = 0;
-            address = "192.168.1.1";
+            address = "192.168.1.2";
           };
         };
       };

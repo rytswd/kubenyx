@@ -1,0 +1,35 @@
+#+title: MicroVM Test Clusters
+#+state: work-in-progress
+#+FILETAGS: :packaging:
+
+* Summary
+
+Flake-native microVM runners (=microvm.nix=) that boot a purpose-built minimal Kubenyx guest to cluster-ready: =nix run .#microvm-firecracker= on any KVM host, with cloud-hypervisor as the alternative and a qemu/q35 variant that runs (slowly, via TCG) on KVM-less machines so the profile stays verifiable anywhere.
+
+* Motivation
+
+Full NixOS test VMs pay for BIOS, initrd, udev and a general-purpose userspace before Kubenyx even starts. A Firecracker guest direct-boots a minimal kernel into a stripped NixOS in ~1–2s on KVM; with Kubenyx's ~3s native chain the whole cluster materializes in single-digit seconds — the strongest possible form of the "k3s alternative for real cluster testing" mission. Everything is volatile by design: tmpfs root over a read-only squashfs store image, tmpfs datastore, PKI regenerated in ~6ms per boot — a fresh honest cluster per launch, zero cleanup.
+
+** Goals
+- =nix run .#microvm-firecracker= → cluster-ready in single-digit seconds on KVM hosts.
+- A grep-able =KUBENYX-CLUSTER-READY uptime=<t>s= console marker as the benchmark interface.
+- The guest profile verifiable on KVM-less machines (qemu variant, TCG).
+
+** Non-Goals (v0.2 initial)
+- Firecracker snapshot/restore (sub-second resume) — next step, needs KVM hardware to develop against.
+- Multi-node microVM meshes.
+- Host tap/bridge automation (documented one-liner; automation later).
+
+* Proposal
+
+- =guests/microvm.nix=: kubenyx server + =datastore.volatile= + boot leanness (no docs, no nix daemon, no DHCP wait, systemd initrd) + the readiness-report service.
+- Variants in =flake.nix=: =microvm-firecracker= / =microvm-cloud-hypervisor= (tap =kubenyx-tap0=, static =10.100.0.2/24=) and =microvm-qemu= (SLiRP user net, =q35= machine, =cpu = "max"= — the microvm machine type needs KVM's in-kernel irqchip and =-enable-kvm=/-cpu host= are only dropped when a CPU model is explicit).
+- Store disk is squashfs: =mkfs.erofs= needs shared-xattr support that overlayfs-backed build environments (containers) lack.
+
+* Acceptance Criteria
+- qemu variant boots to =KUBENYX-CLUSTER-READY= under TCG on the dev box.
+- firecracker variant builds; runtime verified on a KVM host (documented, out of reach on this box).
+
+* History
+- 2026-07-06: Drafted and implemented; qemu variant validation in progress.
+- 2026-07-07: qemu variant verified end-to-end under TCG: =KUBENYX-CLUSTER-READY uptime=76.61s= with the full phase trace on the console (kine 28s, apiserver 47s, node Ready ~53s). Guest observability added: per-unit =ExecStartPost= phase markers and a wall-clock DEGRADED self-diagnosis in the report service. Main-module hardening extracted from the debugging: =--advertise-address=/=--node-ip= from declared addresses; networkd-unit-based static addressing in the variants (scripted networking loses to microvm.nix's own networkd units).

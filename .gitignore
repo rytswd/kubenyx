@@ -7,3 +7,6 @@ result-nb
 
 # Rust build artifacts
 rust/target/
+
+# MicroVM run logs (local only)
+microvm-*.log

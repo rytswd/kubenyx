@@ -60,3 +60,9 @@ Backends/matrix: `.#checks.x86_64-linux.single-node-etcd.driver`,
 - shellcheck runs at build time on all writeShellApplication scripts; a
   single-item `for x in <one thing>` loop fails the build (SC2043) — use
   arrays.
+- Background watcher tasks must never embed unconditional `pkill` cleanup:
+  a watcher from run N firing late will kill run N+1's process (this
+  killed a microVM boot mid-run). Kill explicitly, in the foreground,
+  before starting the next run.
+- MicroVM runs: `nix build .#packages.x86_64-linux.microvm-qemu -o r &&
+  r/bin/microvm-run` — watch stdout for `KUBENYX-CLUSTER-READY uptime=`.

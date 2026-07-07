@@ -16,9 +16,17 @@ let
   wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
 
   usingKine = cfg.datastore.backend == "kine-sqlite";
+  thisNode = cfg.nodes.${cfg.nodeName} or {
+    address = null;
+    index = 0;
+  };
 
   apiserverFlags =
-    [
+    # Declared address ships as --advertise-address: without it the
+    # apiserver autodetects via the default route and exits on hosts that
+    # have none (microVMs with static addressing).
+    lib.optional (thisNode.address != null) "--advertise-address=${thisNode.address}"
+    ++ [
       "--secure-port=6443"
       "--allow-privileged=true"
       "--authorization-mode=Node,RBAC"
