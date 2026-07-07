@@ -2,10 +2,12 @@
 # kubenyx-pki generates the entire cluster PKI in one process (~5ms vs
 # ~530ms for the openssl-forking shell version), kubenyx-ready supplies
 # sd_notify readiness with 10ms fork-free probing (vs 200ms curl forks).
-{ rustPlatform }:
+{ rustPlatform, protobuf }:
 rustPlatform.buildRustPackage {
   pname = "kubenyx-tools";
   version = "0.1.0";
   src = ../rust;
   cargoLock.lockFile = ../rust/Cargo.lock;
+  # etcd-mem uses tonic-build which requires protoc at build time.
+  nativeBuildInputs = [ protobuf ];
 }

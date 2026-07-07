@@ -16,6 +16,17 @@ let
   wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
 
   usingKine = cfg.datastore.backend == "kine-sqlite";
+  usingEtcd = cfg.datastore.backend == "etcd";
+  # systemd unit providing the datastore for this backend; a Requires= on a
+  # nonexistent unit (e.g. etcd.service when backend = etcd-mem) fails the
+  # apiserver start job outright.
+  datastoreUnit =
+    {
+      "kine-sqlite" = "kine.service";
+      "etcd-mem" = "etcd-mem.service";
+      "etcd" = "etcd.service";
+    }
+    .${cfg.datastore.backend};
   thisNode = cfg.nodes.${cfg.nodeName} or {
     address = null;
     index = 0;
@@ -57,7 +68,11 @@ let
       "--proxy-client-cert-file=${pki}/front-proxy-client.crt"
       "--proxy-client-key-file=${pki}/front-proxy-client.key"
     ]
-    ++ lib.optionals (!usingKine) [
+    # TLS client flags only for real etcd: kine and etcd-mem listen on a
+    # plaintext unix socket (0700 dir is the access control) — passing
+    # --etcd-cafile there makes the client attempt TLS against a
+    # non-TLS listener.
+    ++ lib.optionals usingEtcd [
       "--etcd-cafile=${pki}/ca.crt"
       "--etcd-certfile=${pki}/apiserver-etcd-client.crt"
       "--etcd-keyfile=${pki}/apiserver-etcd-client.key"
@@ -176,12 +191,12 @@ in
       wantedBy = [ "kubenyx.target" ];
       after = [
         "kubenyx-pki.service"
-        (if usingKine then "kine.service" else "etcd.service")
+        datastoreUnit
       ];
       # PKI is Wants, not Requires: a PKI rerun (nixos-rebuild switch) must
       # never bounce the control plane via restart propagation.
       wants = [ "kubenyx-pki.service" ];
-      requires = [ (if usingKine then "kine.service" else "etcd.service") ];
+      requires = [ datastoreUnit ];
       serviceConfig = hardening // {
         Type = "notify";
         NotifyAccess = "all";

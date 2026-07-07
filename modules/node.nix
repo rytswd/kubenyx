@@ -51,7 +51,7 @@ let
     clusterDomain = cfg.network.clusterDomain;
     resolvConf = cfg.internal.hostResolvConf;
     protectKernelDefaults = true; # the sysctl block below satisfies it
-    nodeStatusReportFrequency = "5m0s";
+    nodeStatusReportFrequency = "10s";
   };
 
   # recursiveUpdate: a user overriding one nested key (e.g.

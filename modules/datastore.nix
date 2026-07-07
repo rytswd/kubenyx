@@ -1,9 +1,9 @@
-# Datastore backends (air/v0.1/datastore.org): kine+sqlite (default) or
-# etcd. The unmodified kube-apiserver talks etcd-v3 gRPC to either.
+# Datastore backends (air/v0.1/datastore.org): kine+sqlite, etcd-mem, or etcd.
+# The unmodified kube-apiserver talks etcd-v3 gRPC to any of them.
 #
 # Access control: a plaintext localhost datastore would let ANY local
 # process (including hostNetwork pods) write straight past RBAC and
-# admission. So the kine socket lives in a 0700 directory, and the etcd
+# admission. So each socket lives in a 0700 directory, and the etcd
 # backend requires client certificates even on loopback.
 {
   config,
@@ -17,23 +17,25 @@ let
   pki = cfg.internal.pkiDir;
   wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
 
-  kineSock = "/run/kubenyx/kine/kine.sock";
+  kineSock    = "/run/kubenyx/kine/kine.sock";
+  etcdMemSock = "/run/kubenyx/etcd-mem/etcd-mem.sock";
   volatileDir = "/run/kubenyx/volatile-state"; # tmpfs; shared name for both backends
-  kineDbDir = if ds.volatile then volatileDir else "/var/lib/kine";
-  kineDsn = "sqlite://${kineDbDir}/state.db?_journal=WAL&cache=shared&_busy_timeout=30000";
+  kineDbDir   = if ds.volatile then volatileDir else "/var/lib/kine";
+  kineDsn     = "sqlite://${kineDbDir}/state.db?_journal=WAL&cache=shared&_busy_timeout=30000";
 in
 {
   options.kubenyx.datastore = {
     backend = lib.mkOption {
       type = lib.types.enum [
         "kine-sqlite"
+        "etcd-mem"
         "etcd"
       ];
       default = "kine-sqlite";
       description = ''
-        kine+sqlite removes etcd's raft/fsync startup cost while the
-        apiserver stays stock (k0s ships the same wiring). etcd remains
-        first-class for multi-node and API-heavy loads.
+        etcd-mem: Rust in-memory etcd shim (<10ms startup, volatile only).
+        kine-sqlite: Go etcd shim + SQLite (~2s startup, persistent capable).
+        etcd: real etcd (multi-node, production).
       '';
     };
     volatile = lib.mkOption {
@@ -68,7 +70,10 @@ in
     type = lib.types.str;
     readOnly = true;
     internal = true;
-    default = if ds.backend == "kine-sqlite" then "unix://${kineSock}" else "https://127.0.0.1:2379";
+    default =
+      if ds.backend == "kine-sqlite" then "unix://${kineSock}"
+      else if ds.backend == "etcd-mem" then "unix://${etcdMemSock}"
+      else "https://127.0.0.1:2379";
     description = "Value for kube-apiserver --etcd-servers.";
   };
 
@@ -124,6 +129,38 @@ in
             RestartSec = 2;
             SuccessExitStatus = "143"; # notify-wrapper exit on orderly stop
             StateDirectory = lib.mkIf (!ds.volatile) "kine";
+          };
+        };
+      })
+
+      (lib.mkIf (ds.backend == "etcd-mem") {
+        assertions = [
+          {
+            assertion = ds.volatile;
+            message = "kubenyx: etcd-mem backend is in-memory only; set datastore.volatile = true";
+          }
+          {
+            assertion = lib.length (lib.attrNames cfg.nodes) == 1;
+            message = "kubenyx: etcd-mem backend supports a single node only";
+          }
+        ];
+        systemd.tmpfiles.rules = [ "d /run/kubenyx/etcd-mem 0700 root root -" ];
+        systemd.services.etcd-mem = {
+          description = "etcd-mem in-memory etcd v3 shim";
+          wantedBy = [ "kubenyx.target" ];
+          serviceConfig = {
+            # etcd-mem sends READY=1 directly via sd_notify — no socket-probe
+            # wrapper needed. Startup is <10ms vs kine's ~2s Go init.
+            Type = "notify";
+            NotifyAccess = "all";
+            ExecStart = lib.escapeShellArgs [
+              (lib.getExe' cfg.internal.tools "etcd-mem")
+              "--listen-address"
+              "unix://${etcdMemSock}"
+            ];
+            Restart = "always";
+            RestartSec = 2;
+            SuccessExitStatus = "143";
           };
         };
       })
