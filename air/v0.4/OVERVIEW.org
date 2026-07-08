@@ -1,0 +1,26 @@
+#+title: v0.4 — Bring-Your-Own-Dataplane & Airgap Ergonomics
+
+* Purpose
+
+v0.1–v0.3 built the cluster kubenyx opinionatedly wants: zero-daemon
+bridge networking, volatile datastores, declared membership. v0.4 makes
+kubenyx a good HOST for clusters that want different opinions at the
+dataplane and workload layer — a CNI that enforces NetworkPolicy and
+encrypts, workloads that claim PersistentVolumes, airgap image sets in
+standard archive formats — without kubenyx growing any of those
+opinions itself. Every piece is a hand-off: kubenyx steps aside
+cleanly, it does not reimplement.
+
+The testing-first invariant continues to bind: the defaults are
+untouched, and the single-node fast path must stay unit-identical.
+
+* Document Map
+
+| Document | Scope |
+|----------+-------|
+| [[file:byod.org][byod.org]] | External-CNI mode, local PersistentVolumes, OCI-archive image seeding; IPv6 + pre-baked image stores staged |
+
+* History
+- 2026-07-08: Milestone opened; byod.org drafted and moved to ready in
+  one step (capabilities and their acceptance tests are fully
+  specified by prior art in the modules).

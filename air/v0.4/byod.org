@@ -1,0 +1,128 @@
+#+title: Bring-Your-Own-Dataplane & Airgap Ergonomics
+#+state: ready
+#+FILETAGS: :network:core:
+
+* Summary
+
+Three hand-offs, each replacing a kubenyx opinion with a clean absence:
+
+1. =network.cni = "external"= — kubenyx stops owning the pod dataplane
+   entirely, leaving it to a CNI the operator deploys (typically a
+   DaemonSet that writes its own conflist and runs its own datapath).
+2. =storage.localVolumes= — declared static local PersistentVolumes
+   plus a no-provisioner default StorageClass, so PVC-shaped workloads
+   run without kubenyx shipping a provisioner daemon.
+3. =node.seedImages= accepts standard OCI/docker archive files, not
+   just self-executing streamLayeredImage derivations.
+
+Staged (this doc, later phases): IPv6 single-stack eval-typing;
+build-time pre-baked containerd stores.
+
+* Motivation
+
+Kubenyx's zero-daemon bridge CNI is the right default for disposable
+test clusters — no images, no DaemonSet, pod networking at unit-start
+speed. It is deliberately NOT a policy engine: no NetworkPolicy
+enforcement, no encryption, no kube-proxy replacement, no LB IPAM.
+Clusters that test those behaviors bring a real CNI, and today kubenyx
+fights them: the bridge conflist is written unconditionally (and
+containerd loads the LEXICALLY FIRST conflist, so kubenyx's
+=10-kubenyx.conflist= wins over most third-party names — the external
+CNI silently loses), static pod routes assume kubenyx's subnetting,
+and the NAT unit rewrites egress the foreign dataplane may be
+encrypting. =kubeProxy.enable = false= already exists for the service
+plane ("disable only when another service dataplane exists"); the CNI
+needs the same courtesy.
+
+Storage: kubenyx ships no StorageClass, so any PVC pends forever.
+Shipping a dynamic provisioner would add a daemon and an image to the
+boot path — against D-zero-daemon. Declared static PVs cover the
+test-workload case (a StatefulSet with a known claim size) with zero
+runtime moving parts, exactly like declared membership covers "join".
+
+Seeding: =streamLayeredImage= self-executing derivations are the
+native format, but airgap sets from other build systems arrive as
+OCI/docker archive tarballs; requiring a repack is pointless friction
+when =ctr images import= reads them directly.
+
+* Design
+
+** 1. =kubenyx.network.cni = "bridge" | "external"= (default bridge)
+External mode skips, with =mkIf= gating (bridge mode stays
+byte-identical):
+- the =/etc/cni/net.d/10-kubenyx.conflist= etc entry — ABSENT, not
+  empty: containerd picks the lexically first conflist, so an empty or
+  stub file would still shadow the external CNI's;
+- the =kubenyx-routes= static pod routes (the external CNI owns pod
+  reachability);
+- the NAT/masquerade nftables unit;
+- the cni0-interface firewall accepts (they reference an interface
+  that will not exist; the external CNI manages its own openings — the
+  apiserver/DNS accepts move to the node's main interface when the
+  firewall is enabled).
+Kept in both modes: everything else — kubelet still runs with the
+standard CNI dirs (=/etc/cni/net.d=, =/opt/cni/bin= per containerd
+defaults), so the external CNI's DaemonSet (or a test's static conf)
+is picked up the moment it writes its file. =network.kubeProxy.enable=
+stays orthogonal: external CNIs with service dataplanes disable it,
+CNIs without keep it.
+Assertion: =cni = "external"= is incompatible with nothing — but
+=dns.enable= keeps working (host CoreDNS serves on the node address,
+reachable regardless of dataplane).
+
+** 2. =kubenyx.storage.localVolumes= + default StorageClass
+#+begin_src nix
+kubenyx.storage.localVolumes = {
+  count = 4;            # PVs local-pv-0..3
+  size = "10Gi";        # capacity each
+  basePath = "/var/lib/kubenyx/volumes";  # basePath/<pv-name>
+  storageClass = "kubenyx-local";         # created, marked default
+};
+#+end_src
+Renders: one =StorageClass= (=kubernetes.io/no-provisioner=,
+=volumeBindingMode: WaitForFirstConsumer=, default-class annotation)
+plus =count= =local=-type PVs pinned to this node via nodeAffinity,
+delivered through the existing addons applier; a tmpfiles rule creates
+the backing directories. Zero daemons, zero images. PVCs bind by
+capacity/access-mode matching as upstream defines; dynamic
+provisioning stays a user-supplied =addons.manifests= concern.
+Multi-node: each PV's nodeAffinity names the node that declared it —
+the option is per-node config, so heterogeneous layouts are natural.
+
+** 3. =node.seedImages= format branch
+Entries that are executable keep today's semantics (run, stdout piped
+to =ctr images import=). Non-executable entries are treated as archive
+files: =ctr --namespace k8s.io images import --all-platforms <file>=
+reads OCI layouts and docker archives natively. One =if [ -x ]= in the
+seed script; the option type widens to =listOf path=.
+
+** 4. Staged for later phases
+- IPv6 single-stack: the eval layer is v4-typed (CIDR math in lib/,
+  option defaults, firewall rules); kubenyx-pki is already
+  family-agnostic. With cni=external most of the v4 surface is
+  bypassed — the remaining work is options/flags/dns-config typing.
+- Pre-baked image stores: import the seed set into a containerd
+  content store at BUILD time and ship =/var/lib/containerd= in the
+  image — boot-time import cost goes to ~zero. Candidate for the
+  microVM store-disk pipeline.
+
+* Acceptance Criteria
+- =external-cni= test leg: a single-node cluster with
+  =cni = "external"= where the TEST supplies the conflist (standing in
+  for a CNI DaemonSet's write): node goes Ready, a pod runs and
+  reaches the host DNS; =/etc/cni/net.d= contains ONLY the
+  test-supplied file (kubenyx wrote nothing); no kubenyx-routes / NAT
+  units exist.
+- =local-storage= test leg: a PVC binds against the declared PVs
+  (WaitForFirstConsumer: binds on pod schedule), the pod writes and
+  re-reads data across a pod delete/recreate.
+- OCI-archive seeding proven in a test leg: an image supplied as a
+  plain =docker save=-style tar (not executable) is imported and a pod
+  runs from it.
+- Fast path: single-node guest unit list bit-identical; bridge-mode
+  =network.nix=-derived units byte-identical (flag-identity proof like
+  the quorum work).
+
+* History
+- 2026-07-08: Drafted and moved to ready; implementation campaign
+  launched same-session.
