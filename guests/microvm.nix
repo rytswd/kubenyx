@@ -85,6 +85,15 @@ lib.mkMerge [
     # fork"). No cost on ordinary boots.
     boot.kernelModules = [ "vmgenid" ];
 
+    # ---- interactive console ---------------------------------------------------
+    # Disposable host-only test VM: autolog the serial console in as root.
+    # Without this there is no way in at all — root is locked by default and
+    # the per-boot PKI (and thus any credential) exists only inside the
+    # guest tmpfs. kubectl works immediately in the shell via the global
+    # KUBECONFIG. Exit the VM with `poweroff` (or `reboot` — firecracker
+    # treats a guest reboot as VMM exit).
+    services.getty.autologinUser = "root";
+
     # ---- boot leanness -------------------------------------------------------
     documentation.enable = false;
     nix.enable = false; # guests are built, never build

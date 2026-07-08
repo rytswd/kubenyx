@@ -57,9 +57,20 @@ KUBENYX-CLUSTER-READY uptime=7.77s
 ```
 
 That marker means: node Ready, RBAC + addons applied, CoreDNS serving.
-The apiserver is reachable from the host at `https://10.100.0.2:6443`
-(credentials live in the guest at `/var/lib/kubenyx/kubeconfigs/` —
-`kubectl` works as root inside the guest out of the box).
+The serial console autologs you in as root (you may need to press
+Enter to redraw the prompt) and `kubectl` works immediately:
+
+```console
+[root@kubenyx:~]# kubectl get nodes
+NAME      STATUS   ROLES    AGE   VERSION
+kubenyx   Ready    <none>   30s   v1.36.2
+```
+
+Exit the VM with `poweroff` (or `reboot` — firecracker treats a guest
+reboot as VMM exit). The apiserver is also reachable from the host at
+`https://10.100.0.2:6443`, but the credentials are minted per boot
+inside the guest (`/var/lib/kubenyx/kubeconfigs/`) — copy them out if
+you want host-side kubectl.
 
 Everything is volatile by design: tmpfs root over a read-only store
 image, in-memory datastore, PKI regenerated in ~6 ms per boot. Kill the
