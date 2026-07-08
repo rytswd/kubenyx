@@ -82,6 +82,7 @@
             kubenyx.nodes.kubenyx = {
               index = 0;
               address = "10.100.0.2";
+              role = "server";
             };
           };
           microvm-cloud-hypervisor = mkMicrovm "cloud-hypervisor" {
@@ -100,6 +101,7 @@
             kubenyx.nodes.kubenyx = {
               index = 0;
               address = "10.100.0.2";
+              role = "server";
             };
           };
           # SLiRP user networking; runs anywhere (KVM with TCG fallback) —
@@ -127,6 +129,7 @@
             kubenyx.nodes.kubenyx = {
               index = 0;
               address = "10.0.2.15";
+              role = "server";
             };
           };
         };

@@ -23,10 +23,12 @@ let
     server = {
       index = 0;
       address = "192.168.1.2";
+      role = "server";
     };
     agent = {
       index = 1;
       address = "192.168.1.1";
+      role = "agent";
     };
   };
 in

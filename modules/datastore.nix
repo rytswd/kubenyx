@@ -22,6 +22,15 @@ let
   volatileDir = "/run/kubenyx/volatile-state"; # tmpfs; shared name for both backends
   kineDbDir   = if ds.volatile then volatileDir else "/var/lib/kine";
   kineDsn     = "sqlite://${kineDbDir}/state.db?_journal=WAL&cache=shared&_busy_timeout=30000";
+
+  # Both shims are single-writer, but only kube-apiserver ever talks to the
+  # datastore — over a local unix socket, on the server. Agents never touch
+  # it, so the correct constraint is "exactly one server", not "exactly one
+  # node" (air/v0.2/multinode-microvm.org §1). Multi-SERVER (quorum) remains
+  # backend = "etcd" — that is v0.3's work.
+  serverCount = lib.length (
+    lib.attrNames (lib.filterAttrs (_: n: n.role == "server") cfg.nodes)
+  );
 in
 {
   options.kubenyx.datastore = {
@@ -82,8 +91,8 @@ in
       {
         assertions = [
           {
-            assertion = ds.backend != "kine-sqlite" || lib.length (lib.attrNames cfg.nodes) == 1;
-            message = "kubenyx: the kine-sqlite backend supports a single node; use backend = \"etcd\" for multi-node";
+            assertion = ds.backend != "kine-sqlite" || serverCount == 1;
+            message = "kubenyx: the kine-sqlite backend supports exactly one server node; use backend = \"etcd\" for multi-server";
           }
         ];
         systemd.tmpfiles.rules = [
@@ -140,8 +149,8 @@ in
             message = "kubenyx: etcd-mem backend is in-memory only; set datastore.volatile = true";
           }
           {
-            assertion = lib.length (lib.attrNames cfg.nodes) == 1;
-            message = "kubenyx: etcd-mem backend supports a single node only";
+            assertion = serverCount == 1;
+            message = "kubenyx: etcd-mem backend supports exactly one server node; use backend = \"etcd\" for multi-server";
           }
         ];
         systemd.tmpfiles.rules = [ "d /run/kubenyx/etcd-mem 0700 root root -" ];

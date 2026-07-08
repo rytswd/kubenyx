@@ -24,8 +24,27 @@ let
         type = lib.types.ints.between 0 255;
         description = "Stable node index; node N owns the Nth pod subnet (D6).";
       };
+      role = lib.mkOption {
+        type = lib.types.enum [
+          "server"
+          "agent"
+        ];
+        default = "agent";
+        description = ''
+          This member's cluster role, as seen by every node. Shared schema
+          for the v0.2 microVM mesh and v0.3 durable/HA tracks: datastore
+          constraints count servers, and v0.3 later derives the etcd quorum
+          and LB backend set from the same field. Default "agent" — explicit
+          multi-node declarations must mark their server(s); the implicit
+          single-node default entry inherits the machine-level kubenyx.role.
+        '';
+      };
     };
   };
+
+  serverCount = lib.length (
+    lib.attrNames (lib.filterAttrs (_: n: n.role == "server") cfg.nodes)
+  );
 
   mkPkgOption =
     name: pkg:
@@ -87,11 +106,14 @@ in
     nodes = lib.mkOption {
       type = lib.types.attrsOf nodeSubmodule;
       default = {
+        # Implicit single-node membership inherits the machine role, so the
+        # zero-config single-node server keeps counting as its own server.
         ${cfg.nodeName} = {
           index = 0;
+          role = cfg.role;
         };
       };
-      defaultText = lib.literalExpression ''{ ''${nodeName} = { index = 0; }; }'';
+      defaultText = lib.literalExpression ''{ ''${nodeName} = { index = 0; role = role; }; }'';
       description = "Declared cluster membership. Nix is the source of truth, not runtime allocation.";
     };
 
@@ -168,10 +190,24 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [
+    # warnIf (not an assertion): a 2-server membership is legal but an even
+    # quorum — it survives zero failures while doubling the blast surface.
+    # v0.3's durable track wants 1 or 3+.
+    assertions = lib.warnIf (serverCount == 2)
+      "kubenyx: 2 nodes declare role = \"server\" — an even quorum tolerates zero failures; use 1 or 3+ servers" [
       {
         assertion = cfg.nodes ? ${cfg.nodeName};
         message = "kubenyx: nodeName ${cfg.nodeName} is not declared in kubenyx.nodes";
+      }
+      {
+        # `or` fallback keeps evaluation alive so the missing-nodeName
+        # assertion above fires first with its friendlier message.
+        assertion = (cfg.nodes.${cfg.nodeName} or { role = cfg.role; }).role == cfg.role;
+        message = "kubenyx: this machine's kubenyx.role (${cfg.role}) does not match its own kubenyx.nodes.${cfg.nodeName}.role entry";
+      }
+      {
+        assertion = serverCount >= 1;
+        message = "kubenyx: at least one node in kubenyx.nodes must declare role = \"server\"";
       }
       {
         assertion = cfg.role != "agent" || cfg.controlPlaneEndpoint != null;

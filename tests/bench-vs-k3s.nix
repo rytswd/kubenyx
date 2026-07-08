@@ -31,6 +31,7 @@ in
           nodes.kubenyxvm = {
             index = 0;
             address = "192.168.1.2";
+            role = "server";
           };
         };
       };
