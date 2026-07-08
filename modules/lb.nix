@@ -22,6 +22,7 @@
 }:
 let
   cfg = config.kubenyx;
+  pki = cfg.internal.pkiDir;
   servers = lib.filterAttrs (_: n: n.role == "server") cfg.nodes;
   serverCount = lib.length (lib.attrNames servers);
   # Name-sorted (attrValues follows attrNames order): every agent carries
@@ -108,6 +109,18 @@ in
             (toString cfg.lb.probeIntervalMs)
             "--fail-threshold"
             (toString cfg.lb.failThreshold)
+            # Authenticated /readyz probe: the apiserver runs
+            # --anonymous-auth=false, so an anonymous probe is answered 401
+            # by the auth filter regardless of readiness — only an
+            # authenticated request sees the real 200/500. The agent's
+            # shipped kubelet client cert is the identity (any authenticated
+            # subject may GET /readyz via system:public-info-viewer); the LB
+            # loads it lazily, since credentials arrive over the operator
+            # channel after this unit starts.
+            "--probe-cert"
+            "${pki}/kubelet.crt"
+            "--probe-key"
+            "${pki}/kubelet.key"
           ]
           ++ lib.concatMap (b: [
             "--backend"

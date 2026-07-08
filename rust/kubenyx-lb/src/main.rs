@@ -81,6 +81,14 @@ struct Cfg {
     /// backends should not need certificates. Real apiservers are always
     /// probed over TLS.
     probe_http: bool,
+    /// Client certificate for the /readyz probe. Kubenyx apiservers run
+    /// --anonymous-auth=false, so an unauthenticated probe is answered 401
+    /// by the auth filter regardless of readiness — only an authenticated
+    /// request ever sees /readyz's real 200/500 (any authenticated subject
+    /// is authorized: system:public-info-viewer covers /readyz). The agent's
+    /// kubelet client cert is the natural identity here.
+    probe_cert: Option<String>,
+    probe_key: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<Cfg, String> {
@@ -92,6 +100,8 @@ fn parse_args(args: &[String]) -> Result<Cfg, String> {
         drain_timeout: Duration::from_millis(10_000),
         dial_timeout: Duration::from_millis(3_000),
         probe_http: false,
+        probe_cert: None,
+        probe_key: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -114,6 +124,8 @@ fn parse_args(args: &[String]) -> Result<Cfg, String> {
             "--drain-timeout-ms" => cfg.drain_timeout = ms(val()?, flag)?,
             "--dial-timeout-ms" => cfg.dial_timeout = ms(val()?, flag)?,
             "--probe-http" => cfg.probe_http = true,
+            "--probe-cert" => cfg.probe_cert = Some(val()?),
+            "--probe-key" => cfg.probe_key = Some(val()?),
             other => return Err(format!("unknown flag {other}")),
         }
         i += 1;
@@ -123,6 +135,9 @@ fn parse_args(args: &[String]) -> Result<Cfg, String> {
     }
     if cfg.fail_threshold == 0 {
         return Err("--fail-threshold must be >= 1".into());
+    }
+    if cfg.probe_cert.is_some() != cfg.probe_key.is_some() {
+        return Err("--probe-cert and --probe-key must be given together".into());
     }
     Ok(cfg)
 }
@@ -208,15 +223,32 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
     }
 }
 
-fn tls_probe_config() -> Arc<rustls::ClientConfig> {
+/// Probe TLS config. With client_cert paths, returns None until BOTH files
+/// exist and parse — the agent's credentials arrive over the operator
+/// channel after this process starts, so the health loop retries the load
+/// every round instead of dying at startup.
+fn tls_probe_config(client_cert: Option<(&str, &str)>) -> Option<Arc<rustls::ClientConfig>> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .expect("tls versions")
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
-        .with_no_client_auth();
-    Arc::new(config)
+        .with_custom_certificate_verifier(Arc::new(NoVerify(provider)));
+    let config = match client_cert {
+        None => builder.with_no_client_auth(),
+        Some((cert_path, key_path)) => {
+            let cert_data = std::fs::read(cert_path).ok()?;
+            let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut cert_data.as_slice()).collect::<Result<_, _>>().ok()?;
+            if certs.is_empty() {
+                return None;
+            }
+            let key_data = std::fs::read(key_path).ok()?;
+            let key_der = rustls_pemfile::private_key(&mut key_data.as_slice()).ok()??;
+            builder.with_client_auth_cert(certs, key_der).ok()?
+        }
+    };
+    Some(Arc::new(config))
 }
 
 fn probe(b: &Backend, tls: Option<&Arc<rustls::ClientConfig>>, timeout: Duration) -> bool {
@@ -263,14 +295,28 @@ fn probe(b: &Backend, tls: Option<&Arc<rustls::ClientConfig>>, timeout: Duration
 }
 
 fn health_loop(backends: Arc<Vec<Backend>>, cfg: ProbePolicy) {
-    let tls = if cfg.http { None } else { Some(tls_probe_config()) };
+    // Anonymous base config: used until the client certificate (if any) is
+    // loadable. Against a kubenyx apiserver it only ever earns a 401, so
+    // backends stay unhealthy until the cert lands — which is correct: no
+    // credentials means no kubelet either, so READY has nothing to gate yet.
+    let base = if cfg.http { None } else { tls_probe_config(None) };
+    let mut with_cert: Option<Arc<rustls::ClientConfig>> = None;
     // Probe timeout: never longer than 1.5s (kubenyx-ready's ceiling), never
     // longer than the interval says a whole round should take.
     let timeout = cfg.interval.max(Duration::from_millis(250)).min(Duration::from_millis(1500));
     let mut ever_ready = false;
     loop {
+        if !cfg.http && with_cert.is_none() {
+            if let Some((c, k)) = &cfg.client_cert {
+                with_cert = tls_probe_config(Some((c, k)));
+                if with_cert.is_some() {
+                    eprintln!("kubenyx-lb: probe client certificate loaded from {c}");
+                }
+            }
+        }
+        let tls = with_cert.as_ref().or(base.as_ref());
         for b in backends.iter() {
-            if probe(b, tls.as_ref(), timeout) {
+            if probe(b, tls, timeout) {
                 b.fails.store(0, Ordering::Relaxed);
                 if !b.healthy.swap(true, Ordering::Relaxed) {
                     eprintln!("KUBENYX-LB-READMIT {}", b.spec);
@@ -298,6 +344,10 @@ struct ProbePolicy {
     interval: Duration,
     fail_threshold: u32,
     http: bool,
+    /// (cert, key) PEM paths; loaded lazily by the health loop (see
+    /// tls_probe_config). Renewal re-ships are picked up on the next
+    /// service restart, same as the backend list.
+    client_cert: Option<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +479,7 @@ fn main() {
             interval: cfg.probe_interval,
             fail_threshold: cfg.fail_threshold,
             http: cfg.probe_http,
+            client_cert: cfg.probe_cert.clone().zip(cfg.probe_key.clone()),
         };
         std::thread::spawn(move || health_loop(backends, policy));
     }
@@ -521,6 +572,13 @@ mod tests {
         assert!(parse_args(&s(&["--backend", "a:1", "--fail-threshold", "0"])).is_err());
         assert!(parse_args(&s(&["--backend", "a:1", "--probe-interval-ms", "x"])).is_err());
         assert!(parse_args(&s(&["--frob"])).is_err(), "unknown flag");
+        // Probe client-cert flags travel as a pair.
+        assert!(parse_args(&s(&["--backend", "a:1", "--probe-cert", "/c.crt"])).is_err());
+        assert!(parse_args(&s(&["--backend", "a:1", "--probe-key", "/c.key"])).is_err());
+        assert!(parse_args(&s(&[
+            "--backend", "a:1", "--probe-cert", "/c.crt", "--probe-key", "/c.key"
+        ]))
+        .is_ok());
     }
 
     #[test]

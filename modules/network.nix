@@ -71,6 +71,7 @@ let
   '';
 
   peers = lib.filterAttrs (n: _: n != cfg.nodeName) cfg.nodes;
+  serverCount = lib.length (lib.attrNames (lib.filterAttrs (_: n: n.role == "server") cfg.nodes));
 in
 {
   options.kubenyx.network = {
@@ -110,7 +111,19 @@ in
     environment.etc."cni/net.d/10-kubenyx.conflist".text = conflist;
 
     networking.firewall = lib.mkIf net.openFirewall {
-      allowedTCPPorts = [ 10250 ] ++ lib.optional (cfg.role == "server") 6443;
+      allowedTCPPorts = [
+        10250
+      ]
+      ++ lib.optional (cfg.role == "server") 6443
+      # etcd quorum ports (durable-ha.org §2): with >1 server, peers dial
+      # this member's client (2379) and peer/raft (2380) listeners on the
+      # declared address. Both stay TLS + client-cert-auth (datastore.nix),
+      # so the firewall opening is not the access control. Gated on the
+      # multi-server etcd branch: single-server firewalls stay identical.
+      ++ lib.optionals (cfg.role == "server" && cfg.datastore.backend == "etcd" && serverCount > 1) [
+        2379
+        2380
+      ];
       # Deliberately NOT trustedInterfaces = [ "cni0" ]: that would let any
       # pod reach every host-bound port. Pods get exactly what the platform
       # needs — the apiserver via its service VIP (DNAT lands on host:6443)

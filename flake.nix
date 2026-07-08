@@ -500,6 +500,7 @@
           single-node = runTest ./tests/single-node.nix;
           single-node-etcd = runTest ./tests/single-node-etcd.nix;
           multi-node = runTest ./tests/multi-node.nix;
+          multi-server = runTest ./tests/multi-server.nix;
           bench-vs-k3s = runTest ./tests/bench-vs-k3s.nix;
         }
       );

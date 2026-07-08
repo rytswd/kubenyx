@@ -140,6 +140,17 @@ LB on it becomes =https://127.0.0.1:6444= and every agent kubeconfig
 renders from it (apiserver certs already carry IP:127.0.0.1, so TLS
 verification holds through the forwarder).
 
+Live multi-server validation (2026-07-08, the test leg below) caught a
+probe gap: the apiserver runs =--anonymous-auth=false=, so an
+unauthenticated =/readyz= is answered 401 by the auth filter regardless
+of readiness — and only 2xx counts as serving, so no backend could ever
+be marked healthy. kubenyx-lb grew =--probe-cert/--probe-key= (the
+agent's shipped kubelet client cert; any authenticated subject may GET
+=/readyz= via =system:public-info-viewer=), loaded LAZILY by the health
+loop because credentials arrive over the operator channel after the LB
+starts — until they land, backends stay unhealthy, which is correct: no
+credentials means no kubelet for READY to gate either.
+
 ** 5. Control-plane redundancy details
 - =controlPlane.leaderElect= defaults to true when >1 server (option
   exists; testing default stays false).
@@ -179,6 +190,19 @@ overrides (D12).
 
 * Test Matrix (all NixOS VM tests)
 - =multi-server=: 3 servers + 1 agent, etcd quorum forms, all Ready.
+  Implemented (2026-07-08, =tests/multi-server.nix=): servers run the
+  durable posture (balanced + persistent etcd), the CA is minted OFFLINE
+  on the driver host (=mint-ca=; the driver is the operator channel) and
+  the custody gate is asserted to have refused self-mint first. Quorum
+  proof is =etcdctl member list= (3 started) plus =endpoint health
+  --cluster= over the declared addresses; kubectl is exercised against
+  every server directly (write via one apiserver, read via the others);
+  the agent's Ready is the kubenyx-lb datapath proof (its kubelet only
+  ever dials 127.0.0.1:6444). Two implementation gaps surfaced and
+  fixed: the LB probe auth (§4 note) and the firewall — 2379/2380 were
+  never opened, so quorum could not form with the firewall on; now
+  opened in network.nix gated on server && etcd && >1 server
+  (single-server firewalls verified identical: 6443/10250 only).
 - =failover=: crash server0 (the driver can) → API keeps answering via
   the LB within seconds; kill -9 etcd on one member → no data loss
   (write before, read after).
@@ -238,3 +262,9 @@ overrides (D12).
   plus §5's leaderElect default; details inline in §2. Single-server
   etcd unit proven flag-identical. §5 addons verification, §6 and the
   test matrix remain.
+- 2026-07-08: =multi-server= test leg green (25.6s wall on the KVM
+  box); details inline in the Test Matrix. Fixed along the way: LB
+  probe authentication (§4 note) and the missing 2379/2380 firewall
+  openings. §5's "no addon fighting" is asserted here too (all three
+  appliers complete against the shared datastore). Remaining:
+  =failover=, =server-reboot=, =agent-add=, =ca-custody= legs.
