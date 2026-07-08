@@ -503,6 +503,7 @@
           multi-server = runTest ./tests/multi-server.nix;
           failover = runTest ./tests/failover.nix;
           agent-add = runTest ./tests/agent-add.nix;
+          ca-custody = runTest ./tests/ca-custody.nix;
           bench-vs-k3s = runTest ./tests/bench-vs-k3s.nix;
         }
       );

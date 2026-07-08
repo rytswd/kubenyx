@@ -235,6 +235,19 @@ overrides (D12).
   the control-plane units must show zero restarts (hitless proof).
 - =ca-custody=: durable server without a shipped CA refuses to boot
   with a clear message; volatile guest still self-mints.
+  Implemented (2026-07-08, =tests/ca-custody.nix=): a durable-posture
+  server (balanced + persistent etcd) boots next to a plain testing
+  guest. The durable server's PKI unit hard-fails with the documented
+  error (journal names the custody requirement AND the exact
+  =kubenyx-pki mint-ca --out= command; unit in "failed"; no ca.key /
+  apiserver.crt / apiserver ever appeared). The bundle is minted
+  offline on the driver host and shipped as the six custody files;
+  after the PKI rerun the running ca.crt is asserted bit-identical to
+  the operator's copy (sha256 against the driver-side bundle) and the
+  node goes Ready end-to-end. The testing guest self-mints per boot
+  with zero ceremony and the custody error never appears in its
+  journal. No implementation changes were needed — the gate behaved as
+  specified on the first run. Leg wall: ~30s.
 
 * Sizing (relative)
 | Piece | Size | Notes |
@@ -295,3 +308,7 @@ overrides (D12).
   etcd death cannot stop-propagate into (and permanently kill) the API
   replica; single-server keeps Requires, driver drvs bit-identical.
   Remaining: =server-reboot=, =agent-add=, =ca-custody= legs.
+- 2026-07-08: =ca-custody= test leg green (~30s wall on the KVM box);
+  details inline in the Test Matrix. No implementation fixes needed —
+  the §3 gate refused, hinted mint-ca, and accepted the shipped bundle
+  exactly as specified. Remaining: =server-reboot=, =agent-add= legs.
