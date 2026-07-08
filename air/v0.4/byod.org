@@ -126,6 +126,22 @@ seed script; the option type widens to =listOf path=.
 * History
 - 2026-07-08: Drafted and moved to ready; implementation campaign
   launched same-session.
+- 2026-07-08: §2 implemented (=modules/storage.nix=):
+  =storage.localVolumes= (nullOr submodule, default null = nothing
+  declared) renders one default-annotated no-provisioner StorageClass
+  (=WaitForFirstConsumer=) + =count= Retain local PVs
+  (=local-pv-0..count-1=, nodeAffinity on the declaring =nodeName=)
+  into =addons.manifests= (=storage-0class= sorts before
+  =storage-pv-*= in the applier's lexical file order); tmpfiles create
+  =basePath/<pv-name>=. Zero daemons, zero images. =local-storage=
+  test leg green: SC/PVs Available with no pods running at all, PVC
+  with no storageClassName pends 10s (WaitForFirstConsumer honored),
+  binds on pod schedule, write lands in the PV's host directory, and
+  the data survives pod delete/recreate on the same claim/PV.
+  Flag-identity proven: default-config eval dump of all 85 systemd
+  unit texts + built-unit store paths, all 97 =environment.etc=
+  source paths, and the tmpfiles rules is byte-identical
+  before/after.
 - 2026-07-08: §1 implemented (=modules/network.nix=): =network.cni=
   enum, all four bridge opinions =mkIf=-gated (conflist etc entry,
   kubenyx-routes, kubenyx-nat, cni0 firewall accepts; external mode

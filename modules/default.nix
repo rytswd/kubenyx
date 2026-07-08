@@ -63,6 +63,7 @@ in
     ./network.nix
     ./dns.nix
     ./addons.nix
+    ./storage.nix
   ];
 
   options.kubenyx = {
