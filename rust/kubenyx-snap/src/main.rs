@@ -26,10 +26,48 @@ use std::net::{TcpStream, UdpSocket};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Child, Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// The VMM we spawned and still own. Every exit path — die(), SIGINT,
+/// SIGTERM — must kill it, or an interrupted `take` leaves a headless
+/// firecracker squatting on the tap (found the hard way: Ctrl-C during
+/// take's silent boot wait leaked the VM every time).
+static OWNED_VMM: AtomicI32 = AtomicI32::new(0);
+
+fn kill_owned_vmm() {
+    let pid = OWNED_VMM.swap(0, Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+        }
+    }
+}
+
+extern "C" fn on_signal(_sig: libc::c_int) {
+    // kill(2) and _exit(2) are async-signal-safe; nothing else here is
+    // allowed to allocate or lock.
+    let pid = OWNED_VMM.swap(0, Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    unsafe { libc::_exit(130) }
+}
+
+fn install_signal_cleanup() {
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_signal as libc::sighandler_t);
+    }
+}
+
 fn die(msg: &str) -> ! {
+    kill_owned_vmm();
     eprintln!("kubenyx-snap: {msg}");
     exit(2);
 }
@@ -260,10 +298,13 @@ fn cmd_take(flags: &Flags) {
         .stdin(Stdio::null())
         .spawn()
         .unwrap_or_else(|e| die(&format!("spawn {runner}: {e}")));
+    OWNED_VMM.store(vm.id() as i32, Ordering::SeqCst);
 
-    eprintln!("take: waiting for '{marker}' (console: {})", console.display());
+    eprintln!(
+        "take: booting (~10s), waiting for '{marker}' (console: {})",
+        console.display()
+    );
     if !wait_marker(&console, &marker, Duration::from_secs(wait_secs)) {
-        kill_wait(&mut vm);
         die(&format!("'{marker}' not seen within {wait_secs}s"));
     }
     // Let trailing addons (coredns) settle so restored clones are fully idle.
@@ -280,6 +321,7 @@ fn cmd_take(flags: &Flags) {
     eprintln!("take: snapshot written in {:?} -> {}", t.elapsed(), out.display());
 
     kill_wait(&mut vm); // frees the tap for future resumes
+    OWNED_VMM.store(0, Ordering::SeqCst);
     let _ = std::fs::remove_file(&sock);
     println!("{}", out.display());
 }
@@ -316,6 +358,7 @@ fn resume_once(
         .stderr(Stdio::from(console))
         .spawn()
         .unwrap_or_else(|e| die(&format!("spawn {firecracker}: {e}")));
+    OWNED_VMM.store(child.id() as i32, Ordering::SeqCst);
 
     while !api_sock.exists() {
         if t_spawn.elapsed() > Duration::from_secs(5) {
@@ -374,8 +417,10 @@ fn cmd_resume(flags: &Flags) {
         child.id(),
         api_sock.display(),
     );
-    // The VMM stays running (reparented to init when we exit); killing the
-    // printed pid frees the tap.
+    // The VMM deliberately stays running (reparented to init when we
+    // exit); killing the printed pid frees the tap. Disown it so the
+    // exit paths don't reap it.
+    OWNED_VMM.store(0, Ordering::SeqCst);
     std::mem::forget(child);
 }
 
@@ -395,6 +440,7 @@ fn cmd_cycle(flags: &Flags) {
         );
         totals.push(total_ms);
         kill_wait(&mut child);
+        OWNED_VMM.store(0, Ordering::SeqCst);
         let _ = std::fs::remove_file(&api_sock);
         // Give the kernel a beat to tear the tap attachment down.
         std::thread::sleep(Duration::from_millis(200));
@@ -409,6 +455,7 @@ fn cmd_cycle(flags: &Flags) {
 }
 
 fn main() {
+    install_signal_cleanup();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first().map(String::as_str) else {
         die("usage: kubenyx-snap take|resume|cycle [flags]");
