@@ -42,6 +42,8 @@ struct Cfg {
     leaf_days: i64,
     renew_days: i64,
     etcd: bool,
+    out: PathBuf,
+    require_shipped_ca: bool,
 }
 
 fn parse_args() -> Cfg {
@@ -59,11 +61,19 @@ fn parse_args() -> Cfg {
         leaf_days: 365,
         renew_days: 30,
         etcd: false,
+        out: PathBuf::new(),
+        require_shipped_ca: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         let mut val = || it.next().unwrap_or_else(|| die(&format!("missing value for {a}")));
         match a.as_str() {
+            // Subcommand form: `kubenyx-pki mint-ca --out DIR` (operator
+            // CLI, durable-ha.org §3) rides the same parser as the flag
+            // style the units use.
+            "mint-ca" => cfg.mode = "mint-ca".into(),
+            "--out" => cfg.out = val().into(),
+            "--require-shipped-ca" => cfg.require_shipped_ca = true,
             "--mode" => cfg.mode = val(),
             "--pki-dir" => cfg.pki = val().into(),
             "--kubeconfig-dir" => cfg.kc = val().into(),
@@ -87,7 +97,7 @@ fn parse_args() -> Cfg {
             other => die(&format!("unknown flag {other}")),
         }
     }
-    if cfg.node_name.is_empty() {
+    if cfg.node_name.is_empty() && cfg.mode != "mint-ca" {
         die("--node-name is required");
     }
     cfg
@@ -100,6 +110,10 @@ fn die(msg: &str) -> ! {
 
 fn main() {
     let cfg = parse_args();
+    if cfg.mode == "mint-ca" {
+        mint_ca(&cfg);
+        return;
+    }
     fs::create_dir_all(&cfg.pki).unwrap_or_else(|e| die(&format!("mkdir pki: {e}")));
     fs::create_dir_all(&cfg.kc).unwrap_or_else(|e| die(&format!("mkdir kubeconfigs: {e}")));
     for d in [&cfg.pki, &cfg.kc] {
@@ -204,6 +218,32 @@ fn ensure_ca(pki: &Path, name: &str, cn: &str) {
     write_private(&crt, &cert.pem());
     eprintln!("kubenyx-pki: issued CA {name}");
 }
+
+/// Service-account signing keypair (ECDSA -> ES256 tokens). Present-file
+/// gated like the CAs: never regenerated once it exists.
+fn ensure_sa(pki: &Path) {
+    if pki.join("sa.key").exists() {
+        return;
+    }
+    use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    let sk = p256::SecretKey::random(&mut rand_core::OsRng);
+    let pk = sk.public_key();
+    write_private(&pki.join("sa.key"), sk.to_pkcs8_pem(Default::default()).expect("sa pem").as_str());
+    write_private(&pki.join("sa.pub"), &pk.to_public_key_pem(Default::default()).expect("sa pub"));
+}
+
+/// The operator-custody trust roots (durable-ha.org §3): both CAs and the
+/// SA keypair. Every server of an HA set must hold the SAME six files —
+/// a diverged CA partitions trust, a diverged SA key partitions token
+/// verification across apiservers.
+const CUSTODY_FILES: [&str; 6] = [
+    "ca.crt",
+    "ca.key",
+    "front-proxy-ca.crt",
+    "front-proxy-ca.key",
+    "sa.key",
+    "sa.pub",
+];
 
 struct Issue<'a> {
     pki: &'a Path,
@@ -375,17 +415,34 @@ fn server(cfg: &Cfg) {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(detect_node_ip);
 
-    ensure_ca(pki, "ca", "kubenyx-ca");
-    // Distinct front-proxy CA (must never be the client CA — spoofing risk).
-    ensure_ca(pki, "front-proxy-ca", "kubenyx-front-proxy-ca");
-
-    // Service-account signing keypair (ECDSA -> ES256 tokens).
-    if !pki.join("sa.key").exists() {
-        use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
-        let sk = p256::SecretKey::random(&mut rand_core::OsRng);
-        let pk = sk.public_key();
-        write_private(&pki.join("sa.key"), sk.to_pkcs8_pem(Default::default()).expect("sa pem").as_str());
-        write_private(&pki.join("sa.pub"), &pk.to_public_key_pem(Default::default()).expect("sa pub"));
+    if cfg.require_shipped_ca {
+        // Durable posture (durable-ha.org §3, Decision 2): the trust roots
+        // are operator custody. Any missing piece is a hard boot error —
+        // never a silent re-mint, which would partition the cluster's
+        // trust (and a partially-present set regenerating BOTH halves of a
+        // CA is exactly the silent-re-mint hazard this closes).
+        let missing: Vec<&str> = CUSTODY_FILES
+            .iter()
+            .filter(|f| !non_empty(&pki.join(f)))
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            die(&format!(
+                "durable posture (balanced profile + persistent datastore) requires an operator-shipped CA bundle, but {} is missing: {}. Mint it offline with `kubenyx-pki mint-ca --out ca-bundle/`, ship the bundle's files into this directory over the operator channel, and keep the original wherever secrets live. Refusing to self-mint: a re-minted CA would partition the cluster's trust.",
+                pki.display(),
+                missing.join(" ")
+            ));
+        }
+        // Shipping transports rarely preserve modes; enforce ours.
+        for f in CUSTODY_FILES {
+            let _ = fs::set_permissions(pki.join(f), fs::Permissions::from_mode(0o600));
+        }
+    } else {
+        // Volatile/testing posture: per-boot self-mint stays the behavior.
+        ensure_ca(pki, "ca", "kubenyx-ca");
+        // Distinct front-proxy CA (must never be the client CA — spoofing risk).
+        ensure_ca(pki, "front-proxy-ca", "kubenyx-front-proxy-ca");
+        ensure_sa(pki);
     }
 
     let ca = load_issuer(pki, "ca");
@@ -524,4 +581,31 @@ fn agent(cfg: &Cfg) {
         &pki.join("kube-proxy.crt"), &pki.join("kube-proxy.key"));
     write_kubeconfig(kc, "coredns.kubeconfig", &cfg.api_url, "system:coredns", &ca_pem,
         &pki.join("coredns.crt"), &pki.join("coredns.key"));
+}
+
+// ---------------------------------------------------------------------------
+// mint-ca: offline operator custody (durable-ha.org §3, Decision 2)
+// ---------------------------------------------------------------------------
+
+/// Mint the durable trust roots off-cluster: cluster CA, front-proxy CA and
+/// the service-account keypair, to --out DIR. Reuses the exact issuance code
+/// the server boot path runs, so a shipped bundle is indistinguishable from
+/// a self-minted one — only the custody changes. Idempotent: existing files
+/// are never overwritten, so re-running against the operator's bundle
+/// directory is safe.
+fn mint_ca(cfg: &Cfg) {
+    if cfg.out.as_os_str().is_empty() {
+        die("mint-ca requires --out DIR");
+    }
+    let out = cfg.out.as_path();
+    fs::create_dir_all(out).unwrap_or_else(|e| die(&format!("mkdir {}: {e}", out.display())));
+    let _ = fs::set_permissions(out, fs::Permissions::from_mode(0o700));
+    ensure_ca(out, "ca", "kubenyx-ca");
+    ensure_ca(out, "front-proxy-ca", "kubenyx-front-proxy-ca");
+    ensure_sa(out);
+    eprintln!("kubenyx-pki: CA bundle ready in {}:", out.display());
+    for f in CUSTODY_FILES {
+        eprintln!("kubenyx-pki:   {f}");
+    }
+    eprintln!("kubenyx-pki: ship these files into each durable server's pki directory (default /var/lib/kubenyx/pki) over the operator channel, and keep this directory wherever secrets live — the fingerprint gate cascades leaf reissuance from the shipped CA automatically");
 }

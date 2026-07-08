@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kubenyx-pki", "kubenyx-ready", "etcd-mem", "kubenyx-snap", "kubenyx-clockstep"]
+members = ["kubenyx-pki", "kubenyx-ready", "etcd-mem", "kubenyx-snap", "kubenyx-clockstep", "kubenyx-lb"]
 
 [profile.release]
 lto = true

@@ -684,6 +684,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kubenyx-lb"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustls",
+]
+
+[[package]]
 name = "kubenyx-pki"
 version = "0.1.0"
 dependencies = [

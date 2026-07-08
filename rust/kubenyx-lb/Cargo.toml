@@ -1,0 +1,11 @@
+[package]
+name = "kubenyx-lb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+libc = "0.2"
+
+[dev-dependencies]
+libc = "0.2"

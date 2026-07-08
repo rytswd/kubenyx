@@ -42,9 +42,7 @@ let
     };
   };
 
-  serverCount = lib.length (
-    lib.attrNames (lib.filterAttrs (_: n: n.role == "server") cfg.nodes)
-  );
+  serverCount = lib.length (lib.attrNames (lib.filterAttrs (_: n: n.role == "server") cfg.nodes));
 
   mkPkgOption =
     name: pkg:
@@ -61,6 +59,7 @@ in
     ./datastore.nix
     ./control-plane.nix
     ./node.nix
+    ./lb.nix
     ./network.nix
     ./dns.nix
     ./addons.nix
@@ -100,7 +99,12 @@ in
     controlPlaneEndpoint = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Address agents use to reach the apiserver; required for role = agent.";
+      description = ''
+        Address agents use to reach the apiserver. Required for agents of a
+        single-server cluster; on a multi-server cluster agents default to
+        the local kubenyx-lb endpoint instead, and setting this (e.g. to a
+        real external load balancer or DNS name) disables kubenyx-lb.
+      '';
     };
 
     nodes = lib.mkOption {
@@ -113,7 +117,7 @@ in
           role = cfg.role;
         };
       };
-      defaultText = lib.literalExpression ''{ ''${nodeName} = { index = 0; role = role; }; }'';
+      defaultText = lib.literalExpression "{ \${nodeName} = { index = 0; role = role; }; }";
       description = "Declared cluster membership. Nix is the source of truth, not runtime allocation.";
     };
 
@@ -145,8 +149,18 @@ in
         type = lib.types.str;
         readOnly = true;
         internal = true;
+        # Servers dial their own apiserver; agents behind kubenyx-lb dial
+        # the local forwarder (the apiserver certs carry IP:127.0.0.1, so
+        # TLS verification holds through the LB); other agents dial the
+        # declared endpoint. This one default is the whole "extend, don't
+        # fork" wiring: kubenyx-pki renders every agent kubeconfig from it.
         default =
-          if cfg.role == "server" then "https://127.0.0.1:6443" else "https://${cfg.controlPlaneEndpoint}:6443";
+          if cfg.role == "server" then
+            "https://127.0.0.1:6443"
+          else if cfg.lb.enable then
+            "https://127.0.0.1:${toString cfg.lb.port}"
+          else
+            "https://${cfg.controlPlaneEndpoint}:6443";
         description = "URL local components use to reach the apiserver.";
       };
       apiserverServiceIp = lib.mkOption {
@@ -161,8 +175,9 @@ in
         internal = true;
         # `or` fallback keeps evaluation alive long enough for the friendly
         # assertion below to fire when nodeName is missing from nodes.
-        default = klib.nodePodCidr config.kubenyx.network.clusterCidr 24
-          ((cfg.nodes.${cfg.nodeName} or { index = 0; }).index);
+        default = klib.nodePodCidr config.kubenyx.network.clusterCidr 24 (
+          (cfg.nodes.${cfg.nodeName} or { index = 0; }).index
+        );
         description = "Pod subnet owned by this node.";
       };
       tools = lib.mkOption {
@@ -193,50 +208,50 @@ in
     # warnIf (not an assertion): a 2-server membership is legal but an even
     # quorum — it survives zero failures while doubling the blast surface.
     # v0.3's durable track wants 1 or 3+.
-    assertions = lib.warnIf (serverCount == 2)
-      "kubenyx: 2 nodes declare role = \"server\" — an even quorum tolerates zero failures; use 1 or 3+ servers" [
-      {
-        assertion = cfg.nodes ? ${cfg.nodeName};
-        message = "kubenyx: nodeName ${cfg.nodeName} is not declared in kubenyx.nodes";
-      }
-      {
-        # `or` fallback keeps evaluation alive so the missing-nodeName
-        # assertion above fires first with its friendlier message.
-        assertion = (cfg.nodes.${cfg.nodeName} or { role = cfg.role; }).role == cfg.role;
-        message = "kubenyx: this machine's kubenyx.role (${cfg.role}) does not match its own kubenyx.nodes.${cfg.nodeName}.role entry";
-      }
-      {
-        assertion = serverCount >= 1;
-        message = "kubenyx: at least one node in kubenyx.nodes must declare role = \"server\"";
-      }
-      {
-        assertion = cfg.role != "agent" || cfg.controlPlaneEndpoint != null;
-        message = "kubenyx: role = \"agent\" requires controlPlaneEndpoint (the server address agents dial)";
-      }
-      {
-        assertion =
-          lib.length (lib.attrValues cfg.nodes) == lib.length (
-            lib.unique (map (n: n.index) (lib.attrValues cfg.nodes))
-          );
-        message = "kubenyx: node indices must be unique";
-      }
-      {
-        assertion =
-          lib.length (lib.attrNames cfg.nodes) == 1
-          || lib.all (n: n.address != null) (lib.attrValues cfg.nodes);
-        message = "kubenyx: multi-node clusters must set an address for every node";
-      }
-      {
-        # Node pod /24s must stay inside clusterCidr: index < 2^(24 - prefix).
-        assertion =
-          let
-            prefix = klib.cidrPrefix config.kubenyx.network.clusterCidr;
-          in
-          prefix <= 24
-          && lib.all (n: n.index < klib.pow2 (24 - prefix)) (lib.attrValues cfg.nodes);
-        message = "kubenyx: a node index places its pod /24 outside network.clusterCidr (prefix must be <= 24 and index < 2^(24 - prefix))";
-      }
-    ];
+    assertions =
+      lib.warnIf (serverCount == 2)
+        "kubenyx: 2 nodes declare role = \"server\" — an even quorum tolerates zero failures; use 1 or 3+ servers"
+        [
+          {
+            assertion = cfg.nodes ? ${cfg.nodeName};
+            message = "kubenyx: nodeName ${cfg.nodeName} is not declared in kubenyx.nodes";
+          }
+          {
+            # `or` fallback keeps evaluation alive so the missing-nodeName
+            # assertion above fires first with its friendlier message.
+            assertion = (cfg.nodes.${cfg.nodeName} or { role = cfg.role; }).role == cfg.role;
+            message = "kubenyx: this machine's kubenyx.role (${cfg.role}) does not match its own kubenyx.nodes.${cfg.nodeName}.role entry";
+          }
+          {
+            assertion = serverCount >= 1;
+            message = "kubenyx: at least one node in kubenyx.nodes must declare role = \"server\"";
+          }
+          {
+            assertion = cfg.role != "agent" || cfg.controlPlaneEndpoint != null || cfg.lb.enable;
+            message = "kubenyx: role = \"agent\" requires controlPlaneEndpoint (the server address agents dial) unless kubenyx-lb covers it (multi-server cluster, lb.enable)";
+          }
+          {
+            assertion =
+              lib.length (lib.attrValues cfg.nodes)
+              == lib.length (lib.unique (map (n: n.index) (lib.attrValues cfg.nodes)));
+            message = "kubenyx: node indices must be unique";
+          }
+          {
+            assertion =
+              lib.length (lib.attrNames cfg.nodes) == 1
+              || lib.all (n: n.address != null) (lib.attrValues cfg.nodes);
+            message = "kubenyx: multi-node clusters must set an address for every node";
+          }
+          {
+            # Node pod /24s must stay inside clusterCidr: index < 2^(24 - prefix).
+            assertion =
+              let
+                prefix = klib.cidrPrefix config.kubenyx.network.clusterCidr;
+              in
+              prefix <= 24 && lib.all (n: n.index < klib.pow2 (24 - prefix)) (lib.attrValues cfg.nodes);
+            message = "kubenyx: a node index places its pod /24 outside network.clusterCidr (prefix must be <= 24 and index < 2^(24 - prefix))";
+          }
+        ];
 
     systemd.targets.kubenyx = {
       description = "Kubenyx Kubernetes cluster";

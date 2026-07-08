@@ -218,6 +218,11 @@
         pkgs:
         {
           kubenyx-tools = pkgs.callPackage ./pkgs/kubenyx-tools.nix { };
+          # Agent-side apiserver LB for multi-server clusters (durable-ha
+          # §4). Separate from kubenyx-tools on purpose: single-server guest
+          # closures must not grow (the module only references this package
+          # when lb.enable gates it on).
+          kubenyx-lb = pkgs.callPackage ./pkgs/kubenyx-lb.nix { };
           # Host-side snapshot/restore CLI with the matching firecracker on
           # PATH (snapshots are only portable across identical VMM versions).
           # take: boot the runner to cluster-ready and write snap.vmstate +

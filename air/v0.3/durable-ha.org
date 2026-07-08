@@ -69,6 +69,18 @@ fingerprint gate already prevents accidental regeneration; a missing
 CA on a durable server is a hard boot error, never a silent re-mint
 (a re-minted CA would partition the cluster's trust).
 
+Implemented (2026-07-08). Two details fixed during implementation:
+- The custody bundle is six files, not two: both CAs *and the
+  service-account keypair* (=ca.{crt,key} front-proxy-ca.{crt,key}
+  sa.{key,pub}=). Every server of an HA set must hold the same SA key
+  or apiservers cannot verify each other's tokens — the SA keypair is
+  a trust root with the same custody needs as the CA.
+- "Durable posture" is =profile == "balanced" && !datastore.volatile=,
+  wired as =--require-shipped-ca= on the PKI unit. In that mode any
+  missing bundle file is a hard error naming the mint-ca command —
+  including the partial-loss case (cert present, key lost), where the
+  old present-file gate would have silently regenerated both halves.
+
 ** 4. Endpoint: client-side LB, not a VIP
 Agents (and external kubeconfigs) need an apiserver address that
 survives a server death. Chosen approach: a local health-checking TCP
@@ -84,6 +96,21 @@ clouds that block gratuitous ARP.
 - Rejected: keepalived VIP (VRRP is environment-hostile and brings a
   daemon we don't own); DNS round-robin (client-go failover is slow
   and cache-dependent).
+
+Implemented (2026-07-08). Packaging decision: kubenyx-lb lives in the
+same Cargo workspace but is a SEPARATE nix package
+(=pkgs/kubenyx-lb.nix=), not part of kubenyx-tools — the tools package
+rides every guest's boot path and the single-node invariant is zero
+added closure weight (kubenyx-tools now pins its member list so an
+unpinned workspace build can't pull the LB in). Module gating:
+=kubenyx.lb.enable= defaults to =role == "agent" && serverCount > 1 &&
+controlPlaneEndpoint == null= — agents of single-server clusters and
+all servers see zero units and zero closure delta (verified:
+single-node unit list and closure package set identical across the
+change). =internal.apiserverUrl= is the single wiring point: with the
+LB on it becomes =https://127.0.0.1:6444= and every agent kubeconfig
+renders from it (apiserver certs already carry IP:127.0.0.1, so TLS
+verification holds through the forwarder).
 
 ** 5. Control-plane redundancy details
 - =controlPlane.leaderElect= defaults to true when >1 server (option
@@ -176,3 +203,6 @@ overrides (D12).
 - 2026-07-08: Drafted on request ("check how this would look with
   non-disposable + HA CP") before starting the v0.2 mesh
   implementation, so the shared membership schema lands once.
+- 2026-07-08: §3 (CA custody: mint-ca + hard gate) and §4 (kubenyx-lb
+  + agent wiring) implemented; details recorded inline in those
+  sections. §2 (etcd quorum), §5-6 and the test matrix remain.

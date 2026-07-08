@@ -14,11 +14,21 @@ let
   pki = cfg.internal.pkiDir;
   kc = cfg.internal.kubeconfigDir;
 
-  thisNode = cfg.nodes.${cfg.nodeName} or {
-    address = null;
-    index = 0;
-  };
+  thisNode =
+    cfg.nodes.${cfg.nodeName} or {
+      address = null;
+      index = 0;
+    };
   kubenyxPki = lib.getExe' cfg.internal.tools "kubenyx-pki";
+
+  # Durable posture (air/v0.3/durable-ha.org §3, Decision 2): a persistent
+  # datastore on the balanced profile means the CA must be operator-shipped
+  # (`kubenyx-pki mint-ca --out ca-bundle/` off-cluster, bundle shipped over
+  # the operator channel). kubenyx-pki then treats missing trust roots as a
+  # hard boot error, never a silent re-mint — a re-minted CA would partition
+  # the cluster's trust. testing/volatile keeps per-boot self-mint, so no
+  # single-node testing guest changes shape here.
+  durablePosture = cfg.profile == "balanced" && !cfg.datastore.volatile;
 
   commonArgs = [
     kubenyxPki
@@ -64,7 +74,8 @@ let
         "${n}=${if a == null then "" else a}"
       ]
     ) (lib.attrNames cfg.nodes)
-    ++ lib.optional (cfg.datastore.backend == "etcd") "--etcd";
+    ++ lib.optional (cfg.datastore.backend == "etcd") "--etcd"
+    ++ lib.optional durablePosture "--require-shipped-ca";
 
   agentArgs = commonArgs ++ [
     "--mode"
@@ -97,9 +108,7 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = lib.all (
-          s: lib.hasPrefix "DNS:" s || lib.hasPrefix "IP:" s
-        ) cfg.pki.extraApiserverSANs;
+        assertion = lib.all (s: lib.hasPrefix "DNS:" s || lib.hasPrefix "IP:" s) cfg.pki.extraApiserverSANs;
         message = "kubenyx: pki.extraApiserverSANs entries must be prefixed DNS: or IP:";
       }
     ];
@@ -113,7 +122,8 @@ in
       # pulling the whole control-plane chain earlier in the boot.
       after = [
         "local-fs.target"
-      ] ++ lib.optional (cfg.role == "server" && thisNode.address == null) "network-online.target";
+      ]
+      ++ lib.optional (cfg.role == "server" && thisNode.address == null) "network-online.target";
       wants = lib.optional (cfg.role == "server" && thisNode.address == null) "network-online.target";
       serviceConfig = {
         Type = "oneshot";
