@@ -295,6 +295,81 @@ per-version `OVERVIEW.org` files. The short version of the philosophy:
 stock Kubernetes, Nix as the source of truth, everything measured, and
 when a dependency is the bottleneck, replace it with 300 lines of Rust.
 
+## Command reference
+
+### `nix run` apps
+
+| App | What it does |
+|---|---|
+| `.#microvm-firecracker` / `-cloud-hypervisor` / `-qemu` | Single-node disposable cluster (~7.8 s to ready; qemu = KVM-less fallback) |
+| `.#microvm-firecracker-shutdown` (+ `-cloud-hypervisor-`, `-qemu-` twins) | Graceful guest shutdown; run from the VM's directory |
+| `.#microvm-cluster` / `.#microvm-cluster-shutdown` | 3-node mesh (server + 2 agents), bridge + taps via sudo, ~8.1 s to all-Ready / reverse teardown |
+| `.#microvm-cluster7` / `.#microvm-cluster7-shutdown` | 7-node twin (server + 6 agents), run dir `/tmp/kubenyx-cluster7`, ~9 s |
+| `.#native-bench` | Control-plane timings as bare processes, no VM |
+
+### Packages beyond the app-backing ones
+
+| Package | Contents |
+|---|---|
+| `.#kubenyx-snap` | Snapshot CLI with the version-matched firecracker on PATH |
+| `.#kubenyx-tools` | Guest boot-path tools: `kubenyx-pki`, `kubenyx-ready`, `etcd-mem`, `kubenyx-clockstep`, `kubenyx-snap` |
+| `.#kubenyx-lb` | Client-side apiserver LB (separate package by design — it must never ride into guest closures) |
+| `.#microvm-cluster-{server,agent1,agent2}`, `.#microvm-cluster7-{server,agent1..6}` | Per-node mesh runners |
+| `.#pause-image`, `.#test-image` | Airgap seed images |
+
+### Checks
+
+`nix build .#checks.x86_64-linux.<name>.driver -o d && d/bin/nixos-test-driver`
+— give each **concurrent** run its own `XDG_RUNTIME_DIR` (the driver keys
+vde sockets and vm-state off it with no per-run namespace).
+
+| Check | Proves | Wall (KVM) |
+|---|---|---|
+| `single-node` / `single-node-etcd` | Happy path on kine / real etcd | 37 s / 153 s |
+| `multi-node` / `multi-node-mem` | Server + agent on etcd / on etcd-mem | 38 s / 22 s |
+| `multi-server` | 3-server etcd quorum + LB agent + CA custody | 26 s |
+| `failover` | Server crash + etcd kill -9; API rides through the LB | 38 s |
+| `agent-add` | Hitless compute scale-out (zero restarts anywhere) | 95 s |
+| `server-reboot` | Full VM reboot of a quorum member; state survives | 98 s |
+| `ca-custody` | Durable CA gate refuses, then boots shipped | 30 s |
+| `bench-vs-k3s` | Head-to-head ratio in identical airgapped VMs | 50 s |
+
+Plus `nixosModules.default`, `templates.default` (`nix flake init -t`),
+and the per-variant `nixosConfigurations`.
+
+### `kubenyx-snap`
+
+| Subcommand | Option | Default | Meaning |
+|---|---|---|---|
+| `take` (boot-fresh) | `--runner PATH` | *(selects this mode)* | microvm-run to spawn, snapshot, tear down |
+| | `--out DIR` | `snapshot` | Where `snap.vmstate` + `snap.mem` land |
+| | `--marker STR` | `KUBENYX-CLUSTER-READY` | Console marker to wait for |
+| | `--wait-secs N` / `--settle-ms N` | 120 / 2000 | Marker timeout / post-ready settle |
+| `take` (attach) | `--sock PATH` | `kubenyx.sock` | Snapshot a *running* VM: pause → create → resume in place |
+| `resume` | `--snapshot DIR` | `snapshot` | Restore into a fresh VMM, leave it running |
+| | `--firecracker BIN` | from PATH | Must match the snapshot's VMM version |
+| | `--api-sock NAME` | `kubenyx-resume.sock` | Keep it relative (SUN_LEN) |
+| | `--probe ADDR` / `--poke ADDR` | `10.100.0.2:6443` / `:10123` | API liveness probe / clock-poke target |
+| | `--no-pci` | off | Only for snapshots taken without `--enable-pci` |
+| `cycle` | resume's flags + `-n N` | 5 | Recreation benchmark: resume → verify → kill, ×N |
+| `mesh-take` | `--run-dir DIR` | `/tmp/kubenyx-cluster` | Pause ALL nodes, snapshot in parallel, free the taps |
+| | `--out DIR` | `mesh-snapshot` | Per-node subdirs + manifest |
+| | `--node name=ip` (repeat) | auto-discovered | Only needed off-convention (`server`=.2, `agentN`=.2+N) |
+| `mesh-resume` | `--snapshot DIR` | `mesh-snapshot` | Concurrent restore of every node from the manifest |
+| `mesh-cycle` | mesh-resume's flags + `-n N` | 5 | Mesh recreation benchmark |
+
+### The other CLIs
+
+Mostly systemd-invoked; `kubenyx-pki mint-ca` is the operator-facing one.
+
+| Tool | Key flags |
+|---|---|
+| `kubenyx-pki mint-ca` | `--out DIR` — offline CA custody bundle (6 files: both CAs + the SA keypair) for durable servers |
+| `kubenyx-pki server\|agent` | `--pki-dir`, `--kubeconfig-dir`, `--node-name`, `--node-address`, `--service-ip`, `--cluster-domain`, `--etcd`, `--etcd-san`, `--extra-san`, `--leaf-days`, `--renew-days`, `--require-shipped-ca` |
+| `kubenyx-lb` | `--listen`, `--backend addr` (repeat), `--probe-interval-ms`, `--fail-threshold`, `--dial-timeout-ms`, `--drain-timeout-ms`, `--probe-cert`/`--probe-key` (pair), `--probe-http` |
+| `kubenyx-clockstep` | `--listen` (`0.0.0.0:10123`), `--allow-from IP`, `--min-step-ms` (500) |
+| `kubenyx-ready` | `--url`, `--cacert`/`--cert`/`--key` or `--insecure`, then `-- <command>` to wrap |
+
 ## Firecracker snapshot fine print
 
 Encoded in the flake so you normally never see them, but if you drive
