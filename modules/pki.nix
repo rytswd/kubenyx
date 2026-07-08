@@ -30,6 +30,17 @@ let
   # single-node testing guest changes shape here.
   durablePosture = cfg.profile == "balanced" && !cfg.datastore.volatile;
 
+  # Multi-server etcd quorum (durable-ha.org §2): peer/client TLS terminates
+  # on the declared server addresses, so the etcd-server cert must carry
+  # them as SANs. Derived from kubenyx.nodes at eval time (Decision 3's
+  # door-open note — never a frozen copy) and sorted by attrNames, so every
+  # server issues the same SAN set. Gated on >1 server: the single-server
+  # listener stays loopback-only and its PKI unit stays flag-identical.
+  serverAddresses = lib.filter (a: a != null) (
+    lib.mapAttrsToList (_: n: n.address) (lib.filterAttrs (_: n: n.role == "server") cfg.nodes)
+  );
+  multiServer = lib.length serverAddresses > 1;
+
   commonArgs = [
     kubenyxPki
     "--pki-dir"
@@ -75,6 +86,12 @@ let
       ]
     ) (lib.attrNames cfg.nodes)
     ++ lib.optional (cfg.datastore.backend == "etcd") "--etcd"
+    ++ lib.optionals (cfg.datastore.backend == "etcd" && multiServer) (
+      lib.concatMap (a: [
+        "--etcd-san"
+        "IP:${a}"
+      ]) serverAddresses
+    )
     ++ lib.optional durablePosture "--require-shipped-ca";
 
   agentArgs = commonArgs ++ [

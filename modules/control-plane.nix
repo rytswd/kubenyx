@@ -27,10 +27,12 @@ let
       "etcd" = "etcd.service";
     }
     .${cfg.datastore.backend};
-  thisNode = cfg.nodes.${cfg.nodeName} or {
-    address = null;
-    index = 0;
-  };
+  thisNode =
+    cfg.nodes.${cfg.nodeName} or {
+      address = null;
+      index = 0;
+    };
+  serverCount = lib.length (lib.attrNames (lib.filterAttrs (_: n: n.role == "server") cfg.nodes));
 
   apiserverFlags =
     # Declared address ships as --advertise-address: without it the
@@ -80,33 +82,32 @@ let
     ++ lib.optional (!cp.apiserver.priorityAndFairness) "--enable-priority-and-fairness=false"
     ++ cp.apiserver.extraFlags;
 
-  kcmFlags =
-    [
-      "--kubeconfig=${kc}/controller-manager.kubeconfig"
-      "--authentication-kubeconfig=${kc}/controller-manager.kubeconfig"
-      "--authorization-kubeconfig=${kc}/controller-manager.kubeconfig"
-      "--client-ca-file=${pki}/ca.crt"
-      "--root-ca-file=${pki}/ca.crt"
-      "--service-account-private-key-file=${pki}/sa.key"
-      "--cluster-signing-cert-file=${pki}/ca.crt"
-      "--cluster-signing-key-file=${pki}/ca.key"
-      # Per-controller SA credentials mint a token for every controller
-      # serially at startup — measured +4.9s on control-plane bring-up.
-      # Testing profile trades that RBAC audit granularity for speed.
-      "--use-service-account-credentials=${lib.boolToString cp.kcm.useServiceAccountCredentials}"
-      # Nix owns pod subnets (deterministic per-node /24s in the CNI
-      # conflist and static routes). KCM's allocator is not order-stable,
-      # so letting it run writes a *wrong* node.spec.podCIDR — worse than
-      # none. Divergence from the original doc recorded in networking.org.
-      "--allocate-node-cidrs=false"
-      "--service-cluster-ip-range=${cfg.network.serviceCidr}"
-      "--controllers=*${lib.concatMapStrings (c: ",-${c}") cp.kcm.disabledControllers}"
-      "--bind-address=127.0.0.1"
-      "--profiling=false"
-      "--terminated-pod-gc-threshold=1000"
-      "--leader-elect=${lib.boolToString cp.leaderElect}"
-    ]
-    ++ cp.kcm.extraFlags;
+  kcmFlags = [
+    "--kubeconfig=${kc}/controller-manager.kubeconfig"
+    "--authentication-kubeconfig=${kc}/controller-manager.kubeconfig"
+    "--authorization-kubeconfig=${kc}/controller-manager.kubeconfig"
+    "--client-ca-file=${pki}/ca.crt"
+    "--root-ca-file=${pki}/ca.crt"
+    "--service-account-private-key-file=${pki}/sa.key"
+    "--cluster-signing-cert-file=${pki}/ca.crt"
+    "--cluster-signing-key-file=${pki}/ca.key"
+    # Per-controller SA credentials mint a token for every controller
+    # serially at startup — measured +4.9s on control-plane bring-up.
+    # Testing profile trades that RBAC audit granularity for speed.
+    "--use-service-account-credentials=${lib.boolToString cp.kcm.useServiceAccountCredentials}"
+    # Nix owns pod subnets (deterministic per-node /24s in the CNI
+    # conflist and static routes). KCM's allocator is not order-stable,
+    # so letting it run writes a *wrong* node.spec.podCIDR — worse than
+    # none. Divergence from the original doc recorded in networking.org.
+    "--allocate-node-cidrs=false"
+    "--service-cluster-ip-range=${cfg.network.serviceCidr}"
+    "--controllers=*${lib.concatMapStrings (c: ",-${c}") cp.kcm.disabledControllers}"
+    "--bind-address=127.0.0.1"
+    "--profiling=false"
+    "--terminated-pod-gc-threshold=1000"
+    "--leader-elect=${lib.boolToString cp.leaderElect}"
+  ]
+  ++ cp.kcm.extraFlags;
 
   schedulerConfig = pkgs.writeText "kube-scheduler.yaml" (
     builtins.toJSON {
@@ -133,11 +134,17 @@ in
   options.kubenyx.controlPlane = {
     leaderElect = lib.mkOption {
       type = lib.types.bool;
-      default = false;
+      # Option-level default (the mkDefault of option declarations): any
+      # user assignment overrides it either way.
+      default = serverCount > 1;
+      defaultText = lib.literalExpression "serverCount > 1";
       description = ''
-        Leader election for kcm/scheduler. Off by default: a single
-        control-plane node gains nothing and waiting out lease acquisition
-        is one of the biggest single-node startup costs.
+        Leader election for kcm/scheduler. Off by default on one server: a
+        single control-plane node gains nothing and waiting out lease
+        acquisition is one of the biggest single-node startup costs. On by
+        default with multiple servers (durable-ha.org §5): concurrent
+        kcm/scheduler instances without a lease would duplicate work and
+        fight over object status.
       '';
     };
     apiserver = {

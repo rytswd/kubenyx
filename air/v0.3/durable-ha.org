@@ -59,6 +59,34 @@ initial-cluster. With >1 server:
 Quorum wait is accepted boot-path cost for durable clusters; it never
 touches the single-server path.
 
+Implemented (2026-07-08). Details fixed during implementation:
+- The single-server etcd unit is FLAG-IDENTICAL to before (verified by
+  diffing the generated unit text): every quorum change is gated on
+  =serverCount > 1=, including =--initial-cluster-state new= (etcd's
+  default anyway — stated on the quorum path to document intent, and
+  because it is the flag a future CP-growth hook flips to "existing").
+- The bootstrap fingerprint is an =ExecStartPre= member-set guard that
+  records the initial-cluster string (sorted, eval-derived) at
+  =<data-dir>/.kubenyx-member-set= — inside the data dir on purpose, so
+  wiping the data legitimately re-bootstraps and the fingerprint dies
+  with it. A mismatch is a hard, distinct "member set changed" error
+  citing the snapshot-restore runbook; that error site is where the
+  Decision-3 CP-growth path (=etcdctl member add= +
+  =--initial-cluster-state existing=) would slot in.
+- The local apiserver keeps dialing loopback (=internal.etcdServers=
+  unchanged); multi-server adds the declared address as a SECOND client
+  listener, and =--advertise-client-urls= carries only the routable
+  address (loopback must never be advertised into the cluster).
+- Cert SANs ride in as =--etcd-san IP:<addr>= (one per declared server,
+  every server issues the same set) so one cert serves client and peer
+  ports on all members; the flag is absent single-server, keeping the
+  PKI unit flag-identical too.
+- =controlPlane.leaderElect= now defaults to =serverCount > 1= (§5's
+  first piece; option default, so user assignments override).
+- Profile posture (§7) holds in the quorum branch unchanged: fsync on
+  (=unsafeNoFsync= stays a shouting opt-out), persistent
+  =StateDirectory= whenever =!datastore.volatile=.
+
 ** 3. CA custody: mint offline, ship like any credential
 Per-boot CA regeneration is the *volatile* behavior. Durable clusters
 get operator custody: =kubenyx-pki= is already a standalone CLI — run
@@ -206,3 +234,7 @@ overrides (D12).
 - 2026-07-08: §3 (CA custody: mint-ca + hard gate) and §4 (kubenyx-lb
   + agent wiring) implemented; details recorded inline in those
   sections. §2 (etcd quorum), §5-6 and the test matrix remain.
+- 2026-07-08: §2 (etcd quorum from declared membership) implemented,
+  plus §5's leaderElect default; details inline in §2. Single-server
+  etcd unit proven flag-identical. §5 addons verification, §6 and the
+  test matrix remain.

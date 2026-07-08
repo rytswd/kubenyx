@@ -42,6 +42,7 @@ struct Cfg {
     leaf_days: i64,
     renew_days: i64,
     etcd: bool,
+    etcd_sans: Vec<String>,
     out: PathBuf,
     require_shipped_ca: bool,
 }
@@ -61,6 +62,7 @@ fn parse_args() -> Cfg {
         leaf_days: 365,
         renew_days: 30,
         etcd: false,
+        etcd_sans: vec![],
         out: PathBuf::new(),
         require_shipped_ca: false,
     };
@@ -94,6 +96,7 @@ fn parse_args() -> Cfg {
             "--leaf-days" => cfg.leaf_days = val().parse().unwrap_or(365),
             "--renew-days" => cfg.renew_days = val().parse().unwrap_or(30),
             "--etcd" => cfg.etcd = true,
+            "--etcd-san" => cfg.etcd_sans.push(val()),
             other => die(&format!("unknown flag {other}")),
         }
     }
@@ -482,8 +485,16 @@ fn server(cfg: &Cfg) {
     issue.ensure(&ca, "ca", "healthz", "kubenyx-healthz", None, &[ClientAuth], &[]);
 
     if cfg.etcd {
+        // Multi-server quorum (durable-ha.org §2): the declared server
+        // addresses ride in as --etcd-san entries, extending the loopback
+        // SANs the single-server path keeps — same pattern as the apiserver
+        // SAN list above. One cert serves both the client and peer ports
+        // (ServerAuth + ClientAuth), so peer TLS verifies in both
+        // directions against the peer URLs' IPs.
+        let mut etcd_san: Vec<String> = vec!["DNS:localhost".into(), "IP:127.0.0.1".into()];
+        etcd_san.extend(cfg.etcd_sans.iter().cloned());
         issue.ensure(&ca, "ca", "etcd-server", "kube-etcd", None, &[ServerAuth, ClientAuth],
-            &["DNS:localhost".into(), "IP:127.0.0.1".into()]);
+            &etcd_san);
         issue.ensure(&ca, "ca", "apiserver-etcd-client", "kube-apiserver-etcd-client", None, &[ClientAuth], &[]);
     }
 
