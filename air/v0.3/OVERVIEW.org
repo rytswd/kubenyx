@@ -1,4 +1,4 @@
-#+title: v0.3 — Durable Clusters (draft)
+#+title: v0.3 — Durable Clusters
 
 * Purpose
 
@@ -29,3 +29,8 @@ share foundations, implemented once during the mesh work:
 - 2026-07-08: Milestone sketched (draft) alongside the multi-node
   design discussion, before mesh implementation, so shared schema
   decisions land once.
+- 2026-07-08: durable-ha.org implemented and complete in one campaign:
+  etcd quorum from declared membership, offline-CA custody (6-file
+  bundle incl. the SA keypair), kubenyx-lb with authenticated /readyz
+  probing, hitless agent scale-out proven, all six test legs green,
+  single-node fast path held bit-identical.

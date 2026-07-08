@@ -7,6 +7,66 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-08 — Multi-node campaign complete: fast path held, HA proven
+
+The v0.2 mesh + v0.3 durable/HA work landed as one campaign
+(nodes.role schema → mesh → kubenyx-lb + CA custody → etcd quorum →
+test legs → performance gate). The user's constraint was hard: the
+single-node testing path must not pay for any of it.
+
+### Fast path, before vs after (the gate)
+
+| Metric | Before (pre-campaign) | After | Bar |
+|---|---|---|---|
+| Cold boot median (firecracker + etcd-mem) | 7.77 s | no tree-attributable change¹ | ≤ 8.2 s |
+| Recreation (`kubenyx-snap cycle`) | 65.6 ms | **66.6 ms** | ≤ 100 ms |
+| single-node check wall | 36.4–36.8 s | **38 s** | ≤ 45 s |
+| Guest systemd unit list | — | **bit-identical** | zero new units |
+| Guest closure | — | **+4,336 bytes**² | ~zero |
+
+¹ Raw windows straddled the bar (8.26/8.42/7.95 s medians) because a
+root `nix-store --optimise` was saturating store I/O during the first
+runs — the decisive evidence is a 6-round interleaved A/B against the
+pre-campaign runner under identical conditions: the current tree was
+faster in 5 of 6 paired rounds (e.g. 8.64→8.27, 7.60→7.42). The box
+shows a bimodal ~7.4–8.8 s envelope that both trees share; per-phase
+console stamps are identical mode-for-mode, and slow-mode divergence
+begins in kernel/initrd before any kubenyx unit runs.
+² kubenyx-tools hash churn from the workspace rebuild (kubenyx-pki
++custody/mint-ca code) + the serve-script request-drain fix. kubenyx-lb
+is deliberately a separate package so it cannot ride into guests;
+lb/handoff/quorum/custody units are all absent from the single-node
+guest (verified by unit-list diff of the built toplevels).
+
+### New capabilities, measured
+
+| What | Result |
+|---|---|
+| 3-node microVM mesh (`nix run .#microvm-cluster`) | **8.70 s** median launch→all-Ready (details below) |
+| multi-server check (3-server quorum + LB agent + custody) | PASS, 25.6 s |
+| failover check (crash server0; kill -9 etcd member) | PASS, 38.1 s |
+| agent-add check (**hitless scale-out proof**) | PASS, 95 s — pod restartCount 0, NRestarts=0 on every control-plane unit and kubelet through a live 2→3 node config switch |
+| ca-custody check (durable CA gate refuses, then boots shipped) | PASS, 30 s |
+| server-reboot check (full VM reboot of a quorum member) | PASS, 98 s — persistent data + shipped CA survive, member rejoins without re-bootstrap, 2/3 quorum serves reads AND writes throughout |
+| multi-node-mem check (etcd-mem + agent, the relaxation leg) | PASS, 22 s — fastest multi-node leg (etcd-mem's instant startup) |
+
+Two findings from the failover leg worth the whole exercise:
+
+- **`Requires=` on the datastore is wrong under quorum**: a local etcd
+  death stop-propagated into the collocated apiserver, the propagated
+  stop hung ~90 s in graceful shutdown (queueing etcd's restart behind
+  it, stretching quorum recovery ~2 s → ~94 s), and — worse — a
+  dependency stop is "deliberate" to systemd, so `Restart=always`
+  never fired: one etcd blip permanently killed the API replica.
+  Multi-server now uses `Wants=` (the apiserver's etcd client rides
+  through no-leader windows fine); single-server keeps `Requires=`
+  byte-for-byte.
+- **Anonymous `/readyz` probing lies under `--anonymous-auth=false`**:
+  the auth filter answers 401 regardless of readiness. kubenyx-lb
+  probes with the agent's kubelet client cert; until the cert lands,
+  backends stay unhealthy — correct, since without credentials there
+  is no kubelet to serve anyway.
+
 ## 2026-07-08 — KVM: 3-node microVM mesh ready in 8.7s (median)
 
 `nix run .#microvm-cluster` (air/v0.2 §2–4): 1 server + 2 agent

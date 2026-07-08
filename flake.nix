@@ -500,8 +500,10 @@
           single-node = runTest ./tests/single-node.nix;
           single-node-etcd = runTest ./tests/single-node-etcd.nix;
           multi-node = runTest ./tests/multi-node.nix;
+          multi-node-mem = runTest ./tests/multi-node-mem.nix;
           multi-server = runTest ./tests/multi-server.nix;
           failover = runTest ./tests/failover.nix;
+          server-reboot = runTest ./tests/server-reboot.nix;
           agent-add = runTest ./tests/agent-add.nix;
           ca-custody = runTest ./tests/ca-custody.nix;
           bench-vs-k3s = runTest ./tests/bench-vs-k3s.nix;

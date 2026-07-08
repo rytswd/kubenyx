@@ -1,5 +1,5 @@
 #+title: Durable Clusters & HA Control Plane
-#+state: ready
+#+state: complete
 #+FILETAGS: :core:
 
 * Summary
@@ -312,3 +312,16 @@ overrides (D12).
   details inline in the Test Matrix. No implementation fixes needed —
   the §3 gate refused, hinted mint-ca, and accepted the shipped bundle
   exactly as specified. Remaining: =server-reboot=, =agent-add= legs.
+- 2026-07-08: =agent-add= green (95s): pod restartCount 0 and
+  NRestarts=0 on every control-plane unit and kubelet through a live
+  2->3 node switch-to-configuration — the §6 hitless claim is now a
+  regression test. =server-reboot= green (98s): clean poweroff + boot
+  of a quorum member; persistent etcd data and the shipped CA survive,
+  the member-set fingerprint matches (no re-bootstrap), and the 2/3
+  quorum serves reads and writes throughout (a configmap written while
+  the member was down is visible to it after rejoin). Test-driver
+  note: machine.reboot() needs allow_reboot at VM start (QEMU runs
+  -no-reboot otherwise) — shutdown()+start() is the equivalent
+  OS-upgrade shape without it. All six matrix legs green; the fast
+  path held the performance gate (bench/RESULTS.md 2026-07-08
+  campaign entry). Complete.

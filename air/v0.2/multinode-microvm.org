@@ -1,5 +1,5 @@
 #+title: Multi-Node MicroVM Mesh — N-Node Clusters in ~12s
-#+state: ready
+#+state: complete
 #+FILETAGS: :core:testing:
 
 * Summary
@@ -125,3 +125,10 @@ on timeout, same style as kubenyx-report).
   assume L2 adjacency; separate taps would need routed L3), per-agent
   credential handoff on 10125+N with bounded fetch-retry, launcher +
   shutdown apps. Measurements in bench/RESULTS.md.
+- 2026-07-08: Acceptance closed. Mesh measured 8.70s median launch to
+  all-Ready (bench/RESULTS.md); kubectl via served kubeconfig shows
+  3/3 Ready; the isolation criterion holds as REVISED in section 2 (on
+  the bridge, IPAddressAllow is advisory — trust-model text updated
+  when the datapath decision landed); the etcd-mem relaxation leg is
+  =checks.multi-node-mem= (server + agent on etcd-mem, both Ready, no
+  etcd/kine units — PASS 22s). Complete.
