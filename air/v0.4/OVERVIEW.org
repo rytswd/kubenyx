@@ -24,3 +24,6 @@ untouched, and the single-node fast path must stay unit-identical.
 - 2026-07-08: Milestone opened; byod.org drafted and moved to ready in
   one step (capabilities and their acceptance tests are fully
   specified by prior art in the modules).
+- 2026-07-08: byod.org implemented and complete same-session:
+  external-CNI mode, storage.localVolumes, archive seeding — all legs
+  green, default path byte-identical. IPv6 + pre-bake remain staged.

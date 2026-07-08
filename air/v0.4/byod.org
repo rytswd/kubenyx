@@ -1,5 +1,5 @@
 #+title: Bring-Your-Own-Dataplane & Airgap Ergonomics
-#+state: ready
+#+state: complete
 #+FILETAGS: :network:core:
 
 * Summary
@@ -170,3 +170,9 @@ seed script; the option type widens to =listOf path=.
   proven: default-config eval dump of all 85 systemd unit texts +
   built-unit store paths and all 97 =environment.etc= source paths is
   byte-identical before/after.
+- 2026-07-08: Acceptance closed — all four criteria green (external-cni
+  38s, local-storage 85s incl. the archive-seed proof, unit list
+  identical at 295 with the seed-script branch as the only delta,
+  cold-boot A/B clean at paired median -0.14s). §4 items (IPv6
+  single-stack, pre-baked stores) graduate to their own docs when
+  picked up. Complete.

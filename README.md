@@ -208,6 +208,16 @@ kubenyx = {
   datastore.backend = "kine-sqlite";
   datastore.volatile = true;        # tmpfs state: fastest, disposable
 
+  # Bring your own CNI (NetworkPolicy, encryption, kube-proxy
+  # replacement): kubenyx steps aside entirely — no conflist, no
+  # routes, no NAT. Pair with network.kubeProxy.enable = false when
+  # the CNI replaces the service plane too.
+  network.cni = "external";         # default: "bridge" (zero-daemon)
+
+  # PVC-shaped workloads without a provisioner daemon: declared local
+  # PVs + a no-provisioner default StorageClass.
+  storage.localVolumes = { count = 4; size = "10Gi"; };
+
   # Declarative addons: every manifest here is applied at boot.
   addons.manifests.my-namespace = {
     apiVersion = "v1";

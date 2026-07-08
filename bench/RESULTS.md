@@ -7,6 +7,27 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-08 — v0.4 tier-1: bring-your-own-dataplane, gate held
+
+Three hand-offs landed (air/v0.4/byod.org), each replacing a kubenyx
+opinion with a clean absence, each proven by its own test leg and an
+eval-level byte-identity dump of the default path (all 85 systemd unit
+texts + built-unit store paths + all 97 environment.etc sources):
+
+| Capability | Leg | Wall |
+|---|---|---|
+| `network.cni = "external"` — conflist ABSENT (containerd loads the lexically first conflist, so a stub would still shadow the external CNI), routes/NAT gone, firewall accepts interface-free | `external-cni` | 38–47 s |
+| `storage.localVolumes` — no-provisioner default StorageClass + declared local PVs via the addons applier; WaitForFirstConsumer honored, data survives pod recreate | `local-storage` | 85 s |
+| `seedImages` archive branch — non-executable OCI/docker tars via `ctr import`; coverage rides the storage leg | (same leg) | — |
+
+Gate: unit list identical (295 entries); the ONLY delta on the whole
+recursive /etc diff is the documented seed-script `[ -x ]` branch hash.
+Cold boot: raw 3-run median 8.36 s tripped the 8.2 s bar → the
+interleaved A/B protocol settled it (post-campaign faster in 4/6
+paired rounds, paired median −0.14 s; combined 9-boot median 8.07 s).
+Sweep green: single-node 61 s, external-cni 47 s, local-storage 85 s,
+multi-node-mem 37 s.
+
 ## 2026-07-08 — Mesh recreation: 7-node cluster in 103 ms
 
 `kubenyx-snap mesh-take` / `mesh-resume` / `mesh-cycle` extend the
