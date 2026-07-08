@@ -138,3 +138,14 @@ namespaces for concurrent clones.
   (wrapper pinning the matching firecracker). State: complete.
   Remaining ideas staged in "Optimizations" (Diff snapshots, uffd
   fan-out, per-clone NAT).
+- 2026-07-08: Mesh recreation shipped (the phase-2 item): =mesh-take= /
+  =mesh-resume= / =mesh-cycle= on kubenyx-snap. Consistency model:
+  pause every node before snapshotting any (4.1ms cut across 3 nodes);
+  monotonic clocks freeze together so guests never observe it, and
+  cross-VM TCP survives — kubectl shows all nodes Ready immediately
+  after restore. Measured: 3-node mesh 92.8ms median, 7-node 102.7ms
+  (~flat in node count; 7 concurrent tmpfs restores load in ~40ms).
+  Per-node clock pokes moved OFF the measured path (they were 400ms of
+  sleeps inside it). Per-node taps make concurrent restores
+  collision-free by construction — the network_overrides/NAT ideas
+  below remain only for restoring multiple CLONES of the same node.

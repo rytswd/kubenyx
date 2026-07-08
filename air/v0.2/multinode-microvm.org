@@ -132,3 +132,7 @@ on timeout, same style as kubenyx-report).
   when the datapath decision landed); the etcd-mem relaxation leg is
   =checks.multi-node-mem= (server + agent on etcd-mem, both Ready, no
   etcd/kine units — PASS 22s). Complete.
+- 2026-07-08: The §Non-Goals "mesh snapshot/restore: phase 2" item is
+  now done — see snapshot-restore.org history: 3-node mesh recreated
+  in 92.8ms median, 7-node (new =microvm-cluster7= family, cold boot
+  8.96s) in 102.7ms.

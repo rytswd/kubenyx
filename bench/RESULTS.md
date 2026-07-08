@@ -7,6 +7,37 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-08 — Mesh recreation: 7-node cluster in 103 ms
+
+`kubenyx-snap mesh-take` / `mesh-resume` / `mesh-cycle` extend the
+snapshot flow to whole meshes. The consistency model: pause EVERY node
+before snapshotting ANY (the cut lands in 4.1 ms across 3 nodes) —
+monotonic clocks freeze together so the guests never observe it, and
+cross-VM TCP survives restore because both endpoints resume. Verified:
+after each restore `kubectl get nodes` shows every node Ready with the
+original kubelet connections intact, and every guest clock is stepped
+to the second (per-node UDP pokes, off the measured path).
+
+| Cluster | Cold boot (launch→all-Ready) | Recreation (5-cycle median) | Snapshot take |
+|---|---|---|---|
+| 1 node | 7.8 s | 66 ms | 2.7 s (3.5 GB) |
+| 3 nodes | 8.13 s | **92.8 ms** (58–102) | 3.0 s parallel (11 GB) |
+| 7 nodes (`.#microvm-cluster7`) | 8.96 s | **102.7 ms** (58–109) | 2.6 s parallel (25 GB) |
+
+Both axes are ~flat in node count: cold boot because nodes boot in
+parallel (the wall is the server's own chain), recreation because
+restores are per-tap-independent VMMs demand-paging from tmpfs — 7
+concurrent loads finish in ~40 ms, barely above a single one. The
+per-round breakdown: all-loaded ~35–45 ms + first apiserver TLS answer
+~20–66 ms.
+
+One measurement bug caught and fixed while building this: the clock
+pokes (5 × 100 ms sleeps) sat inside the measured path, inflating
+every mesh round by ~400 ms and quietly inflating the single-VM
+`resume` wall too (reported totals were honest, but the tool held the
+caller ~400 ms longer than needed). Pokes now ride a parallel thread
+overlapping the API probe, joined before return.
+
 ## 2026-07-08 — Multi-node campaign complete: fast path held, HA proven
 
 The v0.2 mesh + v0.3 durable/HA work landed as one campaign

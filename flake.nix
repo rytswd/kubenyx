@@ -68,19 +68,25 @@
             }
           ) (nixpkgs.lib.range 1 agents)
         );
-      clusterMembers = mkMicrovmClusterMembers 2;
-      clusterAgentNames = nixpkgs.lib.attrNames (
-        nixpkgs.lib.filterAttrs (_: n: n.role == "agent") clusterMembers
-      );
       # Boot order: server first (agents' credential fetch retries anyway,
       # but the server owns the whole readiness chain), then agents in
       # parallel. Teardown reverses this.
-      clusterBootOrder = [ "server" ] ++ clusterAgentNames;
+      clusterBootOrderFor =
+        members:
+        [ "server" ]
+        ++ nixpkgs.lib.attrNames (nixpkgs.lib.filterAttrs (_: n: n.role == "agent") members);
+      # Two mesh sizes: the 3-node default and a 7-node variant (1 server +
+      # 6 agents) for scale measurements. Same generator, same conventions
+      # (taps kubenyx-tap<index>, addresses 10.100.0.(2+index)).
+      clusterMembers = mkMicrovmClusterMembers 2;
+      clusterBootOrder = clusterBootOrderFor clusterMembers;
+      cluster7Members = mkMicrovmClusterMembers 6;
+      cluster7BootOrder = clusterBootOrderFor cluster7Members;
 
       mkMicrovmClusterNode =
-        name:
+        members: name:
         let
-          n = clusterMembers.${name};
+          n = members.${name};
           mac = "02:00:00:00:00:${
             nixpkgs.lib.fixedWidthString 2 "0" (nixpkgs.lib.toLower (nixpkgs.lib.toHexString (n.index + 1)))
           }";
@@ -107,11 +113,11 @@
             routes = [ { Gateway = "10.100.0.1"; } ];
           };
           kubenyx = {
-            nodes = clusterMembers;
+            nodes = members;
           }
           // nixpkgs.lib.optionalAttrs (n.role == "agent") {
             role = "agent";
-            controlPlaneEndpoint = clusterMembers.server.address;
+            controlPlaneEndpoint = members.server.address;
           };
         };
     in
@@ -205,11 +211,20 @@
         };
       }
       # Mesh nodes: microvm-cluster-server, microvm-cluster-agent1, … —
-      # per-node firecracker variants generated from clusterMembers.
+      # per-node firecracker variants generated from the members sets.
       // nixpkgs.lib.listToAttrs (
         map (
-          name: nixpkgs.lib.nameValuePair "microvm-cluster-${name}" (mkMicrovmClusterNode name)
+          name:
+          nixpkgs.lib.nameValuePair "microvm-cluster-${name}" (mkMicrovmClusterNode clusterMembers name)
         ) clusterBootOrder
+      )
+      // nixpkgs.lib.listToAttrs (
+        map (
+          name:
+          nixpkgs.lib.nameValuePair "microvm-cluster7-${name}" (
+            mkMicrovmClusterNode cluster7Members name
+          )
+        ) cluster7BootOrder
       );
 
       lib = import ./lib { inherit (nixpkgs) lib; };
@@ -239,9 +254,9 @@
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") (
           let
             lib = nixpkgs.lib;
-            clusterRunner =
-              name: self.nixosConfigurations."microvm-cluster-${name}".config.microvm.declaredRunner;
-            clusterTap = name: "kubenyx-tap${toString clusterMembers.${name}.index}";
+            clusterRunnerFor =
+              prefix: name: self.nixosConfigurations."${prefix}-${name}".config.microvm.declaredRunner;
+            clusterTapFor = members: name: "kubenyx-tap${toString members.${name}.index}";
             hostTools = lib.makeBinPath (
               with pkgs;
               [
@@ -269,23 +284,31 @@
             # an agent can already reach the apiserver with its own creds).
             # The single-node flow keeps working afterwards: the bridge
             # answers for 10.100.0.1 whether one tap is enslaved or three.
-            microvm-cluster-launcher = pkgs.writeShellScriptBin "microvm-cluster" ''
+            mkClusterLauncher =
+              {
+                binName,
+                prefix,
+                members,
+                bootOrder,
+                runDir,
+              }:
+              pkgs.writeShellScriptBin binName ''
               set -euo pipefail
               export PATH=${hostTools}''${PATH:+:$PATH}
 
               BR=kubenyx-br0
-              RUN="''${KUBENYX_CLUSTER_DIR:-/tmp/kubenyx-cluster}"
+              RUN="''${KUBENYX_CLUSTER_DIR:-${runDir}}"
 
               if pgrep -x firecracker >/dev/null 2>&1; then
-                echo "microvm-cluster: a firecracker VM is already running — the kubenyx tap family is exclusive; run microvm-cluster-shutdown (or kill it) first" >&2
+                echo "${binName}: a firecracker VM is already running — the kubenyx tap family is exclusive; run ${binName}-shutdown (or kill it) first" >&2
                 exit 1
               fi
 
-              echo "microvm-cluster: configuring host bridge $BR + taps (sudo)"
+              echo "${binName}: configuring host bridge $BR + taps (sudo)"
               sudo ip link add "$BR" type bridge 2>/dev/null || true
               sudo ip addr replace 10.100.0.1/24 dev "$BR"
               sudo ip link set "$BR" up
-              for tap in ${lib.concatMapStringsSep " " clusterTap clusterBootOrder}; do
+              for tap in ${lib.concatMapStringsSep " " (clusterTapFor members) bootOrder}; do
                 # Recreate each tap: guarantees current-user ownership (so
                 # firecracker opens it unprivileged) and clears any stale
                 # standalone address — the single-node instructions put
@@ -322,35 +345,41 @@
               }
 
               ${lib.concatMapStringsSep "\n" (
-                name: "launch ${name} ${clusterRunner name}/bin/microvm-run"
-              ) clusterBootOrder}
+                name: "launch ${name} ${clusterRunnerFor prefix name}/bin/microvm-run"
+              ) bootOrder}
 
               deadline=$(( $(date +%s) + 180 ))
               ready=0
               while [ "$(date +%s)" -lt "$deadline" ]; do
                 ready=0
-                for node in ${toString clusterBootOrder}; do
+                for node in ${toString bootOrder}; do
                   if grep -q KUBENYX-CLUSTER-READY "$RUN/$node/console.log" 2>/dev/null; then
                     ready=$((ready + 1))
                   fi
                 done
-                if [ "$ready" -eq ${toString (lib.length clusterBootOrder)} ]; then break; fi
+                if [ "$ready" -eq ${toString (lib.length bootOrder)} ]; then break; fi
                 sleep 0.2
               done
               wall_ms=$(( ( $(date +%s%N) - start_ns ) / 1000000 ))
-              if [ "$ready" -eq ${toString (lib.length clusterBootOrder)} ]; then
+              if [ "$ready" -eq ${toString (lib.length bootOrder)} ]; then
                 echo "KUBENYX-MESH-READY nodes=$ready wall=''${wall_ms}ms"
-                echo "KUBENYX-KUBECONFIG curl -s ${clusterMembers.server.address}:10124 > kubenyx.kubeconfig"
+                echo "KUBENYX-KUBECONFIG curl -s ${members.server.address}:10124 > kubenyx.kubeconfig"
               else
-                echo "KUBENYX-MESH-DEGRADED: $ready/${toString (lib.length clusterBootOrder)} nodes ready after 180s — consoles in $RUN/<node>/console.log" >&2
+                echo "KUBENYX-MESH-DEGRADED: $ready/${toString (lib.length bootOrder)} nodes ready after 180s — consoles in $RUN/<node>/console.log" >&2
               fi
               wait
             '';
 
-            microvm-cluster-shutdown-script = pkgs.writeShellScriptBin "microvm-cluster-shutdown" ''
+            mkClusterShutdown =
+              {
+                binName,
+                bootOrder,
+                runDir,
+              }:
+              pkgs.writeShellScriptBin "${binName}-shutdown" ''
               set -uo pipefail
               export PATH=${hostTools}''${PATH:+:$PATH}
-              RUN="''${KUBENYX_CLUSTER_DIR:-/tmp/kubenyx-cluster}"
+              RUN="''${KUBENYX_CLUSTER_DIR:-${runDir}}"
 
               # Graceful first (CtrlAltDel over the API socket), but with an
               # escalation ladder: firecracker's i8042 never probes in these
@@ -362,7 +391,7 @@
               stop_node() {
                 node=$1
                 pgrep -f "^microvm@$node" >/dev/null 2>&1 || return 0
-                echo "microvm-cluster-shutdown: $node"
+                echo "${binName}-shutdown: $node"
                 if [ -S "$RUN/$node/$node.sock" ]; then
                   curl -s --max-time 3 --unix-socket "$RUN/$node/$node.sock" \
                     -X PUT http://localhost/actions \
@@ -381,25 +410,48 @@
               }
 
               # Reverse boot order: agents drain first, the server last.
-              ${lib.concatMapStringsSep "\n" (name: "stop_node ${name}") (lib.reverseList clusterBootOrder)}
+              ${lib.concatMapStringsSep "\n" (name: "stop_node ${name}") (lib.reverseList bootOrder)}
               # Settle before judging: the last VMM may still be mid-exit.
               for _ in $(seq 1 25); do
                 pgrep -x firecracker >/dev/null 2>&1 || break
                 sleep 0.2
               done
               if pgrep -x firecracker >/dev/null 2>&1; then
-                echo "microvm-cluster-shutdown: firecracker still running — pkill -x firecracker if it is wedged" >&2
+                echo "${binName}-shutdown: firecracker still running — pkill -x firecracker if it is wedged" >&2
                 exit 1
               fi
-              echo "microvm-cluster-shutdown: all nodes down"
+              echo "${binName}-shutdown: all nodes down"
             '';
+            cluster3 = {
+              binName = "microvm-cluster";
+              prefix = "microvm-cluster";
+              members = clusterMembers;
+              bootOrder = clusterBootOrder;
+              runDir = "/tmp/kubenyx-cluster";
+            };
+            cluster7 = {
+              binName = "microvm-cluster7";
+              prefix = "microvm-cluster7";
+              members = cluster7Members;
+              bootOrder = cluster7BootOrder;
+              runDir = "/tmp/kubenyx-cluster7";
+            };
           in
           lib.listToAttrs (
-            map (name: lib.nameValuePair "microvm-cluster-${name}" (clusterRunner name)) clusterBootOrder
+            map (
+              name: lib.nameValuePair "microvm-cluster-${name}" (clusterRunnerFor "microvm-cluster" name)
+            ) clusterBootOrder
+          )
+          // lib.listToAttrs (
+            map (
+              name: lib.nameValuePair "microvm-cluster7-${name}" (clusterRunnerFor "microvm-cluster7" name)
+            ) cluster7BootOrder
           )
           // {
-            microvm-cluster = microvm-cluster-launcher;
-            microvm-cluster-shutdown = microvm-cluster-shutdown-script;
+            microvm-cluster = mkClusterLauncher cluster3;
+            microvm-cluster-shutdown = mkClusterShutdown { inherit (cluster3) binName bootOrder runDir; };
+            microvm-cluster7 = mkClusterLauncher cluster7;
+            microvm-cluster7-shutdown = mkClusterShutdown { inherit (cluster7) binName bootOrder runDir; };
             microvm-firecracker = self.nixosConfigurations.microvm-firecracker.config.microvm.declaredRunner;
             # cloud-hypervisor's microvm.nix runner hardcodes --net
             # num_queues=2*vcpu (tapMultiQueue is a hypervisor property, not
@@ -480,6 +532,19 @@
               program = "${
                 self.packages.${pkgs.stdenv.hostPlatform.system}.microvm-cluster-shutdown
               }/bin/microvm-cluster-shutdown";
+            };
+            # The 7-node twin (1 server + 6 agents) — same conventions,
+            # its own run dir (/tmp/kubenyx-cluster7) so mesh snapshots of
+            # both sizes can coexist.
+            microvm-cluster7 = {
+              type = "app";
+              program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.microvm-cluster7}/bin/microvm-cluster7";
+            };
+            microvm-cluster7-shutdown = {
+              type = "app";
+              program = "${
+                self.packages.${pkgs.stdenv.hostPlatform.system}.microvm-cluster7-shutdown
+              }/bin/microvm-cluster7-shutdown";
             };
           }
         )

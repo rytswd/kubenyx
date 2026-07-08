@@ -138,6 +138,20 @@ never notices (~1.3 s, run from the VM's directory):
 $ nix run github:rytswd/kubenyx#kubenyx-snap -- take --sock kubenyx.sock --out /dev/shm/kubenyx-snap
 ```
 
+**Whole meshes recreate too**: with a `microvm-cluster` (or the 7-node
+`microvm-cluster7`) running, snapshot all nodes with a consistent cut
+and recreate the entire cluster in ~100 ms — every node Ready,
+cross-node connections intact:
+
+```console
+$ nix run .#kubenyx-snap -- mesh-take --run-dir /tmp/kubenyx-cluster --out /dev/shm/mesh-snap
+$ nix run .#kubenyx-snap -- mesh-cycle --snapshot /dev/shm/mesh-snap -n 5
+mesh_cycles=5 nodes=3 median_total_ms=92.8 min=58.0 max=102.4
+```
+
+(3 nodes: 92.8 ms median; 7 nodes: 102.7 ms — recreation is ~flat in
+node count.)
+
 `resume` leaves the VM running and prints its pid; kill that pid to free
 the tap. One restored clone at a time (the tap identity is baked into
 the snapshot). Restored guests get their wall clock stepped
