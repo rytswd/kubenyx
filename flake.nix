@@ -502,6 +502,7 @@
           multi-node = runTest ./tests/multi-node.nix;
           multi-server = runTest ./tests/multi-server.nix;
           failover = runTest ./tests/failover.nix;
+          agent-add = runTest ./tests/agent-add.nix;
           bench-vs-k3s = runTest ./tests/bench-vs-k3s.nix;
         }
       );
