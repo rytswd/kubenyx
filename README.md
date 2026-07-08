@@ -66,8 +66,14 @@ NAME      STATUS   ROLES    AGE   VERSION
 kubenyx   Ready    <none>   30s   v1.36.2
 ```
 
-Exit the VM with `poweroff` (or `reboot` — firecracker treats a guest
-reboot as VMM exit).
+Exit the VM with `poweroff` in the guest shell, or from another
+terminal (same directory — the control socket is relative):
+
+```console
+$ nix run .#microvm-firecracker-shutdown
+```
+
+(`-cloud-hypervisor-` and `-qemu-` twins exist for the other variants.)
 
 For **host-side** kubectl, fetch a standalone kubeconfig from the guest
 (credentials are minted per boot inside the guest, so this is the
@@ -115,10 +121,21 @@ $ nix run github:rytswd/kubenyx#kubenyx-snap -- take \
 # From now on: a live cluster in ~66ms, as many times as you like
 $ nix run github:rytswd/kubenyx#kubenyx-snap -- resume --snapshot /dev/shm/kubenyx-snap
 spawn_to_sock_ms=4.4 load_ms=26.5 load_to_api_ms=8.9 total_ms=35.4 pid=12345 ...
+cluster:    https://10.100.0.2:6443
+kubeconfig: curl -s 10.100.0.2:10124 > kubenyx.kubeconfig && kubectl --kubeconfig kubenyx.kubeconfig get nodes
+stop:       kill 12345
 
 # Benchmark the loop yourself
 $ nix run github:rytswd/kubenyx#kubenyx-snap -- cycle --snapshot /dev/shm/kubenyx-snap -n 5
 cycles=5 median_total_ms=65.6 min=25.2 max=71.5
+```
+
+Already have a VM running (`nix run .#microvm-firecracker` in another
+terminal)? Snapshot it in place — pause → snapshot → resume, the guest
+never notices (~1.3 s, run from the VM's directory):
+
+```console
+$ nix run github:rytswd/kubenyx#kubenyx-snap -- take --sock kubenyx.sock --out /dev/shm/kubenyx-snap
 ```
 
 `resume` leaves the VM running and prints its pid; kill that pid to free

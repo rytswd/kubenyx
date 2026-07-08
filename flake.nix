@@ -182,12 +182,44 @@
         }
       );
 
-      apps = forAllSystems (pkgs: {
-        native-bench = {
-          type = "app";
-          program = nixpkgs.lib.getExe (pkgs.callPackage ./pkgs/native-bench.nix { kine = pkgs.kine; });
-        };
-      });
+      apps = forAllSystems (
+        pkgs:
+        {
+          native-bench = {
+            type = "app";
+            program = nixpkgs.lib.getExe (pkgs.callPackage ./pkgs/native-bench.nix { kine = pkgs.kine; });
+          };
+        }
+        # Graceful guest shutdown (Ctrl-Alt-Del over the VMM API socket,
+        # then wait for exit). The socket path is relative — run these
+        # from the same directory the VM was started in.
+        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") (
+          nixpkgs.lib.genAttrs
+            [
+              "microvm-firecracker"
+              "microvm-cloud-hypervisor"
+              "microvm-qemu"
+            ]
+            (variant: {
+              type = "app";
+              program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.${variant}}/bin/microvm-run";
+            })
+          // nixpkgs.lib.genAttrs
+            [
+              "microvm-firecracker-shutdown"
+              "microvm-cloud-hypervisor-shutdown"
+              "microvm-qemu-shutdown"
+            ]
+            (name: {
+              type = "app";
+              program = "${
+                self.packages.${pkgs.stdenv.hostPlatform.system}.${
+                  nixpkgs.lib.removeSuffix "-shutdown" name
+                }
+              }/bin/microvm-shutdown";
+            })
+        )
+      );
 
       checks = forAllSystems (
         pkgs:

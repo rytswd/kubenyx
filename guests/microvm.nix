@@ -260,6 +260,10 @@ lib.mkMerge [
             done
             up=$(cut -d' ' -f1 /proc/uptime)
             echo "KUBENYX-CLUSTER-READY uptime=''${up}s" > /dev/console
+            # Tell the human on the console how to reach the cluster from
+            # the host — the address is variant-specific, so print it
+            # rather than making people memorize it.
+            echo "KUBENYX-KUBECONFIG curl -s ${config.kubenyx.nodes.${config.kubenyx.nodeName}.address}:10124 > kubenyx.kubeconfig" > /dev/console
           '';
         };
       };

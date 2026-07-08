@@ -279,7 +279,14 @@ fn kill_wait(child: &mut Child) {
 }
 
 fn cmd_take(flags: &Flags) {
-    let runner = flags.get("--runner").unwrap_or_else(|| die("take requires --runner <microvm-run>"));
+    // Two modes: --runner boots a fresh VM, snapshots it and tears it
+    // down (a one-shot snapshot factory); --sock attaches to a VM that is
+    // ALREADY running (e.g. `nix run .#microvm-firecracker` in another
+    // terminal), snapshots it and resumes it in place.
+    if flags.get("--runner").is_none() {
+        return cmd_take_attached(flags);
+    }
+    let runner = flags.get("--runner").unwrap();
     let out = PathBuf::from(flags.get("--out").unwrap_or_else(|| "snapshot".into()));
     let marker = flags.get("--marker").unwrap_or_else(|| "KUBENYX-CLUSTER-READY".into());
     let wait_secs: u64 = flags.get("--wait-secs").map(|v| v.parse().unwrap_or_else(|_| die("bad --wait-secs"))).unwrap_or(120);
@@ -323,6 +330,39 @@ fn cmd_take(flags: &Flags) {
     kill_wait(&mut vm); // frees the tap for future resumes
     OWNED_VMM.store(0, Ordering::SeqCst);
     let _ = std::fs::remove_file(&sock);
+    println!("{}", out.display());
+}
+
+fn cmd_take_attached(flags: &Flags) {
+    let sock = PathBuf::from(flags.get("--sock").unwrap_or_else(|| "kubenyx.sock".into()));
+    if !sock.exists() {
+        die(&format!(
+            "{} not found — either run from the directory the VM was started in, \
+             pass --sock, or pass --runner to boot a fresh VM instead",
+            sock.display()
+        ));
+    }
+    let out = PathBuf::from(flags.get("--out").unwrap_or_else(|| "snapshot".into()));
+    std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("mkdir {}: {e}", out.display())));
+    let out = out.canonicalize().unwrap_or_else(|e| die(&format!("canonicalize: {e}")));
+
+    // Pause -> snapshot -> resume: the source VM never observes the gap
+    // (monotonic time stops with it) and keeps running afterwards.
+    api_expect(&sock, "PATCH", "/vm", r#"{"state":"Paused"}"#);
+    let body = format!(
+        r#"{{"snapshot_type":"Full","snapshot_path":"{}","mem_file_path":"{}"}}"#,
+        out.join("snap.vmstate").display(),
+        out.join("snap.mem").display()
+    );
+    let t = Instant::now();
+    api_expect(&sock, "PUT", "/snapshot/create", &body);
+    api_expect(&sock, "PATCH", "/vm", r#"{"state":"Resumed"}"#);
+    eprintln!(
+        "take: snapshot written in {:?} -> {} (source VM resumed and still owns the tap; \
+         stop it before `kubenyx-snap resume`)",
+        t.elapsed(),
+        out.display()
+    );
     println!("{}", out.display());
 }
 
@@ -408,6 +448,8 @@ fn cmd_resume(flags: &Flags) {
     let (firecracker, snapshot, api_sock, probe_addr, poke_addr, enable_pci) = resume_flags(flags);
     let config = tls_probe_config();
     let (child, t) = resume_once(&firecracker, &snapshot, &api_sock, &probe_addr, &poke_addr, enable_pci, &config);
+    // Machine-readable timings on stdout; the how-to-reach-it summary on
+    // stderr so scripts can parse stdout undisturbed.
     println!(
         "spawn_to_sock_ms={:.1} load_ms={:.1} load_to_api_ms={:.1} total_ms={:.1} pid={} api_sock={}",
         t.spawn_to_sock.as_secs_f64() * 1e3,
@@ -417,6 +459,10 @@ fn cmd_resume(flags: &Flags) {
         child.id(),
         api_sock.display(),
     );
+    let guest_ip = probe_addr.split(':').next().unwrap_or("10.100.0.2");
+    eprintln!("cluster:    https://{probe_addr}");
+    eprintln!("kubeconfig: curl -s {guest_ip}:10124 > kubenyx.kubeconfig && kubectl --kubeconfig kubenyx.kubeconfig get nodes");
+    eprintln!("stop:       kill {}", child.id());
     // The VMM deliberately stays running (reparented to init when we
     // exit); killing the printed pid frees the tap. Disown it so the
     // exit paths don't reap it.
