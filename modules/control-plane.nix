@@ -202,8 +202,20 @@ in
       ];
       # PKI is Wants, not Requires: a PKI rerun (nixos-rebuild switch) must
       # never bounce the control plane via restart propagation.
-      wants = [ "kubenyx-pki.service" ];
-      requires = [ datastoreUnit ];
+      wants = [ "kubenyx-pki.service" ] ++ lib.optional (serverCount > 1) datastoreUnit;
+      # Single server: Requires — the apiserver is useless without its only
+      # datastore, and stopping with it keeps today's semantics exactly.
+      # Multi server: Wants — the datastore member is quorum-replicated, so a
+      # LOCAL etcd death must not stop-propagate into this API replica. The
+      # failover leg proved the Requires posture wrong twice over: the
+      # propagated stop hangs ~90s in apiserver graceful shutdown (the etcd
+      # restart job queues behind it, stretching quorum recovery from ~2s to
+      # ~94s), and a dependency stop is "deliberate" to systemd, so
+      # Restart=always never fires — one etcd blip permanently killed the
+      # collocated API replica. The apiserver's own etcd client already
+      # rides through no-leader windows (server3 did exactly that).
+      # (<= 1, not == 1: an undeclared-nodes single box has serverCount 0.)
+      requires = lib.optional (serverCount <= 1) datastoreUnit;
       serviceConfig = hardening // {
         Type = "notify";
         NotifyAccess = "all";

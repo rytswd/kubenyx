@@ -206,6 +206,27 @@ overrides (D12).
 - =failover=: crash server0 (the driver can) → API keeps answering via
   the LB within seconds; kill -9 etcd on one member → no data loss
   (write before, read after).
+  Implemented (2026-07-08, =tests/failover.nix=, extends the
+  multi-server topology by string-appending its testScript): the agent
+  gets an admin kubeconfig with =--server= forced to 127.0.0.1:6444, so
+  every proof rides the LB datapath. Phase 1: write a configmap through
+  the LB, =server1.crash()= (hard power loss), the pre-crash object is
+  readable through the LB inside a 15s budget (measured ~3-4s: probe
+  500ms × threshold 3), KUBENYX-LB-EVICT is asserted in the journal,
+  and a post-crash write lands on the 2/3 quorum. Phase 2: kill -9 etcd
+  on a surviving member; systemd restarts it (~4s to active), the
+  member-set guard sees an unchanged set (no "member set changed" in
+  the journal — no re-bootstrap over live data), both configmaps are
+  read back via a surviving server AND the LB path, and the collocated
+  apiserver rode through with an unchanged NRestarts. One
+  implementation gap surfaced and fixed: kube-apiserver's =Requires= on
+  the datastore unit meant a local etcd death stop-propagated into the
+  API replica — the propagated stop hung ~90s in graceful shutdown
+  (queuing the etcd restart behind it) and, being "deliberate" to
+  systemd, Restart=always never fired, leaving the replica dead for
+  good. Now =Wants= when serverCount > 1 (control-plane.nix); single
+  server keeps =Requires= (single-node/-etcd/multi-node driver drvs
+  verified bit-identical before/after). Leg wall: ~38s.
 - =server-reboot=: reboot one server; it rejoins quorum; objects
   survive (extends the existing reboot-persistence leg).
 - =agent-add=: bring up a cluster with N agents, then activate the
@@ -268,3 +289,9 @@ overrides (D12).
   openings. §5's "no addon fighting" is asserted here too (all three
   appliers complete against the shared datastore). Remaining:
   =failover=, =server-reboot=, =agent-add=, =ca-custody= legs.
+- 2026-07-08: =failover= test leg green (38.1s wall on the KVM box);
+  details inline in the Test Matrix. Fixed along the way: apiserver's
+  datastore dependency is now Wants on multi-server nodes so a local
+  etcd death cannot stop-propagate into (and permanently kill) the API
+  replica; single-server keeps Requires, driver drvs bit-identical.
+  Remaining: =server-reboot=, =agent-add=, =ca-custody= legs.
