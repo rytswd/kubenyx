@@ -126,3 +126,16 @@ seed script; the option type widens to =listOf path=.
 * History
 - 2026-07-08: Drafted and moved to ready; implementation campaign
   launched same-session.
+- 2026-07-08: §1 implemented (=modules/network.nix=): =network.cni=
+  enum, all four bridge opinions =mkIf=-gated (conflist etc entry,
+  kubenyx-routes, kubenyx-nat, cni0 firewall accepts; external mode
+  keys the apiserver/DNS accepts on pod source addresses alone since
+  the external CNI's interface name is unknowable). =external-cni=
+  test leg green (38.15s test-script wall on the KVM box): the test
+  ships the conflist driver-mediated after asserting kubenyx wrote
+  nothing and no kubenyx-nat/-routes units exist; node Ready, pod on
+  the test's =extcni0= bridge, pod->host-DNS through the reworked
+  accepts, =/etc/cni/net.d= holds only the test's file. Flag-identity
+  proven: default-config eval dump of all 85 systemd unit texts +
+  built-unit store paths and all 97 =environment.etc= source paths is
+  byte-identical before/after.

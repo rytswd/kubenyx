@@ -570,6 +570,7 @@
           failover = runTest ./tests/failover.nix;
           server-reboot = runTest ./tests/server-reboot.nix;
           agent-add = runTest ./tests/agent-add.nix;
+          external-cni = runTest ./tests/external-cni.nix;
           ca-custody = runTest ./tests/ca-custody.nix;
           bench-vs-k3s = runTest ./tests/bench-vs-k3s.nix;
         }

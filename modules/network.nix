@@ -1,6 +1,10 @@
 # Networking (air/v0.1/networking.org): zero-daemon CNI (bridge +
 # host-local, deterministic per-node subnets), nftables kube-proxy, static
 # routes for multi-node, and a firewall that stays ON.
+# air/v0.4/byod.org §1: cni = "external" hands the pod dataplane to an
+# operator-deployed CNI — no conflist (ABSENT, not empty: containerd loads
+# the lexically first conflist, so even a stub would shadow the external
+# CNI's), no static pod routes, no egress NAT, no cni0 firewall rules.
 {
   config,
   lib,
@@ -12,6 +16,8 @@ let
   net = cfg.network;
   kc = cfg.internal.kubeconfigDir;
   klib = import ../lib { inherit lib; };
+
+  bridgeCni = net.cni == "bridge";
 
   conflist = builtins.toJSON {
     cniVersion = "1.0.0";
@@ -75,6 +81,22 @@ let
 in
 {
   options.kubenyx.network = {
+    cni = lib.mkOption {
+      type = lib.types.enum [
+        "bridge"
+        "external"
+      ];
+      default = "bridge";
+      description = ''
+        Who owns the pod dataplane. "bridge" is kubenyx's zero-daemon CNI
+        (bridge + host-local, static cross-node routes, egress NAT).
+        "external" makes kubenyx write nothing: no conflist in
+        /etc/cni/net.d, no kubenyx-routes, no NAT unit — an
+        operator-deployed CNI (typically a DaemonSet) is picked up the
+        moment it writes its conflist. kubeProxy.enable stays orthogonal:
+        disable it only when the external CNI brings a service dataplane.
+      '';
+    };
     clusterCidr = lib.mkOption {
       type = lib.types.str;
       default = "10.244.0.0/16";
@@ -108,7 +130,9 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    environment.etc."cni/net.d/10-kubenyx.conflist".text = conflist;
+    # byod.org §1: ABSENT in external mode, never an empty stub —
+    # containerd loads the lexically first conflist it finds.
+    environment.etc."cni/net.d/10-kubenyx.conflist" = lib.mkIf bridgeCni { text = conflist; };
 
     networking.firewall = lib.mkIf net.openFirewall {
       allowedTCPPorts = [
@@ -128,14 +152,26 @@ in
       # pod reach every host-bound port. Pods get exactly what the platform
       # needs — the apiserver via its service VIP (DNAT lands on host:6443)
       # and host CoreDNS on the dummy address.
-      extraCommands = ''
-        iptables -A nixos-fw -i cni0 -s ${net.clusterCidr} -p tcp --dport 6443 -j nixos-fw-accept
-        iptables -A nixos-fw -i cni0 -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p udp --dport 53 -j nixos-fw-accept
-        iptables -A nixos-fw -i cni0 -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p tcp --dport 53 -j nixos-fw-accept
-      '';
+      # byod.org §1: with an external CNI there is no cni0 — pod traffic
+      # arrives on whatever interface that CNI creates, so the same
+      # accepts key on the pod source addresses alone. The external CNI
+      # manages any further openings itself.
+      extraCommands =
+        if bridgeCni then
+          ''
+            iptables -A nixos-fw -i cni0 -s ${net.clusterCidr} -p tcp --dport 6443 -j nixos-fw-accept
+            iptables -A nixos-fw -i cni0 -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p udp --dport 53 -j nixos-fw-accept
+            iptables -A nixos-fw -i cni0 -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p tcp --dport 53 -j nixos-fw-accept
+          ''
+        else
+          ''
+            iptables -A nixos-fw -s ${net.clusterCidr} -p tcp --dport 6443 -j nixos-fw-accept
+            iptables -A nixos-fw -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p udp --dport 53 -j nixos-fw-accept
+            iptables -A nixos-fw -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p tcp --dport 53 -j nixos-fw-accept
+          '';
     };
 
-    systemd.services.kubenyx-nat = {
+    systemd.services.kubenyx-nat = lib.mkIf bridgeCni {
       description = "Kubenyx pod egress NAT";
       wantedBy = [ "kubenyx.target" ];
       serviceConfig = {
@@ -147,7 +183,8 @@ in
     };
 
     # host-gw datapath with zero daemons: one static route per peer.
-    systemd.services.kubenyx-routes = lib.mkIf (peers != { }) {
+    # External CNIs own pod reachability — no routes in that mode.
+    systemd.services.kubenyx-routes = lib.mkIf (bridgeCni && peers != { }) {
       description = "Kubenyx cross-node pod routes";
       wantedBy = [ "kubenyx.target" ];
       after = [ "network-online.target" ];
