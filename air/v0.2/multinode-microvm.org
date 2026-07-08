@@ -62,9 +62,22 @@ Emits per-node runner packages (=microvm-cluster-server=,
   agents in parallel, and streams the per-node =KUBENYX-*= markers
   prefixed by node name. Prints the kubeconfig curl on ready.
 - =nix run .#microvm-cluster-shutdown= — reverse order teardown.
-Separate taps (not a bridge) keep the host-side model identical to
-today's single-node setup and let IPAddressAllow reason per-node; all
-taps sit in 10.100.0.0/24 on the host side.
+Host datapath (decided at implementation, 2026-07-08): per-node taps
+enslaved into one host *bridge* (=kubenyx-br0= holding 10.100.0.1/24).
+The guest modules assume L2 adjacency between node addresses — each
+guest holds its /24 on-link and resolves peers by ARP, and
+kubenyx-routes points peer pod /24s =via= peer node addresses — so
+separate unbridged taps would need an unstated routed-L3 host setup
+(proxy_arp + forwarding + per-guest /32 + per-pod-CIDR host routes).
+The bridge needs zero module changes and matches the multi-node
+test's L2 model. Consequence, stated plainly: on a shared L2 a
+compromised guest can spoof another agent's source address, so the
+per-agent IPAddressAllow on the credential handoff is *advisory*, not
+a boundary — accepted within the disposable trust model (positions
+declared in Nix, host-local taps, volatile clusters; an agent can
+already reach the apiserver with its own creds). The single-node flow
+keeps working: the bridge answers for 10.100.0.1 whether one tap is
+enslaved or three.
 
 ** 3. Agent credential handoff over the tap
 The kubeconfig-handoff pattern (socket-activated unit +
@@ -105,3 +118,10 @@ on timeout, same style as kubenyx-report).
 * History
 - 2026-07-08: Drafted from the "how do we extend to more nodes"
   discussion; state draft pending approval.
+- 2026-07-08: §0–1 implemented (nodes.<name>.role schema + etcd-mem/
+  kine assertion relaxation to "exactly one server").
+- 2026-07-08: §2–4 implemented — mkMicrovmCluster generator, bridge
+  datapath decision recorded in §2 (review finding: the modules
+  assume L2 adjacency; separate taps would need routed L3), per-agent
+  credential handoff on 10125+N with bounded fetch-retry, launcher +
+  shutdown apps. Measurements in bench/RESULTS.md.

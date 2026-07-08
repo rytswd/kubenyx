@@ -143,13 +143,29 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        TimeoutStartSec = 120;
       };
-      script = lib.concatStringsSep "\n" (
-        lib.mapAttrsToList (
-          name: peer:
-          "ip route replace ${klib.nodePodCidr net.clusterCidr 24 peer.index} via ${peer.address}"
-        ) peers
-      );
+      # Bounded retry instead of trusting the ordering: guests that disable
+      # systemd-networkd-wait-online (the microVM mesh) can reach
+      # network-online.target before the node address is on the interface,
+      # and `ip route ... via <peer>` needs the on-link source address to
+      # exist. On hosts where wait-online is real, the first attempt wins.
+      script = ''
+        for attempt in $(seq 1 150); do
+          if ${
+            lib.concatStringsSep " \\\n             && " (
+              lib.mapAttrsToList (
+                name: peer: "ip route replace ${klib.nodePodCidr net.clusterCidr 24 peer.index} via ${peer.address}"
+              ) peers
+            )
+          }; then
+            exit 0
+          fi
+          sleep 0.2
+        done
+        echo "kubenyx-routes: could not install peer pod routes" >&2
+        exit 1
+      '';
     };
 
     systemd.services.kube-proxy = lib.mkIf net.kubeProxy.enable {

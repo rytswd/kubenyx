@@ -7,6 +7,43 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-08 — KVM: 3-node microVM mesh ready in 8.7s (median)
+
+`nix run .#microvm-cluster` (air/v0.2 §2–4): 1 server + 2 agent
+firecracker microVMs on bridged taps (kubenyx-br0), etcd-mem
+datastore, per-agent credential handoff over ports 10125/10126
+(socket-activated, IPAddressAllow per declared agent address). Wall
+clock is launcher start (before the first VMM spawns) to all three
+nodes reporting KUBENYX-CLUSTER-READY; verified after each run with
+`kubectl get nodes` via the served kubeconfig → 3/3 Ready.
+
+| Run | mesh wall (launch → all-Ready) | per-node in-guest ready |
+|---|---|---|
+| 1 | 9.145 s | agents 8.20/8.21 s, server 8.79 s |
+| 2 | 8.475 s | agents 7.73/7.73 s, server 8.27 s |
+| 3 | 8.703 s | agents 7.81/7.81 s, server 8.40 s |
+
+Median **8.70 s** — under the 15 s target and the 12 s stretch.
+Agents fetch their credential bundle at ~6.4s uptime (bounded retry
+against the server's socket-activated handoff; the server mints all
+node leaves in its ~6ms PKI oneshot) and reach Ready *before* the
+server (~0.5s less unit load). Host-side negative test: connections
+to 10125/10126 from the host (10.100.0.1, not an allowed source) are
+dropped by IPAddressAllow (curl timeout, nothing served).
+
+Fixed en route: the kubeconfig/bundle handoff services read only the
+request line before responding, leaving unread request bytes in the
+socket buffer — close() then RSTs the in-flight response tail
+(`curl: (56) Recv failure`), which is why agents' `curl -f` fetch
+loops never succeeded on run 0. Both serve scripts now drain the
+request through the blank line.
+
+Single-node invariant re-checked on the same commit (bit-identical
+unit list; only the serve-kubeconfig script hash changed): cold boot
+7.56 / 7.68 / 7.83 / 8.72 / 8.78 s over 5 runs, median **7.83 s** ≤
+the 8.2 s bar (first two runs were taken right after mass nix builds;
+the host was still noisy).
+
 ## 2026-07-07 — KVM session: 8.5s cluster-ready, 75ms snapshot restore
 
 First run on real hardware (EC2 metal, KVM). Every extrapolated claim

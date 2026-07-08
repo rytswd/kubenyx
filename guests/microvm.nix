@@ -1,7 +1,10 @@
-# Kubenyx microVM guest profile: a disposable single-node test cluster
-# tuned for boot speed. On a KVM host, the firecracker/cloud-hypervisor
-# variants boot this to cluster-ready in single-digit seconds; the qemu
-# variant exists so the profile stays verifiable on KVM-less machines.
+# Kubenyx microVM guest profile: a disposable test cluster node tuned
+# for boot speed — the single-node variants and every mesh member
+# (server or agent) share this file; all role/mesh deltas are gated so
+# the single-node guest's unit list and closure never grow. On a KVM
+# host, the firecracker/cloud-hypervisor variants boot this to
+# cluster-ready in single-digit seconds; the qemu variant exists so the
+# profile stays verifiable on KVM-less machines.
 #
 # Everything is volatile by design: the root is tmpfs over a read-only
 # store image, the datastore lives on tmpfs, and the PKI regenerates in
@@ -14,6 +17,34 @@
 }:
 let
   cfg = config.kubenyx;
+  isServer = cfg.role == "server";
+
+  # ---- mesh membership (air/v0.2/multinode-microvm.org) ---------------------
+  # Everything below derives from kubenyx.nodes; on a single-node cluster
+  # agentNames is empty and every handoff unit vanishes — the single-node
+  # guest gains zero units and zero closure weight.
+  agentNames = lib.attrNames (lib.filterAttrs (_: n: n.role == "agent") cfg.nodes);
+  agentCount = lib.length agentNames;
+  # One credential-handoff port per agent, allocated by sorted-name position
+  # starting at 10125. systemd cannot vary IPAddressAllow per Accept=yes
+  # *instance*, so per-agent isolation needs one socket unit (one port) per
+  # agent. Server and agents derive the identical mapping from the same
+  # nodes attrset — no runtime negotiation.
+  agentPort = name: 10125 + lib.lists.findFirstIndex (n: n == name) 0 agentNames;
+  # The complete per-node bundle kubenyx-pki packages under nodes/<name>/
+  # (mirrors the `needed` list in kubenyx-pki agent mode).
+  bundleFiles = [
+    "ca.crt"
+    "kubelet.crt"
+    "kubelet.key"
+    "kubelet-server.crt"
+    "kubelet-server.key"
+    "kube-proxy.crt"
+    "kube-proxy.key"
+    "coredns.crt"
+    "coredns.key"
+  ];
+
   # Warmup script: pre-read the critical Go binaries from the erofs store
   # into the guest page cache during the initrd phase. The script must be
   # a named let binding so it can be added to boot.initrd.systemd.storePaths
@@ -111,19 +142,50 @@ lib.mkMerge [
     # cluster-admin on this disposable, volatile test cluster. That is the
     # same exposure class as the tap itself; do not reuse this profile for
     # durable clusters.
-    systemd.sockets.kubenyx-kubeconfig = {
-      description = "Host-facing admin kubeconfig handoff";
-      wantedBy = [ "sockets.target" ];
-      listenStreams = [ "0.0.0.0:10124" ];
-      socketConfig = {
-        Accept = true;
-        IPAddressAllow = [
-          "10.100.0.1/32" # tap gateway (firecracker / cloud-hypervisor)
-          "10.0.2.2/32" # SLiRP gateway (qemu variant)
-        ];
-        IPAddressDeny = "any";
-      };
-    };
+    systemd.sockets =
+      lib.optionalAttrs isServer {
+        kubenyx-kubeconfig = {
+          description = "Host-facing admin kubeconfig handoff";
+          wantedBy = [ "sockets.target" ];
+          listenStreams = [ "0.0.0.0:10124" ];
+          socketConfig = {
+            Accept = true;
+            IPAddressAllow = [
+              "10.100.0.1/32" # tap gateway (firecracker / cloud-hypervisor)
+              "10.0.2.2/32" # SLiRP gateway (qemu variant)
+            ];
+            IPAddressDeny = "any";
+          };
+        };
+      }
+      # ---- agent credential handoff (server side) ------------------------------
+      # The kubeconfig-handoff pattern generalized: one socket per agent,
+      # IPAddressAllow = that agent's declared address only, serving a tar of
+      # the agent's packaged credential directory (pki/nodes/<agent>/).
+      # Trust model: same class as the kubeconfig handoff — positions are
+      # declared in Nix and the taps are host-local. NOTE the mesh launcher
+      # bridges the taps (the guest modules assume L2 adjacency), so a
+      # compromised agent could spoof another agent's source address:
+      # IPAddressAllow is advisory on this disposable test mesh, not a
+      # boundary. An agent can already reach the apiserver with its own
+      # creds; these clusters are volatile by design.
+      // lib.optionalAttrs (isServer && agentCount > 0) (
+        lib.listToAttrs (
+          map (
+            name:
+            lib.nameValuePair "kubenyx-agent-pki-${name}" {
+              description = "Credential bundle handoff for agent ${name}";
+              wantedBy = [ "sockets.target" ];
+              listenStreams = [ "0.0.0.0:${toString (agentPort name)}" ];
+              socketConfig = {
+                Accept = true;
+                IPAddressAllow = [ "${cfg.nodes.${name}.address}/32" ];
+                IPAddressDeny = "any";
+              };
+            }
+          ) agentNames
+        )
+      );
 
     # The "kubenyx-kubeconfig@" instance service lives in the merged
     # systemd.services attrset below (a separate systemd.services.X key
@@ -150,18 +212,26 @@ lib.mkMerge [
     # startup "finishes", so key units announce themselves explicitly.
     # Semantics: notify units (kine, kube-apiserver, coredns) mark genuine
     # readiness (ExecStartPost runs after READY=1); kubelet (Type=simple)
-    # and oneshots mark process start/completion. The list matches this
-    # guest's fixed shape (kine backend, server role) — adjust it if the
-    # profile ever changes backend or role.
+    # and oneshots mark process start/completion. The list matches each
+    # role's fixed unit shape (etcd-mem backend) — adjust it if the
+    # profile ever changes backend.
     systemd.services =
       lib.genAttrs
-        [
-          "etcd-mem"
-          "kube-apiserver"
-          "kubelet"
-          "coredns"
-          "kubenyx-addons"
-        ]
+        (
+          if isServer then
+            [
+              "etcd-mem"
+              "kube-apiserver"
+              "kubelet"
+              "coredns"
+              "kubenyx-addons"
+            ]
+          else
+            [
+              "kubelet"
+              "coredns"
+            ]
+        )
         (name: {
           serviceConfig.ExecStartPost = "${pkgs.runtimeShell} -c 'echo KUBENYX-PHASE ${name} up=$(cut -d\" \" -f1 /proc/uptime) > /dev/console'";
         })
@@ -172,26 +242,6 @@ lib.mkMerge [
         # top-level keys freely.
         systemd-random-seed.enable = false; # nothing to save/restore per boot
         systemd-networkd-persistent-state.enable = false; # volatile guest
-
-        # Serves the admin kubeconfig to the host — see the handoff
-        # comment above the kubenyx-kubeconfig socket unit.
-        "kubenyx-kubeconfig@" = {
-          description = "Serve the admin kubeconfig to the host";
-          serviceConfig = {
-            StandardInput = "socket";
-            StandardOutput = "socket";
-            StandardError = "journal";
-            ExecStart = pkgs.writeShellScript "serve-kubeconfig" ''
-              # Consume the request line so curl finishes sending before
-              # we close (an immediate close can RST the response away).
-              read -t 5 -r _ || true
-              printf 'HTTP/1.0 200 OK\r\nContent-Type: application/yaml\r\nConnection: close\r\n\r\n'
-              exec ${pkgs.gnused}/bin/sed \
-                's|https://127.0.0.1:6443|https://${config.kubenyx.nodes.${config.kubenyx.nodeName}.address}:6443|' \
-                /var/lib/kubenyx/kubeconfigs/admin.kubeconfig
-            '';
-          };
-        };
 
         # Post-restore wall-clock correction: a restored snapshot keeps
         # monotonic time (kvmclock state travels with the snapshot) but
@@ -223,47 +273,199 @@ lib.mkMerge [
             RemainAfterExit = true;
             TimeoutStartSec = 660; # bounded: the script gives up at 600s
           };
-          script = ''
-            node=${lib.escapeShellArg config.kubenyx.nodeName}
-            pki=/var/lib/kubenyx/pki
-            dumped=""
-            probe() {
-              # Admin identity: the healthz cert is deliberately unprivileged
-              # and only passes always-allowed /healthz-class paths — reading
-              # a node object needs RBAC. tr strips pretty-print whitespace so
-              # the condition pair is greppable on one line.
-              curl -s --max-time 5 \
-                --cacert "$pki/ca.crt" --cert "$pki/admin.crt" --key "$pki/admin.key" \
-                "https://127.0.0.1:6443/api/v1/nodes/$node" 2>/dev/null \
-                | tr -d ' \n' | grep -q '"type":"Ready","status":"True"'
-            }
-            while ! probe; do
-              sleep 0.25
-              up=$(cut -d. -f1 /proc/uptime)
-              if [ -z "$dumped" ] && [ "$up" -gt 300 ]; then
-                dumped=1
-                {
-                  echo "KUBENYX-DEGRADED: not ready at uptime ''${up}s"
-                  systemctl list-units --failed --no-legend || true
-                  for u in kubenyx-pki kine kube-apiserver kubelet; do
-                    echo "--- $u:"
-                    journalctl -u "$u" --no-pager -n 4 -o cat || true
+          script =
+            if isServer then
+              ''
+                node=${lib.escapeShellArg config.kubenyx.nodeName}
+                pki=/var/lib/kubenyx/pki
+                dumped=""
+                probe() {
+                  # Admin identity: the healthz cert is deliberately unprivileged
+                  # and only passes always-allowed /healthz-class paths — reading
+                  # a node object needs RBAC. tr strips pretty-print whitespace so
+                  # the condition pair is greppable on one line.
+                  curl -s --max-time 5 \
+                    --cacert "$pki/ca.crt" --cert "$pki/admin.crt" --key "$pki/admin.key" \
+                    "https://127.0.0.1:6443/api/v1/nodes/$node" 2>/dev/null \
+                    | tr -d ' \n' | grep -q '"type":"Ready","status":"True"'
+                }
+                while ! probe; do
+                  sleep 0.25
+                  up=$(cut -d. -f1 /proc/uptime)
+                  if [ -z "$dumped" ] && [ "$up" -gt 300 ]; then
+                    dumped=1
+                    {
+                      echo "KUBENYX-DEGRADED: not ready at uptime ''${up}s"
+                      systemctl list-units --failed --no-legend || true
+                      for u in kubenyx-pki kine kube-apiserver kubelet; do
+                        echo "--- $u:"
+                        journalctl -u "$u" --no-pager -n 4 -o cat || true
+                      done
+                    } > /dev/console 2>&1
+                  fi
+                  # Terminal give-up: a failed unit (no marker) beats wedging
+                  # multi-user.target in "starting" forever.
+                  if [ "$up" -gt 600 ]; then
+                    echo "KUBENYX-FAILED: gave up at uptime ''${up}s" > /dev/console
+                    exit 1
+                  fi
+                done
+                up=$(cut -d' ' -f1 /proc/uptime)
+                echo "KUBENYX-CLUSTER-READY uptime=''${up}s" > /dev/console
+                # Tell the human on the console how to reach the cluster from
+                # the host — the address is variant-specific, so print it
+                # rather than making people memorize it.
+                echo "KUBENYX-KUBECONFIG curl -s ${
+                  config.kubenyx.nodes.${config.kubenyx.nodeName}.address
+                }:10124 > kubenyx.kubeconfig" > /dev/console
+              ''
+            else
+              # Agent flavor: no local apiserver and no admin identity — probe
+              # this node's own Node object at the control-plane endpoint with
+              # the kubelet client cert (the Node authorizer permits a node to
+              # get itself). Marker format is identical so the mesh launcher
+              # greps one string.
+              ''
+                node=${lib.escapeShellArg config.kubenyx.nodeName}
+                pki=/var/lib/kubenyx/pki
+                dumped=""
+                probe() {
+                  curl -s --max-time 5 \
+                    --cacert "$pki/ca.crt" --cert "$pki/kubelet.crt" --key "$pki/kubelet.key" \
+                    "https://${cfg.controlPlaneEndpoint}:6443/api/v1/nodes/$node" 2>/dev/null \
+                    | tr -d ' \n' | grep -q '"type":"Ready","status":"True"'
+                }
+                while ! probe; do
+                  sleep 0.25
+                  up=$(cut -d. -f1 /proc/uptime)
+                  if [ -z "$dumped" ] && [ "$up" -gt 300 ]; then
+                    dumped=1
+                    {
+                      echo "KUBENYX-DEGRADED: not ready at uptime ''${up}s"
+                      systemctl list-units --failed --no-legend || true
+                      for u in kubenyx-pki-fetch kubenyx-pki kubelet; do
+                        echo "--- $u:"
+                        journalctl -u "$u" --no-pager -n 4 -o cat || true
+                      done
+                    } > /dev/console 2>&1
+                  fi
+                  if [ "$up" -gt 600 ]; then
+                    echo "KUBENYX-FAILED: gave up at uptime ''${up}s" > /dev/console
+                    exit 1
+                  fi
+                done
+                up=$(cut -d' ' -f1 /proc/uptime)
+                echo "KUBENYX-CLUSTER-READY uptime=''${up}s" > /dev/console
+              '';
+        };
+      }
+      # Serves the admin kubeconfig to the host — see the handoff
+      # comment above the kubenyx-kubeconfig socket unit.
+      // lib.optionalAttrs isServer {
+        "kubenyx-kubeconfig@" = {
+          description = "Serve the admin kubeconfig to the host";
+          serviceConfig = {
+            StandardInput = "socket";
+            StandardOutput = "socket";
+            StandardError = "journal";
+            ExecStart = pkgs.writeShellScript "serve-kubeconfig" ''
+              # Drain the ENTIRE request through the blank line: any bytes
+              # left unread in the receive buffer turn our close() into an
+              # RST, which can destroy the in-flight response tail (curl:
+              # "Recv failure: Connection reset by peer" — observed on the
+              # mesh bridge; one read of the request line was not enough).
+              while IFS= read -t 5 -r line; do
+                line=''${line%$'\r'}
+                [ -z "$line" ] && break
+              done
+              printf 'HTTP/1.0 200 OK\r\nContent-Type: application/yaml\r\nConnection: close\r\n\r\n'
+              exec ${pkgs.gnused}/bin/sed \
+                's|https://127.0.0.1:6443|https://${
+                  config.kubenyx.nodes.${config.kubenyx.nodeName}.address
+                }:6443|' \
+                /var/lib/kubenyx/kubeconfigs/admin.kubeconfig
+            '';
+          };
+        };
+      }
+      # ---- agent credential handoff (server side, instance services) ------------
+      // lib.optionalAttrs (isServer && agentCount > 0) (
+        lib.listToAttrs (
+          map (
+            name:
+            lib.nameValuePair "kubenyx-agent-pki-${name}@" {
+              description = "Serve agent ${name}'s credential bundle";
+              serviceConfig = {
+                StandardInput = "socket";
+                StandardOutput = "socket";
+                StandardError = "journal";
+                ExecStart = pkgs.writeShellScript "serve-agent-pki-${name}" ''
+                  # Drain the request through the blank line — see the
+                  # serve-kubeconfig comment (unread bytes turn close()
+                  # into RST and kill the response tail).
+                  while IFS= read -t 5 -r line; do
+                    line=''${line%$'\r'}
+                    [ -z "$line" ] && break
                   done
-                } > /dev/console 2>&1
+                  dir=/var/lib/kubenyx/pki/nodes/${name}
+                  # 503 until kubenyx-pki has minted and packaged the FULL
+                  # bundle (the agent's fetch loop retries): partial tars
+                  # would make the agent renderer run with missing leaves.
+                  for f in ${lib.escapeShellArgs bundleFiles}; do
+                    if [ ! -s "$dir/$f" ]; then
+                      printf 'HTTP/1.0 503 Service Unavailable\r\nConnection: close\r\n\r\n'
+                      exit 0
+                    fi
+                  done
+                  printf 'HTTP/1.0 200 OK\r\nContent-Type: application/x-tar\r\nConnection: close\r\n\r\n'
+                  exec ${pkgs.gnutar}/bin/tar c -C "$dir" .
+                '';
+              };
+            }
+          ) agentNames
+        )
+      )
+      # ---- agent credential handoff (agent side) ---------------------------------
+      # Bounded fetch-with-retry before kubenyx-pki.service: agents boot in
+      # parallel with the server, so the bundle may not exist yet (the server
+      # answers 503 until minted). On success the existing path unit /
+      # renderer flow takes over; on timeout, a loud DEGRADED marker and
+      # exit 0 — the path unit still recovers if material arrives later.
+      // lib.optionalAttrs (!isServer) {
+        kubenyx-pki-fetch = {
+          description = "Fetch this node's credential bundle from the server";
+          wantedBy = [ "kubenyx.target" ];
+          before = [ "kubenyx-pki.service" ];
+          after = [ "local-fs.target" ];
+          path = with pkgs; [
+            curl
+            gnutar
+            coreutils
+          ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            TimeoutStartSec = 180;
+          };
+          script = ''
+            pki=/var/lib/kubenyx/pki
+            mkdir -p "$pki"
+            # Idempotent: tmpfs makes every boot fresh, but restarts happen.
+            # (if-form, not `&& exit 0`: the script runs under set -e.)
+            if [ -s "$pki/kubelet.key" ]; then exit 0; fi
+            url=http://${cfg.controlPlaneEndpoint}:${toString (agentPort cfg.nodeName)}
+            deadline=$(( $(cut -d. -f1 /proc/uptime) + 90 ))
+            while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
+              if curl -sf --connect-timeout 2 --max-time 5 "$url" -o /tmp/pki-bundle.tar; then
+                tar x -f /tmp/pki-bundle.tar -C "$pki"
+                rm -f /tmp/pki-bundle.tar
+                echo "KUBENYX-PHASE pki-fetch up=$(cut -d' ' -f1 /proc/uptime)" > /dev/console
+                exit 0
               fi
-              # Terminal give-up: a failed unit (no marker) beats wedging
-              # multi-user.target in "starting" forever.
-              if [ "$up" -gt 600 ]; then
-                echo "KUBENYX-FAILED: gave up at uptime ''${up}s" > /dev/console
-                exit 1
-              fi
+              sleep 0.25
             done
-            up=$(cut -d' ' -f1 /proc/uptime)
-            echo "KUBENYX-CLUSTER-READY uptime=''${up}s" > /dev/console
-            # Tell the human on the console how to reach the cluster from
-            # the host — the address is variant-specific, so print it
-            # rather than making people memorize it.
-            echo "KUBENYX-KUBECONFIG curl -s ${config.kubenyx.nodes.${config.kubenyx.nodeName}.address}:10124 > kubenyx.kubeconfig" > /dev/console
+            echo "KUBENYX-DEGRADED: credential bundle fetch from $url timed out (90s)" > /dev/console
+            exit 0
           '';
         };
       };
@@ -294,15 +496,29 @@ lib.mkMerge [
     };
 
     # Drop the implicit basic.target gate from each critical-path service.
-    systemd.services.etcd-mem.unitConfig.DefaultDependencies = lib.mkForce false;
-    systemd.services.kubenyx-pki.unitConfig.DefaultDependencies = lib.mkForce false;
-    systemd.services.kube-apiserver.unitConfig.DefaultDependencies = lib.mkForce false;
-    systemd.services.kube-controller-manager.unitConfig.DefaultDependencies = lib.mkForce false;
-    systemd.services.kube-scheduler.unitConfig.DefaultDependencies = lib.mkForce false;
-    systemd.services.kubelet.unitConfig.DefaultDependencies = lib.mkForce false;
-    systemd.services.coredns.unitConfig.DefaultDependencies = lib.mkForce false;
-    systemd.services.kubenyx-addons.unitConfig.DefaultDependencies = lib.mkForce false;
-    systemd.services.kubenyx-dns-iface.unitConfig.DefaultDependencies = lib.mkForce false;
-    systemd.services.containerd.unitConfig.DefaultDependencies = lib.mkForce false;
+    # Role-gated: referencing a unit that a role never defines would create
+    # a stub unit file on that role (an agent must not grow apiserver junk).
+    systemd.services =
+      lib.genAttrs
+        (
+          [
+            "kubenyx-pki"
+            "kubelet"
+            "coredns"
+            "kubenyx-dns-iface"
+            "containerd"
+          ]
+          ++ lib.optionals isServer [
+            "etcd-mem"
+            "kube-apiserver"
+            "kube-controller-manager"
+            "kube-scheduler"
+            "kubenyx-addons"
+          ]
+          ++ lib.optional (!isServer) "kubenyx-pki-fetch"
+        )
+        (_: {
+          unitConfig.DefaultDependencies = lib.mkForce false;
+        });
   }
 ]
