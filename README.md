@@ -67,10 +67,24 @@ kubenyx   Ready    <none>   30s   v1.36.2
 ```
 
 Exit the VM with `poweroff` (or `reboot` — firecracker treats a guest
-reboot as VMM exit). The apiserver is also reachable from the host at
-`https://10.100.0.2:6443`, but the credentials are minted per boot
-inside the guest (`/var/lib/kubenyx/kubeconfigs/`) — copy them out if
-you want host-side kubectl.
+reboot as VMM exit).
+
+For **host-side** kubectl, fetch a standalone kubeconfig from the guest
+(credentials are minted per boot inside the guest, so this is the
+credential path — and it never touches your `~/.kube/config`):
+
+```console
+$ curl -s 10.100.0.2:10124 > kubenyx.kubeconfig
+$ kubectl --kubeconfig kubenyx.kubeconfig get nodes    # full TLS verification
+NAME      STATUS   ROLES    AGE   VERSION
+kubenyx   Ready    <none>   16s   v1.36.2
+```
+
+(or `export KUBECONFIG=$PWD/kubenyx.kubeconfig` for the shell session).
+Re-fetch after every boot — each boot mints a fresh PKI. The endpoint
+is restricted to the tap gateway, so in-cluster workloads can't reach
+it; any local host process can, which on a disposable volatile test
+cluster is the same trust as the tap itself.
 
 Everything is volatile by design: tmpfs root over a read-only store
 image, in-memory datastore, PKI regenerated in ~6 ms per boot. Kill the

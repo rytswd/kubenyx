@@ -94,6 +94,41 @@ lib.mkMerge [
     # treats a guest reboot as VMM exit).
     services.getty.autologinUser = "root";
 
+    # ---- host-facing kubeconfig handoff ----------------------------------------
+    # The per-boot PKI lives in tmpfs, so the host has no credential path of
+    # its own. Serve the admin kubeconfig (server URL rewritten from
+    # loopback to this node's declared address, which is in the apiserver
+    # cert SANs) over trivial HTTP on the tap:
+    #
+    #   curl -s 10.100.0.2:10124 > kubenyx.kubeconfig
+    #   kubectl --kubeconfig kubenyx.kubeconfig get nodes
+    #
+    # Trust model, stated plainly: IPAddressAllow restricts sources to the
+    # tap/SLiRP gateway, which denies the pod network and hostNetwork pods
+    # (their sources are pod CIDR / the node address) — in-cluster
+    # workloads cannot escalate through this. Any local process on the
+    # HOST can source from the gateway address, so "local host user" =
+    # cluster-admin on this disposable, volatile test cluster. That is the
+    # same exposure class as the tap itself; do not reuse this profile for
+    # durable clusters.
+    systemd.sockets.kubenyx-kubeconfig = {
+      description = "Host-facing admin kubeconfig handoff";
+      wantedBy = [ "sockets.target" ];
+      listenStreams = [ "0.0.0.0:10124" ];
+      socketConfig = {
+        Accept = true;
+        IPAddressAllow = [
+          "10.100.0.1/32" # tap gateway (firecracker / cloud-hypervisor)
+          "10.0.2.2/32" # SLiRP gateway (qemu variant)
+        ];
+        IPAddressDeny = "any";
+      };
+    };
+
+    # The "kubenyx-kubeconfig@" instance service lives in the merged
+    # systemd.services attrset below (a separate systemd.services.X key
+    # here would conflict with the genAttrs definition).
+
     # ---- boot leanness -------------------------------------------------------
     documentation.enable = false;
     nix.enable = false; # guests are built, never build
@@ -137,6 +172,26 @@ lib.mkMerge [
         # top-level keys freely.
         systemd-random-seed.enable = false; # nothing to save/restore per boot
         systemd-networkd-persistent-state.enable = false; # volatile guest
+
+        # Serves the admin kubeconfig to the host — see the handoff
+        # comment above the kubenyx-kubeconfig socket unit.
+        "kubenyx-kubeconfig@" = {
+          description = "Serve the admin kubeconfig to the host";
+          serviceConfig = {
+            StandardInput = "socket";
+            StandardOutput = "socket";
+            StandardError = "journal";
+            ExecStart = pkgs.writeShellScript "serve-kubeconfig" ''
+              # Consume the request line so curl finishes sending before
+              # we close (an immediate close can RST the response away).
+              read -t 5 -r _ || true
+              printf 'HTTP/1.0 200 OK\r\nContent-Type: application/yaml\r\nConnection: close\r\n\r\n'
+              exec ${pkgs.gnused}/bin/sed \
+                's|https://127.0.0.1:6443|https://${config.kubenyx.nodes.${config.kubenyx.nodeName}.address}:6443|' \
+                /var/lib/kubenyx/kubeconfigs/admin.kubeconfig
+            '';
+          };
+        };
 
         # Post-restore wall-clock correction: a restored snapshot keeps
         # monotonic time (kvmclock state travels with the snapshot) but
