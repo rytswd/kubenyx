@@ -1,0 +1,107 @@
+#+title: Multi-Node MicroVM Mesh — N-Node Clusters in ~12s
+#+state: ready
+#+FILETAGS: :core:testing:
+
+* Summary
+
+Extend the microVM story from one disposable node to a disposable
+*cluster*: one server + N agent microVMs on a single KVM host, each in
+its own firecracker, cluster-ready as a mesh in a target of ~10–12s
+(server ~8s cold boot + agents joining ~2–3s behind, in parallel).
+Everything stays declared: taps, MACs, IPs, membership, and credential
+flow all derive from one =kubenyx.nodes= attrset.
+
+* Motivation
+
+Multi-node already works on real hosts (tests/multi-node.nix: server +
+agent, etcd backend, 38.4s under KVM). But the testing-first mission
+wants multi-node the way it wants single-node: =nix run=, seconds,
+volatile, no operator steps. Scheduling tests, DNS-across-nodes tests,
+node-failure tests — all need ≥2 nodes and none justify real hosts.
+
+** Non-Goals
+- HA control plane (multiple servers, etcd quorum, VIP endpoint):
+  durability machinery, against the disposable mission. One server.
+- Mesh snapshot/restore: phase 2, separate measurement (cross-VM TCP
+  breaks at restore; components should reconnect — verify, don't
+  assume).
+
+* Design
+
+** 0. Shared foundation with v0.3 (build this first)
+[[file:../v0.3/durable-ha.org][durable-ha.org]] (draft) needs the same membership-schema extension this
+mesh needs: =nodes.<name>.role = "server" | "agent"= (default agent;
+assertion: the machine-level =kubenyx.role= matches its own entry).
+Implement it here, once — the mesh generator derives per-node config
+from it, and v0.3 later derives the etcd quorum and LB backend set
+from the same field with no schema break. Same for the credential
+bundle: one tar format (=pki/nodes/<name>/=) whether it travels the
+operator channel (durable) or the tap handoff (here).
+
+** 1. Relax the etcd-mem (and kine) single-node assertion
+Both assert =length nodes == 1=, but only kube-apiserver talks to the
+datastore, over a local unix socket. The correct constraint is
+"exactly one node with =role == server=" — agents never touch it.
+This keeps the <10ms in-memory datastore for multi-node test clusters
+instead of paying real etcd's startup on the boot path. (Multi-SERVER
+remains etcd-only — that is v0.3's quorum work, out of scope here.)
+
+** 2. Flake generator: =mkMicrovmCluster=
+#+begin_src nix
+mkMicrovmCluster {
+  agents = 2;                      # server implied; nodes derived
+  # ->  server: tap kubenyx-tap0, MAC 02:...:01, 10.100.0.2
+  #     agent1: tap kubenyx-tap1, MAC 02:...:02, 10.100.0.3
+  #     agent2: tap kubenyx-tap2, MAC 02:...:03, 10.100.0.4
+}
+#+end_src
+Emits per-node runner packages (=microvm-cluster-server=,
+=microvm-cluster-agent1=, …) plus:
+- =nix run .#microvm-cluster= — launcher that checks/creates the taps
+  (documented sudo step, like today), boots the server, then all
+  agents in parallel, and streams the per-node =KUBENYX-*= markers
+  prefixed by node name. Prints the kubeconfig curl on ready.
+- =nix run .#microvm-cluster-shutdown= — reverse order teardown.
+Separate taps (not a bridge) keep the host-side model identical to
+today's single-node setup and let IPAddressAllow reason per-node; all
+taps sit in 10.100.0.0/24 on the host side.
+
+** 3. Agent credential handoff over the tap
+The kubeconfig-handoff pattern (socket-activated unit +
+=IPAddressAllow=) generalizes: the server serves each agent's packaged
+credential directory (tar of =pki/nodes/<agent>/=) on port 10125,
+where the *instance* allowed source is that agent's declared address —
+agent1 can fetch only agent1's bundle. Agent side: a oneshot before
+=kubenyx-pki.service= fetches, unpacks, and lets the existing path
+unit / renderer take over (same flow the multi-node test drives by
+hand). Trust model: identical class as the kubeconfig handoff — the
+network positions are declared in Nix and the tap is host-local; a
+compromised agent could always reach the apiserver with its own creds
+anyway, and it can only fetch its own bundle.
+
+Ordering: agents will boot before the server has minted credentials —
+the fetch oneshot retries with backoff (bounded, loud DEGRADED marker
+on timeout, same style as kubenyx-report).
+
+** 4. What already just works
+- Pod CIDR carving per node index + static routes to declared peers
+  (network.nix) — nothing to change.
+- =controlPlaneEndpoint= = the server's tap IP.
+- Per-node phase markers already print to each console; the launcher
+  only needs to prefix and merge them.
+
+* Acceptance Criteria
+- =nix run .#microvm-cluster= (1 server + 2 agents) reaches all-nodes
+  Ready + coredns on KVM; record the phase table in bench/RESULTS.md.
+- Target: mesh cluster-ready < 15s; stretch < 12s.
+- =kubectl get nodes= from the host (via the served kubeconfig) shows
+  3 Ready nodes; a pod scheduled on each agent can reach coredns.
+- Agent credential isolation verified: agent1's fetch of agent2's
+  bundle is refused (IPAddressAllow negative test).
+- etcd-mem assertion relaxation covered by a NixOS test leg (server +
+  agent + etcd-mem green; kine multi-node still refused unless also
+  relaxed and tested).
+
+* History
+- 2026-07-08: Drafted from the "how do we extend to more nodes"
+  discussion; state draft pending approval.

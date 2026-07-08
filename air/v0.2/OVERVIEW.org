@@ -11,6 +11,7 @@ v0.2 pushes the testing-first mission (architecture.org, user steer 2026-07-05) 
 | [[file:microvm.org][microvm.org]] | Firecracker/cloud-hypervisor/qemu microVM guest profile and runners |
 | [[file:kvm-validation.org][kvm-validation.org]] | EC2/KVM validation plan: measured microVM numbers, matrix at hardware speed, snapshot/restore groundwork |
 | [[file:snapshot-restore.org][snapshot-restore.org]] | Firecracker snapshot/restore findings (75ms resume measured) and the kubenyx-snap tool spec |
+| [[file:multinode-microvm.org][multinode-microvm.org]] | Draft: N-node microVM mesh (server + agents, ~12s target) |
 
 * History
 - 2026-07-06: Milestone opened with the microVM work.

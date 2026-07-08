@@ -1,0 +1,178 @@
+#+title: Durable Clusters & HA Control Plane
+#+state: ready
+#+FILETAGS: :core:
+
+* Summary
+
+Multiple =role = "server"= nodes forming an etcd quorum and redundant
+control planes, with persistent state and an operator-custody CA.
+Declared membership stays the source of truth: the etcd
+initial-cluster, the apiserver endpoint set, cert SANs and the LB
+backend list are all derived from =kubenyx.nodes= — no runtime
+discovery, no join tokens.
+
+* Motivation
+
+** Goals
+- Lose any one server (of 3) with zero data loss and continued API
+  service; agents fail over automatically.
+- Reboot/upgrade a server without cluster downtime.
+- State that survives: etcd on real disks with fsync (the =balanced=
+  profile default), CA that outlives any node.
+
+** Non-Goals
+- Growing the CONTROL-PLANE set after bootstrap (user decision
+  2026-07-08): the server set is fixed at cluster creation. Changing
+  it means a new initial-cluster + =etcdctl snapshot= restore — a
+  documented runbook, never machinery. (Agent/compute scale-out IS
+  supported — see the design section; it never touches etcd.)
+- Automated etcd member *replacement* (a destroyed-forever server is a
+  documented =etcdctl member= runbook, not machinery).
+- Rolling-upgrade orchestration (drain/cordon sequencing) — NixOS
+  rebuilds per node; sequencing is the operator's loop for now.
+- Autoscaling/runtime-discovered membership of any kind — against the
+  design. Scale-out is declared, then rebuilt.
+- etcd backup automation (document =etcdctl snapshot save=; revisit).
+
+* Design
+
+** 1. Membership schema (shared with v0.2 mesh — build first)
+=nodes.<name>.role = "server" | "agent"= (default "agent"; assertion:
+the machine-level =kubenyx.role= must match its own entry). Derived
+everywhere: =servers = filterAttrs (n: v: v.role == "server") nodes=.
+Assertions: ≥1 server; multi-server requires =backend = "etcd"= and
+addresses on all servers; server count should be odd (warning at 2).
+
+** 2. etcd quorum from declared membership
+Today etcd is loopback-only with a hardcoded single-member
+initial-cluster. With >1 server:
+- listen/advertise client + peer URLs on the node's declared address
+  (loopback listener kept for the local apiserver);
+- =--initial-cluster= = every declared server (=name=https://addr:2380=),
+  =--initial-cluster-state new= on first boot, fingerprint-gated like
+  the PKI so rebuilds don't re-bootstrap;
+- etcd server/peer cert SANs extended with the declared server
+  addresses (today: localhost only);
+- the existing posture is kept: client-cert auth on both ports, peer
+  TLS from the same CA. fsync stays ON (=unsafeNoFsync= remains a
+  shouting opt-out).
+Quorum wait is accepted boot-path cost for durable clusters; it never
+touches the single-server path.
+
+** 3. CA custody: mint offline, ship like any credential
+Per-boot CA regeneration is the *volatile* behavior. Durable clusters
+get operator custody: =kubenyx-pki= is already a standalone CLI — run
+it off-cluster (=kubenyx-pki mint-ca --out ca-bundle/=), ship the
+bundle to each server over the operator channel (same tar format as
+agent credentials), keep the original wherever secrets live. The
+fingerprint gate already prevents accidental regeneration; a missing
+CA on a durable server is a hard boot error, never a silent re-mint
+(a re-minted CA would partition the cluster's trust).
+
+** 4. Endpoint: client-side LB, not a VIP
+Agents (and external kubeconfigs) need an apiserver address that
+survives a server death. Chosen approach: a local health-checking TCP
+forwarder on every agent — =kubenyx-lb=, candidate fourth Rust tool
+(~200 lines: listen 127.0.0.1:6444, forward to the declared server
+set, per-backend /readyz probing with the existing kubenyx-ready
+machinery, evict/readmit backends). Agents' kubeconfigs then point at
+localhost — no VRRP, no floating IP, works on any network including
+clouds that block gratuitous ARP.
+- External access: =pki.extraApiserverSANs= already exists for a
+  DNS/VIP name; operators who have a real LB set
+  =controlPlaneEndpoint= to it and skip kubenyx-lb.
+- Rejected: keepalived VIP (VRRP is environment-hostile and brings a
+  daemon we don't own); DNS round-robin (client-go failover is slow
+  and cache-dependent).
+
+** 5. Control-plane redundancy details
+- =controlPlane.leaderElect= defaults to true when >1 server (option
+  exists; testing default stays false).
+- kubenyx-addons runs on every server at its own boot: server-side
+  apply is idempotent and the applier already retries; no
+  leader-gating machinery. Verify no fighting in the failover test.
+- apiserver cert SANs already include the node IP; add the other
+  servers' addresses? No — each server serves its own cert; only the
+  endpoint name (if any) is shared via extraApiserverSANs.
+
+** 6. Agent scale-out (supported; hitless by construction)
+Adding a compute node is: add the entry to =kubenyx.nodes= → rebuild →
+ship → boot. The existing architecture already makes this
+non-disruptive; v0.3 only has to *prove* it:
+- Server rebuild re-runs =kubenyx-pki=, which is fingerprint-gated and
+  additive — it mints the new agent's leaves and touches nothing else;
+  the PKI unit is deliberately =Wants= (not =Requires=) so a PKI rerun
+  NEVER bounces the control plane (encoded in v0.1 for exactly this).
+- Peer rebuilds add one static route for the new node's pod CIDR
+  (derived from its index) — additive, no service restarts.
+- No control-plane flag embeds the node list (apiserver only knows its
+  own advertise-address), so apiserver/etcd/kcm are untouched. etcd is
+  entirely uninvolved — this is why agent-add is cheap while server-add
+  is a different cluster.
+- Ship the new bundle (operator channel), boot the agent, it joins.
+Deliverable: the =agent-add= test leg below + a runbook section in the
+README. Index discipline: indices are append-only (a reused index
+would collide pod CIDRs with any still-routed peer); assert
+uniqueness, document append-only.
+
+** 7. Profile posture
+=balanced= becomes the durable default set: persistent StateDirectory
+everywhere, fsync on, leaderElect auto, CA custody required, leases at
+upstream defaults. =testing= keeps every speed default. No third
+profile until something cannot be expressed as these two plus
+overrides (D12).
+
+* Test Matrix (all NixOS VM tests)
+- =multi-server=: 3 servers + 1 agent, etcd quorum forms, all Ready.
+- =failover=: crash server0 (the driver can) → API keeps answering via
+  the LB within seconds; kill -9 etcd on one member → no data loss
+  (write before, read after).
+- =server-reboot=: reboot one server; it rejoins quorum; objects
+  survive (extends the existing reboot-persistence leg).
+- =agent-add=: bring up a cluster with N agents, then activate the
+  (N+1)-agent configuration on the running nodes and boot the new
+  agent — a workload pod running throughout must never restart, and
+  the control-plane units must show zero restarts (hitless proof).
+- =ca-custody=: durable server without a shipped CA refuses to boot
+  with a clear message; volatile guest still self-mints.
+
+* Sizing (relative)
+| Piece | Size | Notes |
+|---|---|---|
+| nodes.role schema + assertions | S | shared with v0.2 mesh |
+| etcd quorum wiring + SANs | M | mostly datastore.nix + pki |
+| CA custody flow | M | kubenyx-pki subcommand + gate hardening |
+| kubenyx-lb | M | new Rust tool, reuses probe code |
+| leaderElect/addons/profile defaults | S | |
+| test matrix | M | failover legs are new driver patterns |
+
+* Decisions (2026-07-08, user calls — all questions closed)
+1. *kubenyx-lb* over haproxy. Analysis that informed it: engine
+   performance is NOT the axis — both are epoll loops adding ~20-60µs
+   against 1-10ms apiserver RTTs, at connection counts three orders of
+   magnitude below either's ceiling; failover time is pure
+   health-check POLICY (probe interval × threshold), identical in
+   both. kubenyx-lb wins on: one readiness definition shared with the
+   boot path, no second config language, ~1-2MB closure, trivial
+   future hooks (drain-on-SIGTERM, KUBENYX-PHASE markers). Cost
+   accepted: we own the proxy edge cases (half-open connections,
+   backpressure, FD exhaustion) — the implementation must treat those
+   as first-class, not afterthoughts.
+2. *Offline operator mint* for CA custody (kubenyx-pki subcommand;
+   fingerprint gate becomes a hard boot error for durable servers).
+3. Compute/agent member-add supported (see "Agent scale-out"); the
+   control-plane set is fixed at bootstrap. *However — keep the door
+   open for CP growth later* (user steer): derive initial-cluster, LB
+   backends and SAN lists from =kubenyx.nodes= at eval time (never
+   freeze copies at bootstrap); design the etcd bootstrap fingerprint
+   to record the member SET and distinguish "bootstrap" from "member
+   config changed" (error today, but the error site is where a future
+   =member add / initial-cluster-state existing= path would slot in);
+   kubenyx-lb re-reads its backend list on restart so a grown server
+   set needs no LB redesign. No machinery now — just no doors welded
+   shut.
+
+* History
+- 2026-07-08: Drafted on request ("check how this would look with
+  non-disposable + HA CP") before starting the v0.2 mesh
+  implementation, so the shared membership schema lands once.
