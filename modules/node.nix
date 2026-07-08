@@ -62,14 +62,19 @@ let
 
   # Import nix-built images into containerd's k8s.io namespace so nothing
   # ever pulls from a registry. streamLayeredImage outputs an executable
-  # that writes a docker archive to stdout.
+  # that writes a docker archive to stdout; plain OCI/docker archive files
+  # (byod.org §3) are non-executable and ctr reads them directly.
   seedScript = pkgs.writeShellApplication {
     name = "kubenyx-seed-images";
     runtimeInputs = [ cfg.packages.containerd ];
     text = ''
       images=(${lib.escapeShellArgs ([ pauseImage ] ++ node.seedImages)})
       for img in "''${images[@]}"; do
-        "$img" | ctr --namespace k8s.io images import --all-platforms -
+        if [ -x "$img" ]; then
+          "$img" | ctr --namespace k8s.io images import --all-platforms -
+        else
+          ctr --namespace k8s.io images import --all-platforms "$img"
+        fi
       done
     '';
   };
@@ -86,9 +91,14 @@ in
       default = [ ];
     };
     seedImages = lib.mkOption {
-      type = lib.types.listOf lib.types.package;
+      type = lib.types.listOf lib.types.path;
       default = [ ];
-      description = "streamLayeredImage derivations imported into containerd at boot (airgapped workloads).";
+      description = ''
+        Images imported into containerd at boot (airgapped workloads).
+        Executable entries (streamLayeredImage derivations) are run with
+        stdout piped to `ctr images import`; non-executable entries are
+        plain OCI/docker archive files that ctr imports directly.
+      '';
     };
   };
 

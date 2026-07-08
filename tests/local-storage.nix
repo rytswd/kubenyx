@@ -4,10 +4,31 @@
 # WaitForFirstConsumer contract end to end: the PVC pends until a pod
 # schedules, binds on schedule, and the data a pod writes survives a pod
 # delete/recreate (the PVC — and so the PV directory — outlives the pod).
+#
+# Piggybacked (byod.org §3): one seed image ships as a plain NON-executable
+# docker-archive tar (not a self-executing streamLayeredImage script), and a
+# pod runs from it — proving the seed script's branch-on-executability path.
 { kubenyx }:
 { pkgs, lib, ... }:
 let
   testImage = pkgs.callPackage ../pkgs/test-image.nix { };
+
+  # byod.org §3: the same busybox content as a plain docker-archive file —
+  # the streamLayeredImage script is materialized to a tar at BUILD time, so
+  # what reaches node.seedImages is a non-executable archive, exactly what an
+  # airgap set from a foreign build system looks like.
+  archiveImage = pkgs.runCommand "test-archive-image.tar" { } ''
+    ${pkgs.dockerTools.streamLayeredImage {
+      name = "kubenyx.local/test-archive";
+      tag = "1";
+      contents = [ pkgs.busybox ];
+      config.Cmd = [
+        "/bin/busybox"
+        "sleep"
+        "3600"
+      ];
+    }} > $out
+  '';
 
   pvc = builtins.toJSON {
     apiVersion = "v1";
@@ -78,7 +99,10 @@ in
       kubenyx = {
         enable = true;
         dns.upstream = [ ]; # airgapped: no external forwarding
-        node.seedImages = [ testImage ];
+        node.seedImages = [
+          testImage
+          archiveImage
+        ];
         storage.localVolumes = {
           count = 2;
           size = "2Gi";
@@ -170,5 +194,18 @@ in
     still_bound = machine.succeed("kubectl get pvc data -o jsonpath='{.spec.volumeName}'").strip()
     assert still_bound == bound_pv, f"PVC re-bound across pod recreate: {bound_pv} -> {still_bound}"
     machine.succeed("kubectl exec reader -- /bin/busybox cat /data/probe | grep -q kubenyx-persisted")
+
+    # --- byod.org §3: non-executable docker-archive seeding --------------------
+    # The entry really is a plain file, not a self-executing derivation.
+    machine.succeed("test -f ${archiveImage} && test ! -x ${archiveImage}")
+    # The seed unit imported ALL entries (it runs set -e: a failed archive
+    # import would have failed the whole unit even after the pause/test
+    # images landed).
+    machine.succeed("systemctl show -p Result kubenyx-seed-images.service | grep -qx Result=success")
+    # A pod runs from the archive-seeded image without any registry.
+    machine.succeed("kubectl run archive --image=kubenyx.local/test-archive:1 --restart=Never")
+    machine.wait_until_succeeds(
+        "kubectl get pod archive -o jsonpath='{.status.phase}' | grep -q Running", timeout=900
+    )
   '';
 }

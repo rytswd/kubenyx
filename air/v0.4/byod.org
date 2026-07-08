@@ -142,6 +142,21 @@ seed script; the option type widens to =listOf path=.
   unit texts + built-unit store paths, all 97 =environment.etc=
   source paths, and the tmpfiles rules is byte-identical
   before/after.
+- 2026-07-08: §3 implemented (=modules/node.nix=): the seed script
+  branches on executability — =[ -x ]= entries keep today's
+  run-and-pipe semantics, non-executable entries go straight to
+  =ctr --namespace k8s.io images import --all-platforms <file>=;
+  =node.seedImages= widens =listOf package= → =listOf path= (packages
+  still coerce). Coverage piggybacked on the =local-storage= leg: a
+  second seed image ships as a plain non-executable docker-archive tar
+  (the streamLayeredImage script materialized at build time), the seed
+  unit ends =Result=success=, and a pod runs from the archive-seeded
+  image (leg green, 90.4s test-script wall on the KVM box). Default
+  path proven unchanged: default-config =/etc= trees
+  before/after differ ONLY in =kubenyx-seed-images.service='s ExecStart
+  store hash (unit list identical, 292 entries; all other unit/etc
+  files byte-identical — bridge-mode network units untouched), and the
+  rendered seed script diff is exactly the =if [ -x ]= branch.
 - 2026-07-08: §1 implemented (=modules/network.nix=): =network.cni=
   enum, all four bridge opinions =mkIf=-gated (conflist etc entry,
   kubenyx-routes, kubenyx-nat, cni0 firewall accepts; external mode
