@@ -41,7 +41,10 @@ static OWNED_VMMS: [AtomicI32; OWNED_MAX] = [const { AtomicI32::new(0) }; OWNED_
 
 fn own_vmm(pid: i32) {
     for slot in &OWNED_VMMS {
-        if slot.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        if slot
+            .compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
             return;
         }
     }
@@ -82,9 +85,9 @@ extern "C" fn on_signal(_sig: libc::c_int) {
 
 fn install_signal_cleanup() {
     unsafe {
-        libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_signal as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_signal as *const () as libc::sighandler_t);
     }
 }
 
@@ -128,7 +131,8 @@ fn api(sock: &Path, method: &str, path: &str, body: &str) -> (u16, String) {
         .lines()
         .find_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse().ok())?
+            k.eq_ignore_ascii_case("content-length")
+                .then(|| v.trim().parse().ok())?
         })
         .unwrap_or(0);
     while raw.len() < header_end + content_length {
@@ -179,7 +183,12 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
     fn verify_tls13_signature(
         &self,
@@ -187,7 +196,12 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
@@ -214,8 +228,12 @@ fn probe_once(config: &Arc<rustls::ClientConfig>, addr: &str, host: &str) -> boo
     let Ok(stream) = TcpStream::connect_timeout(&sockaddr, Duration::from_millis(150)) else {
         return false;
     };
-    stream.set_read_timeout(Some(Duration::from_millis(500))).ok();
-    stream.set_write_timeout(Some(Duration::from_millis(500))).ok();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok();
     stream.set_nodelay(true).ok();
     let name = rustls::pki_types::ServerName::try_from(host.to_string())
         .unwrap_or_else(|_| die("bad probe host"));
@@ -311,17 +329,28 @@ fn cmd_take(flags: &Flags) {
     }
     let runner = flags.get("--runner").unwrap();
     let out = PathBuf::from(flags.get("--out").unwrap_or_else(|| "snapshot".into()));
-    let marker = flags.get("--marker").unwrap_or_else(|| "KUBENYX-CLUSTER-READY".into());
-    let wait_secs: u64 = flags.get("--wait-secs").map(|v| v.parse().unwrap_or_else(|_| die("bad --wait-secs"))).unwrap_or(120);
-    let settle_ms: u64 = flags.get("--settle-ms").map(|v| v.parse().unwrap_or_else(|_| die("bad --settle-ms"))).unwrap_or(2000);
+    let marker = flags
+        .get("--marker")
+        .unwrap_or_else(|| "KUBENYX-CLUSTER-READY".into());
+    let wait_secs: u64 = flags
+        .get("--wait-secs")
+        .map(|v| v.parse().unwrap_or_else(|_| die("bad --wait-secs")))
+        .unwrap_or(120);
+    let settle_ms: u64 = flags
+        .get("--settle-ms")
+        .map(|v| v.parse().unwrap_or_else(|_| die("bad --settle-ms")))
+        .unwrap_or(2000);
 
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("mkdir {}: {e}", out.display())));
-    let out = out.canonicalize().unwrap_or_else(|e| die(&format!("canonicalize: {e}")));
+    let out = out
+        .canonicalize()
+        .unwrap_or_else(|e| die(&format!("canonicalize: {e}")));
     let console = out.join("take-console.log");
     let sock = PathBuf::from("kubenyx.sock"); // dropped by the runner in CWD
     let _ = std::fs::remove_file(&sock);
 
-    let log_file = std::fs::File::create(&console).unwrap_or_else(|e| die(&format!("create console log: {e}")));
+    let log_file = std::fs::File::create(&console)
+        .unwrap_or_else(|e| die(&format!("create console log: {e}")));
     let mut vm = Command::new(&runner)
         .stdout(Stdio::from(log_file.try_clone().expect("clone log fd")))
         .stderr(Stdio::from(log_file))
@@ -348,7 +377,11 @@ fn cmd_take(flags: &Flags) {
     );
     let t = Instant::now();
     api_expect(&sock, "PUT", "/snapshot/create", &body);
-    eprintln!("take: snapshot written in {:?} -> {}", t.elapsed(), out.display());
+    eprintln!(
+        "take: snapshot written in {:?} -> {}",
+        t.elapsed(),
+        out.display()
+    );
 
     let vm_pid = vm.id() as i32;
     kill_wait(&mut vm); // frees the tap for future resumes
@@ -368,7 +401,9 @@ fn cmd_take_attached(flags: &Flags) {
     }
     let out = PathBuf::from(flags.get("--out").unwrap_or_else(|| "snapshot".into()));
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("mkdir {}: {e}", out.display())));
-    let out = out.canonicalize().unwrap_or_else(|e| die(&format!("canonicalize: {e}")));
+    let out = out
+        .canonicalize()
+        .unwrap_or_else(|e| die(&format!("canonicalize: {e}")));
 
     // Pause -> snapshot -> resume: the source VM never observes the gap
     // (monotonic time stops with it) and keeps running afterwards.
@@ -444,18 +479,22 @@ fn resume_once(
     // Fix the guest's stale wall clock — off the measured path: the poke
     // thread overlaps the API probe and is joined before returning.
     let poke_addr_owned = poke_addr.to_string();
-    let poke_handle = std::thread::spawn(move || {
-        send_time_pokes(&poke_addr_owned, 3, Duration::from_millis(50))
-    });
+    let poke_handle =
+        std::thread::spawn(move || send_time_pokes(&poke_addr_owned, 3, Duration::from_millis(50)));
 
-    let t_api = Instant::now();
     let Some(load_to_api) = wait_api(config, probe_addr, Duration::from_secs(10)) else {
         die("apiserver did not answer within 10s of restore");
     };
-    let _ = t_api;
     let _ = poke_handle.join();
 
-    (child, ResumeTimings { spawn_to_sock, load, load_to_api })
+    (
+        child,
+        ResumeTimings {
+            spawn_to_sock,
+            load,
+            load_to_api,
+        },
+    )
 }
 
 fn resume_flags(flags: &Flags) -> (String, PathBuf, PathBuf, String, String, bool) {
@@ -463,20 +502,45 @@ fn resume_flags(flags: &Flags) -> (String, PathBuf, PathBuf, String, String, boo
     if !snapshot.join("snap.vmstate").exists() {
         die(&format!("{}/snap.vmstate not found", snapshot.display()));
     }
-    let firecracker = flags.get("--firecracker").unwrap_or_else(|| "firecracker".into());
+    let firecracker = flags
+        .get("--firecracker")
+        .unwrap_or_else(|| "firecracker".into());
     // Relative by default: an absolute path under a deep workdir exceeds
     // SUN_LEN=108 and firecracker refuses to bind.
-    let api_sock = PathBuf::from(flags.get("--api-sock").unwrap_or_else(|| "kubenyx-resume.sock".into()));
-    let probe_addr = flags.get("--probe").unwrap_or_else(|| "10.100.0.2:6443".into());
-    let poke_addr = flags.get("--poke").unwrap_or_else(|| "10.100.0.2:10123".into());
+    let api_sock = PathBuf::from(
+        flags
+            .get("--api-sock")
+            .unwrap_or_else(|| "kubenyx-resume.sock".into()),
+    );
+    let probe_addr = flags
+        .get("--probe")
+        .unwrap_or_else(|| "10.100.0.2:6443".into());
+    let poke_addr = flags
+        .get("--poke")
+        .unwrap_or_else(|| "10.100.0.2:10123".into());
     let enable_pci = !flags.has("--no-pci");
-    (firecracker, snapshot, api_sock, probe_addr, poke_addr, enable_pci)
+    (
+        firecracker,
+        snapshot,
+        api_sock,
+        probe_addr,
+        poke_addr,
+        enable_pci,
+    )
 }
 
 fn cmd_resume(flags: &Flags) {
     let (firecracker, snapshot, api_sock, probe_addr, poke_addr, enable_pci) = resume_flags(flags);
     let config = tls_probe_config();
-    let (child, t) = resume_once(&firecracker, &snapshot, &api_sock, &probe_addr, &poke_addr, enable_pci, &config);
+    let (child, t) = resume_once(
+        &firecracker,
+        &snapshot,
+        &api_sock,
+        &probe_addr,
+        &poke_addr,
+        enable_pci,
+        &config,
+    );
     // Machine-readable timings on stdout; the how-to-reach-it summary on
     // stderr so scripts can parse stdout undisturbed.
     println!(
@@ -501,12 +565,23 @@ fn cmd_resume(flags: &Flags) {
 
 fn cmd_cycle(flags: &Flags) {
     let (firecracker, snapshot, api_sock, probe_addr, poke_addr, enable_pci) = resume_flags(flags);
-    let n: u32 = flags.get("-n").map(|v| v.parse().unwrap_or_else(|_| die("bad -n"))).unwrap_or(5);
+    let n: u32 = flags
+        .get("-n")
+        .map(|v| v.parse().unwrap_or_else(|_| die("bad -n")))
+        .unwrap_or(5);
     let config = tls_probe_config();
 
     let mut totals: Vec<f64> = Vec::with_capacity(n as usize);
     for round in 1..=n {
-        let (mut child, t) = resume_once(&firecracker, &snapshot, &api_sock, &probe_addr, &poke_addr, enable_pci, &config);
+        let (mut child, t) = resume_once(
+            &firecracker,
+            &snapshot,
+            &api_sock,
+            &probe_addr,
+            &poke_addr,
+            enable_pci,
+            &config,
+        );
         let total_ms = (t.load + t.load_to_api).as_secs_f64() * 1e3;
         println!(
             "round={round} spawn_to_sock_ms={:.1} load_ms={:.1} load_to_api_ms={:.1} total_ms={total_ms:.1}",
@@ -557,7 +632,6 @@ fn conventional_ip(name: &str) -> Option<String> {
         .map(|n| format!("10.100.0.{}", 2 + n))
 }
 
-
 /// The cluster launcher's per-node runners bind `<node>.sock`; the plain
 /// single-VM runner binds `kubenyx.sock`. Accept either.
 fn node_sock(run_dir: &Path, name: &str) -> PathBuf {
@@ -575,9 +649,18 @@ fn mesh_nodes(flags: &Flags, run_dir: Option<&Path>) -> Vec<MeshNode> {
     let mut i = 0;
     while i < flags.0.len() {
         if flags.0[i] == "--node" {
-            let v = flags.0.get(i + 1).cloned().unwrap_or_else(|| die("--node needs name=ip"));
-            let (name, ip) = v.split_once('=').unwrap_or_else(|| die(&format!("--node {v}: expected name=ip")));
-            explicit.push(MeshNode { name: name.into(), ip: ip.into() });
+            let v = flags
+                .0
+                .get(i + 1)
+                .cloned()
+                .unwrap_or_else(|| die("--node needs name=ip"));
+            let (name, ip) = v
+                .split_once('=')
+                .unwrap_or_else(|| die(&format!("--node {v}: expected name=ip")));
+            explicit.push(MeshNode {
+                name: name.into(),
+                ip: ip.into(),
+            });
             i += 2;
         } else {
             i += 1;
@@ -596,8 +679,11 @@ fn mesh_nodes(flags: &Flags, run_dir: Option<&Path>) -> Vec<MeshNode> {
             })
             .map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                let ip = conventional_ip(&name)
-                    .unwrap_or_else(|| die(&format!("cannot infer address for node '{name}' — pass --node {name}=<ip>")));
+                let ip = conventional_ip(&name).unwrap_or_else(|| {
+                    die(&format!(
+                        "cannot infer address for node '{name}' — pass --node {name}=<ip>"
+                    ))
+                });
                 MeshNode { name, ip }
             })
             .collect();
@@ -615,7 +701,10 @@ fn mesh_nodes(flags: &Flags, run_dir: Option<&Path>) -> Vec<MeshNode> {
 }
 
 fn write_manifest(out: &Path, nodes: &[MeshNode]) {
-    let body: String = nodes.iter().map(|n| format!("{} {}\n", n.name, n.ip)).collect();
+    let body: String = nodes
+        .iter()
+        .map(|n| format!("{} {}\n", n.name, n.ip))
+        .collect();
     std::fs::write(out.join("manifest"), body)
         .unwrap_or_else(|e| die(&format!("write manifest: {e}")));
 }
@@ -626,8 +715,13 @@ fn read_manifest(dir: &Path) -> Vec<MeshNode> {
     data.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
-            let (name, ip) = l.split_once(' ').unwrap_or_else(|| die(&format!("bad manifest line: {l}")));
-            MeshNode { name: name.into(), ip: ip.into() }
+            let (name, ip) = l
+                .split_once(' ')
+                .unwrap_or_else(|| die(&format!("bad manifest line: {l}")));
+            MeshNode {
+                name: name.into(),
+                ip: ip.into(),
+            }
         })
         .collect()
 }
@@ -637,15 +731,21 @@ fn read_manifest(dir: &Path) -> Vec<MeshNode> {
 /// handle we have on processes someone else spawned.
 fn kill_mesh_vmms(run_dir: &Path, nodes: &[MeshNode]) {
     let want: Vec<PathBuf> = nodes.iter().map(|n| run_dir.join(&n.name)).collect();
-    let Ok(proc_dir) = std::fs::read_dir("/proc") else { return };
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+        return;
+    };
     for entry in proc_dir.filter_map(|e| e.ok()) {
         let pid_str = entry.file_name().to_string_lossy().into_owned();
-        let Ok(pid) = pid_str.parse::<i32>() else { continue };
+        let Ok(pid) = pid_str.parse::<i32>() else {
+            continue;
+        };
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
         if !comm.trim_end().ends_with("firecracker") && comm.trim_end() != "microvm@kubenyx" {
             continue;
         }
-        let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) else { continue };
+        let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) else {
+            continue;
+        };
         if want.iter().any(|w| w == &cwd) {
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
@@ -655,20 +755,35 @@ fn kill_mesh_vmms(run_dir: &Path, nodes: &[MeshNode]) {
 }
 
 fn cmd_mesh_take(flags: &Flags) {
-    let run_dir = PathBuf::from(flags.get("--run-dir").unwrap_or_else(|| "/tmp/kubenyx-cluster".into()));
+    let run_dir = PathBuf::from(
+        flags
+            .get("--run-dir")
+            .unwrap_or_else(|| "/tmp/kubenyx-cluster".into()),
+    );
     let out = PathBuf::from(flags.get("--out").unwrap_or_else(|| "mesh-snapshot".into()));
     let nodes = mesh_nodes(flags, Some(&run_dir));
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("mkdir {}: {e}", out.display())));
-    let out = out.canonicalize().unwrap_or_else(|e| die(&format!("canonicalize: {e}")));
+    let out = out
+        .canonicalize()
+        .unwrap_or_else(|e| die(&format!("canonicalize: {e}")));
 
     // Pause EVERYTHING first: this is the consistent cut. Each PATCH is
     // ~1ms, so the pause skew across the mesh is a few ms of "network
     // delay" from the guests' point of view.
     let t_pause = Instant::now();
     for n in &nodes {
-        api_expect(&node_sock(&run_dir, &n.name), "PATCH", "/vm", r#"{"state":"Paused"}"#);
+        api_expect(
+            &node_sock(&run_dir, &n.name),
+            "PATCH",
+            "/vm",
+            r#"{"state":"Paused"}"#,
+        );
     }
-    eprintln!("mesh-take: {} nodes paused in {:.1}ms", nodes.len(), t_pause.elapsed().as_secs_f64() * 1e3);
+    eprintln!(
+        "mesh-take: {} nodes paused in {:.1}ms",
+        nodes.len(),
+        t_pause.elapsed().as_secs_f64() * 1e3
+    );
 
     // Snapshot all nodes in parallel: each create writes its full mem file.
     let t_snap = Instant::now();
@@ -679,7 +794,8 @@ fn cmd_mesh_take(flags: &Flags) {
             let node_out = out.join(&n.name);
             let name = n.name.clone();
             std::thread::spawn(move || {
-                std::fs::create_dir_all(&node_out).unwrap_or_else(|e| die(&format!("mkdir {}: {e}", node_out.display())));
+                std::fs::create_dir_all(&node_out)
+                    .unwrap_or_else(|e| die(&format!("mkdir {}: {e}", node_out.display())));
                 let body = format!(
                     r#"{{"snapshot_type":"Full","snapshot_path":"{}","mem_file_path":"{}"}}"#,
                     node_out.join("snap.vmstate").display(),
@@ -687,7 +803,10 @@ fn cmd_mesh_take(flags: &Flags) {
                 );
                 let t = Instant::now();
                 api_expect(&sock, "PUT", "/snapshot/create", &body);
-                eprintln!("mesh-take: {name} snapshot in {:.1}s", t.elapsed().as_secs_f64());
+                eprintln!(
+                    "mesh-take: {name} snapshot in {:.1}s",
+                    t.elapsed().as_secs_f64()
+                );
             })
         })
         .collect();
@@ -695,7 +814,10 @@ fn cmd_mesh_take(flags: &Flags) {
         h.join().unwrap_or_else(|_| die("snapshot thread panicked"));
     }
     write_manifest(&out, &nodes);
-    eprintln!("mesh-take: all snapshots written in {:.1}s", t_snap.elapsed().as_secs_f64());
+    eprintln!(
+        "mesh-take: all snapshots written in {:.1}s",
+        t_snap.elapsed().as_secs_f64()
+    );
 
     kill_mesh_vmms(&run_dir, &nodes); // frees the taps for mesh-resume
     println!("{}", out.display());
@@ -719,7 +841,6 @@ fn mesh_resume_once(
         .iter()
         .map(|n| {
             let name = n.name.clone();
-            let ip = n.ip.clone();
             let snap = snapshot.join(&n.name);
             let fc = firecracker.to_string();
             std::thread::spawn(move || {
@@ -754,7 +875,7 @@ fn mesh_resume_once(
                 let t_load = Instant::now();
                 api_expect(&sock, "PUT", "/snapshot/load", &body);
                 let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
-                let _ = ip; // pokes happen off the measured path, post-join
+                // Pokes happen off the measured path, post-join (below).
                 (name, child, load_ms)
             })
         })
@@ -782,7 +903,11 @@ fn mesh_resume_once(
     // "Mesh usable" = the server apiserver answers; agents carry no API.
     let server_ip = &nodes[0].ip;
     let t_api = Instant::now();
-    let Some(_) = wait_api(config, &format!("{server_ip}:6443"), Duration::from_secs(10)) else {
+    let Some(_) = wait_api(
+        config,
+        &format!("{server_ip}:6443"),
+        Duration::from_secs(10),
+    ) else {
         die("server apiserver did not answer within 10s of mesh restore");
     };
     let api_ms = t_api.elapsed().as_secs_f64() * 1e3;
@@ -790,13 +915,23 @@ fn mesh_resume_once(
         let _ = h.join();
     }
 
-    MeshResume { children, all_loaded_ms, api_ms }
+    MeshResume {
+        children,
+        all_loaded_ms,
+        api_ms,
+    }
 }
 
 fn mesh_resume_flags(flags: &Flags) -> (PathBuf, Vec<MeshNode>, String, bool) {
-    let snapshot = PathBuf::from(flags.get("--snapshot").unwrap_or_else(|| "mesh-snapshot".into()));
+    let snapshot = PathBuf::from(
+        flags
+            .get("--snapshot")
+            .unwrap_or_else(|| "mesh-snapshot".into()),
+    );
     let nodes = read_manifest(&snapshot);
-    let firecracker = flags.get("--firecracker").unwrap_or_else(|| "firecracker".into());
+    let firecracker = flags
+        .get("--firecracker")
+        .unwrap_or_else(|| "firecracker".into());
     let enable_pci = !flags.has("--no-pci");
     (snapshot, nodes, firecracker, enable_pci)
 }
@@ -825,7 +960,10 @@ fn cmd_mesh_resume(flags: &Flags) {
 
 fn cmd_mesh_cycle(flags: &Flags) {
     let (snapshot, nodes, firecracker, enable_pci) = mesh_resume_flags(flags);
-    let n: u32 = flags.get("-n").map(|v| v.parse().unwrap_or_else(|_| die("bad -n"))).unwrap_or(5);
+    let n: u32 = flags
+        .get("-n")
+        .map(|v| v.parse().unwrap_or_else(|_| die("bad -n")))
+        .unwrap_or(5);
     let config = tls_probe_config();
 
     let mut totals: Vec<f64> = Vec::with_capacity(n as usize);

@@ -59,7 +59,10 @@ fn die(msg: &str) -> ! {
 }
 
 fn elapsed_ms() -> u64 {
-    START.get().map(|s| s.elapsed().as_millis() as u64).unwrap_or(0)
+    START
+        .get()
+        .map(|s| s.elapsed().as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn drain_expired() -> bool {
@@ -108,10 +111,14 @@ fn parse_args(args: &[String]) -> Result<Cfg, String> {
         let flag = args[i].as_str();
         let mut val = || -> Result<String, String> {
             i += 1;
-            args.get(i).cloned().ok_or_else(|| format!("missing value for {flag}"))
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| format!("missing value for {flag}"))
         };
         let ms = |s: String, f: &str| -> Result<Duration, String> {
-            s.parse::<u64>().map(Duration::from_millis).map_err(|_| format!("bad {f} value {s}"))
+            s.parse::<u64>()
+                .map(Duration::from_millis)
+                .map_err(|_| format!("bad {f} value {s}"))
         };
         match flag {
             "--listen" => cfg.listen = val()?,
@@ -165,7 +172,10 @@ fn resolve_backend(spec: &str) -> Backend {
     let host = spec.rsplit_once(':').map(|(h, _)| h).unwrap_or(spec);
     Backend {
         spec: spec.to_string(),
-        host: host.trim_start_matches('[').trim_end_matches(']').to_string(),
+        host: host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string(),
         addr,
         // Start unhealthy: READY must mean a probe actually succeeded. The
         // accept loop's last-resort pass still tries unprobed backends.
@@ -180,7 +190,11 @@ fn resolve_backend(spec: &str) -> Backend {
 /// healthy).
 fn pick_order(healthy: &[bool], cursor: usize) -> Vec<usize> {
     let n = healthy.len();
-    let rotated = |keep: bool| (0..n).map(move |i| (cursor + i) % n).filter(move |&i| healthy[i] == keep);
+    let rotated = |keep: bool| {
+        (0..n)
+            .map(move |i| (cursor + i) % n)
+            .filter(move |&i| healthy[i] == keep)
+    };
     rotated(true).chain(rotated(false)).collect()
 }
 
@@ -208,7 +222,12 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
     fn verify_tls13_signature(
         &self,
@@ -216,7 +235,12 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
@@ -239,7 +263,9 @@ fn tls_probe_config(client_cert: Option<(&str, &str)>) -> Option<Arc<rustls::Cli
         Some((cert_path, key_path)) => {
             let cert_data = std::fs::read(cert_path).ok()?;
             let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-                rustls_pemfile::certs(&mut cert_data.as_slice()).collect::<Result<_, _>>().ok()?;
+                rustls_pemfile::certs(&mut cert_data.as_slice())
+                    .collect::<Result<_, _>>()
+                    .ok()?;
             if certs.is_empty() {
                 return None;
             }
@@ -299,11 +325,18 @@ fn health_loop(backends: Arc<Vec<Backend>>, cfg: ProbePolicy) {
     // loadable. Against a kubenyx apiserver it only ever earns a 401, so
     // backends stay unhealthy until the cert lands — which is correct: no
     // credentials means no kubelet either, so READY has nothing to gate yet.
-    let base = if cfg.http { None } else { tls_probe_config(None) };
+    let base = if cfg.http {
+        None
+    } else {
+        tls_probe_config(None)
+    };
     let mut with_cert: Option<Arc<rustls::ClientConfig>> = None;
     // Probe timeout: never longer than 1.5s (kubenyx-ready's ceiling), never
     // longer than the interval says a whole round should take.
-    let timeout = cfg.interval.max(Duration::from_millis(250)).min(Duration::from_millis(1500));
+    let timeout = cfg
+        .interval
+        .max(Duration::from_millis(250))
+        .min(Duration::from_millis(1500));
     let mut ever_ready = false;
     loop {
         if !cfg.http && with_cert.is_none() {
@@ -392,8 +425,16 @@ fn pump(mut src: TcpStream, mut dst: TcpStream) {
     let _ = src.shutdown(Shutdown::Read);
 }
 
-fn handle(client: TcpStream, backends: &Arc<Vec<Backend>>, cursor: &AtomicUsize, dial_timeout: Duration) {
-    let healthy: Vec<bool> = backends.iter().map(|b| b.healthy.load(Ordering::Relaxed)).collect();
+fn handle(
+    client: TcpStream,
+    backends: &Arc<Vec<Backend>>,
+    cursor: &AtomicUsize,
+    dial_timeout: Duration,
+) {
+    let healthy: Vec<bool> = backends
+        .iter()
+        .map(|b| b.healthy.load(Ordering::Relaxed))
+        .collect();
     let start = cursor.fetch_add(1, Ordering::Relaxed) % backends.len();
     for i in pick_order(&healthy, start) {
         let b = &backends[i];
@@ -453,8 +494,14 @@ fn main() {
         Arc::new(cfg.backends.iter().map(|s| resolve_backend(s)).collect());
 
     unsafe {
-        libc::signal(libc::SIGTERM, on_drain_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_drain_signal as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            on_drain_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            on_drain_signal as *const () as libc::sighandler_t,
+        );
         // A peer resetting mid-write must surface as EPIPE, not kill us.
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
@@ -464,7 +511,9 @@ fn main() {
     listener
         .set_nonblocking(true)
         .unwrap_or_else(|e| die(&format!("nonblocking listener: {e}")));
-    let local = listener.local_addr().unwrap_or_else(|e| die(&format!("local_addr: {e}")));
+    let local = listener
+        .local_addr()
+        .unwrap_or_else(|e| die(&format!("local_addr: {e}")));
     eprintln!("KUBENYX-LB-LISTEN {local}");
     eprintln!(
         "kubenyx-lb: {} backend(s), probe every {}ms, evict after {} failures",
@@ -517,11 +566,17 @@ fn main() {
         elapsed_ms().saturating_add(cfg.drain_timeout.as_millis() as u64),
         Ordering::SeqCst,
     );
-    eprintln!("KUBENYX-LB-DRAIN in_flight={}", ACTIVE.load(Ordering::SeqCst));
+    eprintln!(
+        "KUBENYX-LB-DRAIN in_flight={}",
+        ACTIVE.load(Ordering::SeqCst)
+    );
     while ACTIVE.load(Ordering::SeqCst) > 0 && !drain_expired() {
         std::thread::sleep(Duration::from_millis(50));
     }
-    eprintln!("kubenyx-lb: drained (in_flight={}), exiting", ACTIVE.load(Ordering::SeqCst));
+    eprintln!(
+        "kubenyx-lb: drained (in_flight={}), exiting",
+        ACTIVE.load(Ordering::SeqCst)
+    );
     exit(0);
 }
 
@@ -539,7 +594,13 @@ mod tests {
 
     #[test]
     fn parse_defaults_and_backends() {
-        let cfg = parse_args(&s(&["--backend", "10.0.0.1:6443", "--backend", "10.0.0.2:6443"])).unwrap();
+        let cfg = parse_args(&s(&[
+            "--backend",
+            "10.0.0.1:6443",
+            "--backend",
+            "10.0.0.2:6443",
+        ]))
+        .unwrap();
         assert_eq!(cfg.listen, "127.0.0.1:6444");
         assert_eq!(cfg.backends, vec!["10.0.0.1:6443", "10.0.0.2:6443"]);
         assert_eq!(cfg.probe_interval, Duration::from_millis(500));
@@ -550,11 +611,16 @@ mod tests {
     #[test]
     fn parse_overrides() {
         let cfg = parse_args(&s(&[
-            "--listen", "127.0.0.1:0",
-            "--backend", "a:1",
-            "--probe-interval-ms", "50",
-            "--fail-threshold", "2",
-            "--drain-timeout-ms", "1000",
+            "--listen",
+            "127.0.0.1:0",
+            "--backend",
+            "a:1",
+            "--probe-interval-ms",
+            "50",
+            "--fail-threshold",
+            "2",
+            "--drain-timeout-ms",
+            "1000",
             "--probe-http",
         ]))
         .unwrap();
@@ -576,7 +642,12 @@ mod tests {
         assert!(parse_args(&s(&["--backend", "a:1", "--probe-cert", "/c.crt"])).is_err());
         assert!(parse_args(&s(&["--backend", "a:1", "--probe-key", "/c.key"])).is_err());
         assert!(parse_args(&s(&[
-            "--backend", "a:1", "--probe-cert", "/c.crt", "--probe-key", "/c.key"
+            "--backend",
+            "a:1",
+            "--probe-cert",
+            "/c.crt",
+            "--probe-key",
+            "/c.key"
         ]))
         .is_ok());
     }

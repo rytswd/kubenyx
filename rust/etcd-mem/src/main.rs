@@ -18,11 +18,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tonic::transport::Server;
 
-use etcd::kv_server::KvServer;
-use etcd::watch_server::WatchServer;
-use etcd::lease_server::LeaseServer;
 use etcd::cluster_server::ClusterServer;
+use etcd::kv_server::KvServer;
+use etcd::lease_server::LeaseServer;
 use etcd::maintenance_server::MaintenanceServer;
+use etcd::watch_server::WatchServer;
 
 fn parse_socket_path(addr: &str) -> PathBuf {
     // Accept "unix:///absolute/path" or "/absolute/path"
@@ -40,8 +40,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         if arg == "--listen-address" || arg == "--listen-addr" {
-            if let Some(val) = args.next() { listen = val; }
-        } else if let Some(val) = arg.strip_prefix("--listen-address=")
+            if let Some(val) = args.next() {
+                listen = val;
+            }
+        } else if let Some(val) = arg
+            .strip_prefix("--listen-address=")
             .or_else(|| arg.strip_prefix("--listen-addr="))
         {
             listen = val.to_string();
@@ -51,7 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sock_path = parse_socket_path(&listen);
 
     // Remove stale socket file.
-    if sock_path.exists() { let _ = std::fs::remove_file(&sock_path); }
+    if sock_path.exists() {
+        let _ = std::fs::remove_file(&sock_path);
+    }
 
     // Create parent directory if missing.
     if let Some(parent) = sock_path.parent() {
@@ -82,7 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // gRPC health service (optional — apiserver may probe /health).
     let (mut health_reporter, health_svc) = tonic_health::server::health_reporter();
     health_reporter.set_serving::<KvServer<svc::KvSvc>>().await;
-    health_reporter.set_serving::<WatchServer<svc::WatchSvc>>().await;
+    health_reporter
+        .set_serving::<WatchServer<svc::WatchSvc>>()
+        .await;
 
     // Bind Unix domain socket listener.
     let uds = tokio::net::UnixListener::bind(&sock_path)?;
@@ -93,9 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // set (i.e. not running under systemd), this is a no-op.
     notify_ready();
 
-    eprintln!(
-        "etcd-mem: listening on {listen} (rev=0)"
-    );
+    eprintln!("etcd-mem: listening on {listen} (rev=0)");
 
     Server::builder()
         .add_service(health_svc)
@@ -133,7 +138,7 @@ fn notify_ready() {
 async fn shutdown_signal() {
     use tokio::signal::unix::{signal, SignalKind};
     let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
-    let mut sigint  = signal(SignalKind::interrupt()).expect("SIGINT handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
     tokio::select! {
         _ = sigterm.recv() => {}
         _ = sigint.recv()  => {}

@@ -3,12 +3,12 @@ use std::pin::Pin;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::etcd::*;
-use crate::etcd::kv_server::Kv as KvTrait;
-use crate::etcd::watch_server::Watch as WatchTrait;
-use crate::etcd::lease_server::Lease as LeaseTrait;
 use crate::etcd::cluster_server::Cluster as ClusterTrait;
+use crate::etcd::kv_server::Kv as KvTrait;
+use crate::etcd::lease_server::Lease as LeaseTrait;
 use crate::etcd::maintenance_server::Maintenance as MaintenanceTrait;
+use crate::etcd::watch_server::Watch as WatchTrait;
+use crate::etcd::*;
 use crate::store::{kv_to_event, kv_to_proto, SharedStore};
 
 // ────────────────────────────────── KV ─────────────────────────────────────
@@ -17,21 +17,15 @@ pub struct KvSvc(pub SharedStore);
 
 #[tonic::async_trait]
 impl KvTrait for KvSvc {
-    async fn range(
-        &self,
-        req: Request<RangeRequest>,
-    ) -> Result<Response<RangeResponse>, Status> {
+    async fn range(&self, req: Request<RangeRequest>) -> Result<Response<RangeResponse>, Status> {
         let r = req.into_inner();
         let store = self.0.lock().await;
-        let (kvs_raw, more, count) = store.range_kvs(
-            &r.key, &r.range_end, r.limit, r.revision,
-            r.min_mod_revision, r.max_mod_revision,
-            r.min_create_revision, r.max_create_revision,
-        );
+        let (kvs_raw, more, count) = store.range_kvs(&r);
         let (kvs, count) = if r.count_only {
             (vec![], count)
         } else {
-            let out = kvs_raw.into_iter()
+            let out = kvs_raw
+                .into_iter()
                 .map(|k| kv_to_proto(k, r.keys_only))
                 .collect();
             (out, count)
@@ -44,17 +38,19 @@ impl KvTrait for KvSvc {
         }))
     }
 
-    async fn put(
-        &self,
-        req: Request<PutRequest>,
-    ) -> Result<Response<PutResponse>, Status> {
+    async fn put(&self, req: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
         let r = req.into_inner();
         let mut store = self.0.lock().await;
         let (hdr, prev) = store.put(
-            r.key, r.value, r.lease, r.prev_kv, r.ignore_value, r.ignore_lease,
+            r.key,
+            r.value,
+            r.lease,
+            r.prev_kv,
+            r.ignore_value,
+            r.ignore_lease,
         );
         Ok(Response::new(PutResponse {
-            header:  Some(hdr),
+            header: Some(hdr),
             prev_kv: prev.map(|k| kv_to_proto(k, false)),
         }))
     }
@@ -67,21 +63,21 @@ impl KvTrait for KvSvc {
         let mut store = self.0.lock().await;
         let (hdr, deleted, prev_kvs) = store.delete_range(&r.key, &r.range_end, r.prev_kv);
         Ok(Response::new(DeleteRangeResponse {
-            header:   Some(hdr),
+            header: Some(hdr),
             deleted,
-            prev_kvs: prev_kvs.into_iter().map(|k| kv_to_proto(k, false)).collect(),
+            prev_kvs: prev_kvs
+                .into_iter()
+                .map(|k| kv_to_proto(k, false))
+                .collect(),
         }))
     }
 
-    async fn txn(
-        &self,
-        req: Request<TxnRequest>,
-    ) -> Result<Response<TxnResponse>, Status> {
+    async fn txn(&self, req: Request<TxnRequest>) -> Result<Response<TxnResponse>, Status> {
         let r = req.into_inner();
         let mut store = self.0.lock().await;
         let (hdr, ok, responses) = store.txn(&r);
         Ok(Response::new(TxnResponse {
-            header:    Some(hdr),
+            header: Some(hdr),
             succeeded: ok,
             responses,
         }))
@@ -104,12 +100,12 @@ pub struct WatchSvc(pub SharedStore);
 
 // Per-stream watch state.
 struct WatchHandle {
-    id:               i64,
-    key:              Vec<u8>,
-    range_end:        Vec<u8>,
-    prev_kv:          bool,
+    id: i64,
+    key: Vec<u8>,
+    range_end: Vec<u8>,
+    prev_kv: bool,
     // filters: 0=NOPUT 1=NODELETE; store as bitmask
-    filter:           u32,
+    filter: u32,
     // Highest revision already delivered — broadcast events with rev ≤ this
     // are skipped to avoid duplicate delivery after history replay.
     delivered_through: i64,
@@ -118,8 +114,12 @@ struct WatchHandle {
 impl WatchHandle {
     fn matches(&self, ev_type: i32, kv: &crate::store::Kv) -> bool {
         // Filter: NOPUT bit=1 means skip PUTs; NODELETE bit=2 means skip DELETEs
-        if self.filter & 1 != 0 && ev_type == 0 { return false; }
-        if self.filter & 2 != 0 && ev_type == 1 { return false; }
+        if self.filter & 1 != 0 && ev_type == 0 {
+            return false;
+        }
+        if self.filter & 2 != 0 && ev_type == 1 {
+            return false;
+        }
         // Key range check
         if self.range_end.is_empty() {
             kv.key == self.key
@@ -380,20 +380,30 @@ impl LeaseTrait for LeaseSvc {
             while let Ok(Some(r)) = inbound.message().await {
                 let mut store = store_arc.lock().await;
                 if let Some((hdr, id, ttl)) = store.lease_keepalive(r.id) {
-                    let _ = tx.send(Ok(LeaseKeepAliveResponse {
-                        header: Some(hdr), id, ttl,
-                    })).await;
+                    let _ = tx
+                        .send(Ok(LeaseKeepAliveResponse {
+                            header: Some(hdr),
+                            id,
+                            ttl,
+                        }))
+                        .await;
                 } else {
                     // Lease not found — send 0 TTL to signal expiry.
                     let hdr = store.header();
-                    let _ = tx.send(Ok(LeaseKeepAliveResponse {
-                        header: Some(hdr), id: r.id, ttl: 0,
-                    })).await;
+                    let _ = tx
+                        .send(Ok(LeaseKeepAliveResponse {
+                            header: Some(hdr),
+                            id: r.id,
+                            ttl: 0,
+                        }))
+                        .await;
                 }
             }
         });
 
-        Ok(Response::new(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))))
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
     }
 
     async fn lease_time_to_live(
@@ -404,7 +414,7 @@ impl LeaseTrait for LeaseSvc {
         let store = self.0.lock().await;
         match store.lease_ttl(r.id, r.keys) {
             Some((hdr, id, ttl, keys)) => Ok(Response::new(LeaseTimeToLiveResponse {
-                header:      Some(hdr),
+                header: Some(hdr),
                 id,
                 ttl,
                 granted_ttl: store.leases.get(&id).map(|l| l.granted_ttl).unwrap_or(ttl),
@@ -419,7 +429,9 @@ impl LeaseTrait for LeaseSvc {
         _req: Request<LeaseLeasesRequest>,
     ) -> Result<Response<LeaseLeasesResponse>, Status> {
         let store = self.0.lock().await;
-        let leases = store.lease_list().into_iter()
+        let leases = store
+            .lease_list()
+            .into_iter()
             .map(|id| LeaseStatus { id })
             .collect();
         Ok(Response::new(LeaseLeasesResponse {
@@ -441,13 +453,13 @@ impl ClusterTrait for ClusterSvc {
     ) -> Result<Response<MemberListResponse>, Status> {
         let store = self.0.lock().await;
         Ok(Response::new(MemberListResponse {
-            header:  Some(store.header()),
+            header: Some(store.header()),
             members: vec![Member {
-                id:          crate::store::MEMBER_ID,
-                name:        "etcd-mem".into(),
-                peer_ur_ls:  vec![],
+                id: crate::store::MEMBER_ID,
+                name: "etcd-mem".into(),
+                peer_ur_ls: vec![],
                 client_ur_ls: vec![],
-                is_learner:  false,
+                is_learner: false,
             }],
         }))
     }
@@ -464,7 +476,9 @@ impl MaintenanceTrait for MaintenanceSvc {
         _req: Request<DefragmentRequest>,
     ) -> Result<Response<DefragmentResponse>, Status> {
         let store = self.0.lock().await;
-        Ok(Response::new(DefragmentResponse { header: Some(store.header()) }))
+        Ok(Response::new(DefragmentResponse {
+            header: Some(store.header()),
+        }))
     }
 
     async fn status(
@@ -473,27 +487,24 @@ impl MaintenanceTrait for MaintenanceSvc {
     ) -> Result<Response<StatusResponse>, Status> {
         let store = self.0.lock().await;
         Ok(Response::new(StatusResponse {
-            header:            Some(store.header()),
-            version:           "etcd-mem/0.1.0".into(),
-            db_size:           0,
-            leader:            crate::store::MEMBER_ID,
-            raft_index:        store.revision as u64,
-            raft_term:         1,
-            raft_applied_index:store.revision as u64,
-            errors:            vec![],
-            db_size_in_use:    0,
-            is_learner:        false,
+            header: Some(store.header()),
+            version: "etcd-mem/0.1.0".into(),
+            db_size: 0,
+            leader: crate::store::MEMBER_ID,
+            raft_index: store.revision as u64,
+            raft_term: 1,
+            raft_applied_index: store.revision as u64,
+            errors: vec![],
+            db_size_in_use: 0,
+            is_learner: false,
         }))
     }
 
-    async fn hash(
-        &self,
-        _req: Request<HashRequest>,
-    ) -> Result<Response<HashResponse>, Status> {
+    async fn hash(&self, _req: Request<HashRequest>) -> Result<Response<HashResponse>, Status> {
         let store = self.0.lock().await;
         Ok(Response::new(HashResponse {
             header: Some(store.header()),
-            hash:   0,
+            hash: 0,
         }))
     }
 
@@ -503,8 +514,8 @@ impl MaintenanceTrait for MaintenanceSvc {
     ) -> Result<Response<HashKvResponse>, Status> {
         let store = self.0.lock().await;
         Ok(Response::new(HashKvResponse {
-            header:           Some(store.header()),
-            hash:             0,
+            header: Some(store.header()),
+            hash: 0,
             compact_revision: store.compact_revision,
         }))
     }

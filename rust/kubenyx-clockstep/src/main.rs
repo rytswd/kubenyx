@@ -46,11 +46,18 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--listen" => {
-                listen = args.get(i + 1).cloned().unwrap_or_else(|| die("--listen needs a value"));
+                listen = args
+                    .get(i + 1)
+                    .cloned()
+                    .unwrap_or_else(|| die("--listen needs a value"));
                 i += 2;
             }
             "--allow-from" => {
-                allow_from = Some(args.get(i + 1).cloned().unwrap_or_else(|| die("--allow-from needs a value")));
+                allow_from = Some(
+                    args.get(i + 1)
+                        .cloned()
+                        .unwrap_or_else(|| die("--allow-from needs a value")),
+                );
                 i += 2;
             }
             "--min-step-ms" => {
@@ -85,17 +92,25 @@ fn main() {
             continue;
         }
 
-        let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
         let delta_ms = (sec - now.tv_sec) * 1000 + (nsec - now.tv_nsec) / 1_000_000;
         if delta_ms.abs() < min_step_ms {
             continue;
         }
 
-        let ts = libc::timespec { tv_sec: sec, tv_nsec: nsec };
+        let ts = libc::timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        };
         let rc = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
         if rc == 0 {
-            console_log(&format!("KUBENYX-CLOCKSTEP stepped={delta_ms}ms from={src}"));
+            console_log(&format!(
+                "KUBENYX-CLOCKSTEP stepped={delta_ms}ms from={src}"
+            ));
         } else {
             console_log(&format!(
                 "KUBENYX-CLOCKSTEP failed delta={delta_ms}ms errno={}",

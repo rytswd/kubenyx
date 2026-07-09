@@ -71,7 +71,12 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
     fn verify_tls13_signature(
         &self,
@@ -79,7 +84,12 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
@@ -93,7 +103,13 @@ fn load_pem_certs(path: &str) -> Vec<rustls::pki_types::CertificateDer<'static>>
         .unwrap_or_else(|e| die(&format!("parse {path}: {e}")))
 }
 
-fn build_probe(url: &str, cacert: Option<&str>, cert: Option<&str>, key: Option<&str>, insecure: bool) -> Probe {
+fn build_probe(
+    url: &str,
+    cacert: Option<&str>,
+    cert: Option<&str>,
+    key: Option<&str>,
+    insecure: bool,
+) -> Probe {
     if let Some(path) = url.strip_prefix("unix://") {
         // Socket-connectable probe: gRPC servers (kine, etcd shims) have no
         // HTTP health endpoint on the socket; accepting a connection is the
@@ -113,10 +129,18 @@ fn build_probe(url: &str, cacert: Option<&str>, cert: Option<&str>, key: Option<
     } else {
         die(&format!("unsupported URL {url}"));
     };
-    let (hostport, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
+    let (hostport, path) = rest
+        .split_once('/')
+        .map(|(h, p)| (h, format!("/{p}")))
+        .unwrap_or((rest, "/".into()));
     let (host, port) = hostport
         .rsplit_once(':')
-        .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or_else(|_| die("bad port"))))
+        .map(|(h, p)| {
+            (
+                h.to_string(),
+                p.parse::<u16>().unwrap_or_else(|_| die("bad port")),
+            )
+        })
         .unwrap_or_else(|| (hostport.to_string(), if tls { 443 } else { 80 }));
 
     let tls_config = if tls {
@@ -132,7 +156,9 @@ fn build_probe(url: &str, cacert: Option<&str>, cert: Option<&str>, key: Option<
         } else if let Some(ca) = cacert {
             let mut roots = rustls::RootCertStore::empty();
             for c in load_pem_certs(ca) {
-                roots.add(c).unwrap_or_else(|e| die(&format!("bad CA cert: {e}")));
+                roots
+                    .add(c)
+                    .unwrap_or_else(|e| die(&format!("bad CA cert: {e}")));
             }
             builder.with_root_certificates(roots)
         } else {
@@ -159,7 +185,13 @@ fn build_probe(url: &str, cacert: Option<&str>, cert: Option<&str>, key: Option<
         None
     };
 
-    Probe { host, port, path, tls, tls_config }
+    Probe {
+        host,
+        port,
+        path,
+        tls,
+        tls_config,
+    }
 }
 
 impl Probe {
@@ -171,8 +203,12 @@ impl Probe {
         let Ok(stream) = TcpStream::connect(&addr) else {
             return false;
         };
-        stream.set_read_timeout(Some(Duration::from_millis(1500))).ok();
-        stream.set_write_timeout(Some(Duration::from_millis(1500))).ok();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(1500)))
+            .ok();
+        stream
+            .set_write_timeout(Some(Duration::from_millis(1500)))
+            .ok();
         let req = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             self.path, self.host
@@ -240,19 +276,35 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--url" => {
-                url = Some(args.get(i + 1).cloned().unwrap_or_else(|| die("--url needs a value")));
+                url = Some(
+                    args.get(i + 1)
+                        .cloned()
+                        .unwrap_or_else(|| die("--url needs a value")),
+                );
                 i += 2;
             }
             "--cacert" => {
-                cacert = Some(args.get(i + 1).cloned().unwrap_or_else(|| die("--cacert needs a value")));
+                cacert = Some(
+                    args.get(i + 1)
+                        .cloned()
+                        .unwrap_or_else(|| die("--cacert needs a value")),
+                );
                 i += 2;
             }
             "--cert" => {
-                cert = Some(args.get(i + 1).cloned().unwrap_or_else(|| die("--cert needs a value")));
+                cert = Some(
+                    args.get(i + 1)
+                        .cloned()
+                        .unwrap_or_else(|| die("--cert needs a value")),
+                );
                 i += 2;
             }
             "--key" => {
-                key = Some(args.get(i + 1).cloned().unwrap_or_else(|| die("--key needs a value")));
+                key = Some(
+                    args.get(i + 1)
+                        .cloned()
+                        .unwrap_or_else(|| die("--key needs a value")),
+                );
                 i += 2;
             }
             "--insecure" => {
@@ -275,7 +327,13 @@ fn main() {
         if cmd_at.is_some() {
             die("--wait takes no -- command");
         }
-        let probe = build_probe(&url, cacert.as_deref(), cert.as_deref(), key.as_deref(), insecure);
+        let probe = build_probe(
+            &url,
+            cacert.as_deref(),
+            cert.as_deref(),
+            key.as_deref(),
+            insecure,
+        );
         while !probe.check() {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -286,7 +344,13 @@ fn main() {
         die("empty command after --");
     }
 
-    let probe = build_probe(&url, cacert.as_deref(), cert.as_deref(), key.as_deref(), insecure);
+    let probe = build_probe(
+        &url,
+        cacert.as_deref(),
+        cert.as_deref(),
+        key.as_deref(),
+        insecure,
+    );
 
     let mut child = Command::new(&args[cmd_at])
         .args(&args[cmd_at + 1..])
@@ -295,8 +359,14 @@ fn main() {
     CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
 
     unsafe {
-        libc::signal(libc::SIGTERM, forward_signal as libc::sighandler_t);
-        libc::signal(libc::SIGINT, forward_signal as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            forward_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            forward_signal as *const () as libc::sighandler_t,
+        );
     }
 
     let mut notified = false;

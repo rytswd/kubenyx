@@ -68,7 +68,10 @@ fn parse_args() -> Cfg {
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
-        let mut val = || it.next().unwrap_or_else(|| die(&format!("missing value for {a}")));
+        let mut val = || {
+            it.next()
+                .unwrap_or_else(|| die(&format!("missing value for {a}")))
+        };
         match a.as_str() {
             // Subcommand form: `kubenyx-pki mint-ca --out DIR` (operator
             // CLI, durable-ha.org §3) rides the same parser as the flag
@@ -90,7 +93,11 @@ fn parse_args() -> Cfg {
                 let (n, addr) = v.split_once('=').unwrap_or((v.as_str(), ""));
                 cfg.nodes.push((
                     n.to_string(),
-                    if addr.is_empty() { None } else { Some(addr.to_string()) },
+                    if addr.is_empty() {
+                        None
+                    } else {
+                        Some(addr.to_string())
+                    },
                 ));
             }
             "--leaf-days" => cfg.leaf_days = val().parse().unwrap_or(365),
@@ -184,9 +191,18 @@ fn random_serial() -> SerialNumber {
     SerialNumber::from_slice(&b)
 }
 
-/// Rebuild an in-memory issuer (Certificate + KeyPair + on-disk PEM) from
-/// disk. The PEM rides along so fingerprints can bind to the CA identity.
-fn load_issuer(pki: &Path, name: &str) -> (Certificate, KeyPair, String) {
+/// An in-memory issuer: the Certificate + KeyPair, the on-disk PEM (so
+/// fingerprints can bind to the CA identity) and the CA's name (so
+/// fingerprints record WHICH CA signed a leaf).
+struct Issuer {
+    cert: Certificate,
+    key: KeyPair,
+    pem: String,
+    name: String,
+}
+
+/// Rebuild an in-memory issuer from disk.
+fn load_issuer(pki: &Path, name: &str) -> Issuer {
     let crt = fs::read_to_string(pki.join(format!("{name}.crt")))
         .unwrap_or_else(|e| die(&format!("read {name}.crt: {e}")));
     let key = fs::read_to_string(pki.join(format!("{name}.key")))
@@ -197,7 +213,12 @@ fn load_issuer(pki: &Path, name: &str) -> (Certificate, KeyPair, String) {
     let cert = params
         .self_signed(&kp)
         .unwrap_or_else(|e| die(&format!("rebuild issuer {name}: {e}")));
-    (cert, kp, crt)
+    Issuer {
+        cert,
+        key: kp,
+        pem: crt,
+        name: name.to_string(),
+    }
 }
 
 fn ensure_ca(pki: &Path, name: &str, cn: &str) {
@@ -231,8 +252,16 @@ fn ensure_sa(pki: &Path) {
     use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
     let sk = p256::SecretKey::random(&mut rand_core::OsRng);
     let pk = sk.public_key();
-    write_private(&pki.join("sa.key"), sk.to_pkcs8_pem(Default::default()).expect("sa pem").as_str());
-    write_private(&pki.join("sa.pub"), &pk.to_public_key_pem(Default::default()).expect("sa pub"));
+    write_private(
+        &pki.join("sa.key"),
+        sk.to_pkcs8_pem(Default::default())
+            .expect("sa pem")
+            .as_str(),
+    );
+    write_private(
+        &pki.join("sa.pub"),
+        &pk.to_public_key_pem(Default::default()).expect("sa pub"),
+    );
 }
 
 /// The operator-custody trust roots (durable-ha.org §3): both CAs and the
@@ -260,8 +289,7 @@ impl<'a> Issue<'a> {
     /// "DNS:x" / "IP:1.2.3.4" convention.
     fn ensure(
         &self,
-        issuer: &(Certificate, KeyPair, String),
-        ca_name: &str,
+        issuer: &Issuer,
         name: &str,
         cn: &str,
         org: Option<&str>,
@@ -289,8 +317,12 @@ impl<'a> Issue<'a> {
             .join(",");
         // The CA digest ties leaves to the actual CA identity: rotating or
         // restoring a different CA must cascade into leaf reissuance.
-        let ca_digest = fnv1a(issuer.2.as_bytes());
-        let want = format!("{subject}|{eku_s}|{}|{ca_name}:{ca_digest:016x}", san.join(","));
+        let ca_digest = fnv1a(issuer.pem.as_bytes());
+        let want = format!(
+            "{subject}|{eku_s}|{}|{}:{ca_digest:016x}",
+            san.join(","),
+            issuer.name
+        );
 
         if let (Ok(crt_pem), true, Ok(prev)) = (
             fs::read_to_string(&crt_p),
@@ -325,18 +357,20 @@ impl<'a> Issue<'a> {
         params.distinguished_name = dn;
         for s in san {
             if let Some(d) = s.strip_prefix("DNS:") {
-                params
-                    .subject_alt_names
-                    .push(SanType::DnsName(Ia5String::try_from(d.to_string()).expect("dns san")));
+                params.subject_alt_names.push(SanType::DnsName(
+                    Ia5String::try_from(d.to_string()).expect("dns san"),
+                ));
             } else if let Some(ip) = s.strip_prefix("IP:") {
-                let addr: IpAddr = ip.parse().unwrap_or_else(|_| die(&format!("bad IP SAN {ip}")));
+                let addr: IpAddr = ip
+                    .parse()
+                    .unwrap_or_else(|_| die(&format!("bad IP SAN {ip}")));
                 params.subject_alt_names.push(SanType::IpAddress(addr));
             } else {
                 die(&format!("bad SAN {s} (want DNS:/IP: prefix)"));
             }
         }
         let cert = params
-            .signed_by(&kp, &issuer.0, &issuer.1)
+            .signed_by(&kp, &issuer.cert, &issuer.key)
             .unwrap_or_else(|e| die(&format!("sign {name}: {e}")));
         write_private(&key_p, &kp.serialize_pem());
         write_private(&crt_p, &cert.pem());
@@ -344,10 +378,20 @@ impl<'a> Issue<'a> {
     }
 }
 
-fn write_kubeconfig(kc: &Path, out: &str, api_url: &str, user: &str, ca_pem: &str, crt: &Path, key: &Path) {
+fn write_kubeconfig(
+    kc: &Path,
+    out: &str,
+    api_url: &str,
+    user: &str,
+    ca_pem: &str,
+    crt: &Path,
+    key: &Path,
+) {
     let out_p = kc.join(out);
-    let crt_pem = fs::read_to_string(crt).unwrap_or_else(|e| die(&format!("read {}: {e}", crt.display())));
-    let key_pem = fs::read_to_string(key).unwrap_or_else(|e| die(&format!("read {}: {e}", key.display())));
+    let crt_pem =
+        fs::read_to_string(crt).unwrap_or_else(|e| die(&format!("read {}: {e}", crt.display())));
+    let key_pem =
+        fs::read_to_string(key).unwrap_or_else(|e| die(&format!("read {}: {e}", key.display())));
     // Content equality, not mtimes: mtime-preserving transports (tar, rsync
     // -a) would otherwise leave stale embedded certs after a re-ship.
     if let Ok(body) = fs::read_to_string(&out_p) {
@@ -373,7 +417,10 @@ fn write_kubeconfig(kc: &Path, out: &str, api_url: &str, user: &str, ca_pem: &st
 fn detect_node_ip() -> String {
     // Default-route trick first: a UDP connect sends no packets but binds
     // the source address the kernel would route with. v4, then v6.
-    for (bind, target) in [("0.0.0.0:0", "1.1.1.1:53"), ("[::]:0", "[2606:4700:4700::1111]:53")] {
+    for (bind, target) in [
+        ("0.0.0.0:0", "1.1.1.1:53"),
+        ("[::]:0", "[2606:4700:4700::1111]:53"),
+    ] {
         if let Ok(sock) = std::net::UdpSocket::bind(bind) {
             if sock.connect(target).is_ok() {
                 if let Ok(addr) = sock.local_addr() {
@@ -470,19 +517,75 @@ fn server(cfg: &Cfg) {
     ];
     api_san.extend(cfg.extra_sans.iter().cloned());
 
-    issue.ensure(&ca, "ca", "apiserver", "kube-apiserver", None, &[ServerAuth], &api_san);
-    issue.ensure(&ca, "ca", "apiserver-kubelet-client", "kube-apiserver-kubelet-client", None, &[ClientAuth], &[]);
-    issue.ensure(&fp_ca, "front-proxy-ca", "front-proxy-client", "front-proxy-client", None, &[ClientAuth], &[]);
-    issue.ensure(&ca, "ca", "admin", "kubenyx-admin", Some("kubenyx:cluster-admins"), &[ClientAuth], &[]);
+    issue.ensure(
+        &ca,
+        "apiserver",
+        "kube-apiserver",
+        None,
+        &[ServerAuth],
+        &api_san,
+    );
+    issue.ensure(
+        &ca,
+        "apiserver-kubelet-client",
+        "kube-apiserver-kubelet-client",
+        None,
+        &[ClientAuth],
+        &[],
+    );
+    issue.ensure(
+        &fp_ca,
+        "front-proxy-client",
+        "front-proxy-client",
+        None,
+        &[ClientAuth],
+        &[],
+    );
+    issue.ensure(
+        &ca,
+        "admin",
+        "kubenyx-admin",
+        Some("kubenyx:cluster-admins"),
+        &[ClientAuth],
+        &[],
+    );
     // Bootstrap identity for the addon applier: the one deliberate
     // system:masters cert (kubeadm's super-admin analog).
-    issue.ensure(&ca, "ca", "bootstrap", "kubenyx-bootstrap", Some("system:masters"), &[ClientAuth], &[]);
-    issue.ensure(&ca, "ca", "controller-manager", "system:kube-controller-manager", None, &[ClientAuth], &[]);
-    issue.ensure(&ca, "ca", "scheduler", "system:kube-scheduler", None, &[ClientAuth], &[]);
-    issue.ensure(&ca, "ca", "kube-proxy", "system:kube-proxy", None, &[ClientAuth], &[]);
-    issue.ensure(&ca, "ca", "coredns", "system:coredns", None, &[ClientAuth], &[]);
+    issue.ensure(
+        &ca,
+        "bootstrap",
+        "kubenyx-bootstrap",
+        Some("system:masters"),
+        &[ClientAuth],
+        &[],
+    );
+    issue.ensure(
+        &ca,
+        "controller-manager",
+        "system:kube-controller-manager",
+        None,
+        &[ClientAuth],
+        &[],
+    );
+    issue.ensure(
+        &ca,
+        "scheduler",
+        "system:kube-scheduler",
+        None,
+        &[ClientAuth],
+        &[],
+    );
+    issue.ensure(
+        &ca,
+        "kube-proxy",
+        "system:kube-proxy",
+        None,
+        &[ClientAuth],
+        &[],
+    );
+    issue.ensure(&ca, "coredns", "system:coredns", None, &[ClientAuth], &[]);
     // Authenticated-but-unprivileged identity for health probes.
-    issue.ensure(&ca, "ca", "healthz", "kubenyx-healthz", None, &[ClientAuth], &[]);
+    issue.ensure(&ca, "healthz", "kubenyx-healthz", None, &[ClientAuth], &[]);
 
     if cfg.etcd {
         // Multi-server quorum (durable-ha.org §2): the declared server
@@ -493,9 +596,22 @@ fn server(cfg: &Cfg) {
         // directions against the peer URLs' IPs.
         let mut etcd_san: Vec<String> = vec!["DNS:localhost".into(), "IP:127.0.0.1".into()];
         etcd_san.extend(cfg.etcd_sans.iter().cloned());
-        issue.ensure(&ca, "ca", "etcd-server", "kube-etcd", None, &[ServerAuth, ClientAuth],
-            &etcd_san);
-        issue.ensure(&ca, "ca", "apiserver-etcd-client", "kube-apiserver-etcd-client", None, &[ClientAuth], &[]);
+        issue.ensure(
+            &ca,
+            "etcd-server",
+            "kube-etcd",
+            None,
+            &[ServerAuth, ClientAuth],
+            &etcd_san,
+        );
+        issue.ensure(
+            &ca,
+            "apiserver-etcd-client",
+            "kube-apiserver-etcd-client",
+            None,
+            &[ClientAuth],
+            &[],
+        );
     }
 
     // Kubelet material for every declared node.
@@ -506,10 +622,22 @@ fn server(cfg: &Cfg) {
             None if name == &cfg.node_name => san.push(format!("IP:{node_ip}")),
             None => {}
         }
-        issue.ensure(&ca, "ca", &format!("nodes/{name}/kubelet"),
-            &format!("system:node:{name}"), Some("system:nodes"), &[ClientAuth], &[]);
-        issue.ensure(&ca, "ca", &format!("nodes/{name}/kubelet-server"),
-            &format!("system:node:{name}"), None, &[ServerAuth], &san);
+        issue.ensure(
+            &ca,
+            &format!("nodes/{name}/kubelet"),
+            &format!("system:node:{name}"),
+            Some("system:nodes"),
+            &[ClientAuth],
+            &[],
+        );
+        issue.ensure(
+            &ca,
+            &format!("nodes/{name}/kubelet-server"),
+            &format!("system:node:{name}"),
+            None,
+            &[ServerAuth],
+            &san,
+        );
     }
 
     // Package a one-stop credential directory per remote worker; the CA key
@@ -519,7 +647,13 @@ fn server(cfg: &Cfg) {
             continue;
         }
         let dir = pki.join("nodes").join(name);
-        for f in ["ca.crt", "kube-proxy.crt", "kube-proxy.key", "coredns.crt", "coredns.key"] {
+        for f in [
+            "ca.crt",
+            "kube-proxy.crt",
+            "kube-proxy.key",
+            "coredns.crt",
+            "coredns.key",
+        ] {
             fs::copy(pki.join(f), dir.join(f))
                 .unwrap_or_else(|e| die(&format!("package {name}/{f}: {e}")));
         }
@@ -529,19 +663,47 @@ fn server(cfg: &Cfg) {
     let kc = cfg.kc.as_path();
     let mut kcs: BTreeMap<&str, (&str, String)> = BTreeMap::new();
     kcs.insert("admin.kubeconfig", ("kubenyx-admin", "admin".into()));
-    kcs.insert("bootstrap.kubeconfig", ("kubenyx-bootstrap", "bootstrap".into()));
-    kcs.insert("controller-manager.kubeconfig", ("system:kube-controller-manager", "controller-manager".into()));
-    kcs.insert("scheduler.kubeconfig", ("system:kube-scheduler", "scheduler".into()));
-    kcs.insert("kube-proxy.kubeconfig", ("system:kube-proxy", "kube-proxy".into()));
+    kcs.insert(
+        "bootstrap.kubeconfig",
+        ("kubenyx-bootstrap", "bootstrap".into()),
+    );
+    kcs.insert(
+        "controller-manager.kubeconfig",
+        (
+            "system:kube-controller-manager",
+            "controller-manager".into(),
+        ),
+    );
+    kcs.insert(
+        "scheduler.kubeconfig",
+        ("system:kube-scheduler", "scheduler".into()),
+    );
+    kcs.insert(
+        "kube-proxy.kubeconfig",
+        ("system:kube-proxy", "kube-proxy".into()),
+    );
     kcs.insert("coredns.kubeconfig", ("system:coredns", "coredns".into()));
     for (out, (user, base)) in &kcs {
-        write_kubeconfig(kc, out, &cfg.api_url, user, &ca_pem,
-            &pki.join(format!("{base}.crt")), &pki.join(format!("{base}.key")));
+        write_kubeconfig(
+            kc,
+            out,
+            &cfg.api_url,
+            user,
+            &ca_pem,
+            &pki.join(format!("{base}.crt")),
+            &pki.join(format!("{base}.key")),
+        );
     }
     let kubelet_base = format!("nodes/{}/kubelet", cfg.node_name);
-    write_kubeconfig(kc, "kubelet.kubeconfig", &cfg.api_url,
-        &format!("system:node:{}", cfg.node_name), &ca_pem,
-        &pki.join(format!("{kubelet_base}.crt")), &pki.join(format!("{kubelet_base}.key")));
+    write_kubeconfig(
+        kc,
+        "kubelet.kubeconfig",
+        &cfg.api_url,
+        &format!("system:node:{}", cfg.node_name),
+        &ca_pem,
+        &pki.join(format!("{kubelet_base}.crt")),
+        &pki.join(format!("{kubelet_base}.key")),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -551,12 +713,23 @@ fn server(cfg: &Cfg) {
 fn agent(cfg: &Cfg) {
     let pki = cfg.pki.as_path();
     let needed = [
-        "ca.crt", "kubelet.crt", "kubelet.key", "kubelet-server.crt", "kubelet-server.key",
-        "kube-proxy.crt", "kube-proxy.key", "coredns.crt", "coredns.key",
+        "ca.crt",
+        "kubelet.crt",
+        "kubelet.key",
+        "kubelet-server.crt",
+        "kubelet-server.key",
+        "kube-proxy.crt",
+        "kube-proxy.key",
+        "coredns.crt",
+        "coredns.key",
     ];
     let missing: Vec<&str> = needed
         .iter()
-        .filter(|f| fs::metadata(pki.join(f)).map(|m| m.len() == 0).unwrap_or(true))
+        .filter(|f| {
+            fs::metadata(pki.join(f))
+                .map(|m| m.len() == 0)
+                .unwrap_or(true)
+        })
         .copied()
         .collect();
     if !missing.is_empty() {
@@ -585,13 +758,33 @@ fn agent(cfg: &Cfg) {
     }
     let ca_pem = fs::read_to_string(pki.join("ca.crt")).expect("ca.crt");
     let kc = cfg.kc.as_path();
-    write_kubeconfig(kc, "kubelet.kubeconfig", &cfg.api_url,
-        &format!("system:node:{}", cfg.node_name), &ca_pem,
-        &pki.join("kubelet.crt"), &pki.join("kubelet.key"));
-    write_kubeconfig(kc, "kube-proxy.kubeconfig", &cfg.api_url, "system:kube-proxy", &ca_pem,
-        &pki.join("kube-proxy.crt"), &pki.join("kube-proxy.key"));
-    write_kubeconfig(kc, "coredns.kubeconfig", &cfg.api_url, "system:coredns", &ca_pem,
-        &pki.join("coredns.crt"), &pki.join("coredns.key"));
+    write_kubeconfig(
+        kc,
+        "kubelet.kubeconfig",
+        &cfg.api_url,
+        &format!("system:node:{}", cfg.node_name),
+        &ca_pem,
+        &pki.join("kubelet.crt"),
+        &pki.join("kubelet.key"),
+    );
+    write_kubeconfig(
+        kc,
+        "kube-proxy.kubeconfig",
+        &cfg.api_url,
+        "system:kube-proxy",
+        &ca_pem,
+        &pki.join("kube-proxy.crt"),
+        &pki.join("kube-proxy.key"),
+    );
+    write_kubeconfig(
+        kc,
+        "coredns.kubeconfig",
+        &cfg.api_url,
+        "system:coredns",
+        &ca_pem,
+        &pki.join("coredns.crt"),
+        &pki.join("coredns.key"),
+    );
 }
 
 // ---------------------------------------------------------------------------

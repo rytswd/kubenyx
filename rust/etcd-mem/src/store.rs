@@ -7,7 +7,6 @@
 // - Leases: keys attached to an expired lease are deleted in a background task.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -20,46 +19,46 @@ pub const MEMBER_ID: u64 = 1;
 
 #[derive(Clone, Debug)]
 pub struct Kv {
-    pub key:             Vec<u8>,
-    pub value:           Vec<u8>,
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
     pub create_revision: i64,
-    pub mod_revision:    i64,
-    pub version:         i64,
-    pub lease:           i64,
+    pub mod_revision: i64,
+    pub version: i64,
+    pub lease: i64,
 }
 
 #[derive(Clone, Debug)]
 pub struct StoredEvent {
-    pub ev_type:          i32, // 0=PUT 1=DELETE
-    pub kv:               Kv,
-    pub prev_kv:          Option<Kv>,
+    pub ev_type: i32, // 0=PUT 1=DELETE
+    pub kv: Kv,
+    pub prev_kv: Option<Kv>,
 }
 
 #[derive(Clone, Debug)]
 pub struct BroadcastBatch {
     pub revision: i64,
-    pub events:   Vec<StoredEvent>,
+    pub events: Vec<StoredEvent>,
 }
 
 #[derive(Clone, Debug)]
 pub struct LeaseEntry {
-    pub id:          i64,
+    pub id: i64,
     pub granted_ttl: i64,
-    pub deadline:    Instant,
-    pub keys:        Vec<Vec<u8>>,
+    pub deadline: Instant,
+    pub keys: Vec<Vec<u8>>,
 }
 
 // ─── store ───────────────────────────────────────────────────────────────────
 
 pub struct Store {
-    pub kvs:              BTreeMap<Vec<u8>, Kv>,
-    pub revision:         i64,
+    pub kvs: BTreeMap<Vec<u8>, Kv>,
+    pub revision: i64,
     pub compact_revision: i64,
     // Full event log kept — volatile cluster, memory is cheap vs correctness.
-    pub log:              Vec<(i64, Vec<StoredEvent>)>, // (revision, events_at_rev)
-    pub leases:           BTreeMap<i64, LeaseEntry>,
-    pub next_lease_id:    i64,
-    tx:                   broadcast::Sender<BroadcastBatch>,
+    pub log: Vec<(i64, Vec<StoredEvent>)>, // (revision, events_at_rev)
+    pub leases: BTreeMap<i64, LeaseEntry>,
+    pub next_lease_id: i64,
+    tx: broadcast::Sender<BroadcastBatch>,
 }
 
 pub type SharedStore = Arc<Mutex<Store>>;
@@ -68,18 +67,18 @@ impl Store {
     pub fn new() -> (SharedStore, broadcast::Receiver<BroadcastBatch>) {
         let (tx, rx) = broadcast::channel(8192);
         let store = Store {
-            kvs:              BTreeMap::new(),
+            kvs: BTreeMap::new(),
             // Real etcd's initial revision is 1 (first mutation gets rev 2).
             // Starting at 0 makes empty Ranges return header.revision=0,
             // which kube-apiserver rejects ("illegal resource version from
             // storage: 0"); RBAC bootstrap then fails and the
             // bootstrap-system-priority-classes PostStartHook klog.Fatals
             // the apiserver into a restart loop.
-            revision:         1,
+            revision: 1,
             compact_revision: 0,
-            log:              Vec::new(),
-            leases:           BTreeMap::new(),
-            next_lease_id:    1,
+            log: Vec::new(),
+            leases: BTreeMap::new(),
+            next_lease_id: 1,
             tx,
         };
         (Arc::new(Mutex::new(store)), rx)
@@ -92,50 +91,36 @@ impl Store {
     pub fn header_rev(&self, revision: i64) -> crate::etcd::ResponseHeader {
         crate::etcd::ResponseHeader {
             cluster_id: CLUSTER_ID,
-            member_id:  MEMBER_ID,
+            member_id: MEMBER_ID,
             revision,
-            raft_term:  1,
+            raft_term: 1,
         }
     }
     pub fn header(&self) -> crate::etcd::ResponseHeader {
         self.header_rev(self.revision)
     }
 
-    // ── range helpers ──────────────────────────────────────────────────────
+    // ── range ──────────────────────────────────────────────────────────────
 
-    fn in_range(key: &[u8], req_key: &[u8], range_end: &[u8]) -> bool {
-        if range_end.is_empty() {
-            return key == req_key;
-        }
-        // "\x00" is the sentinel "all keys ≥ req_key"
-        if range_end == b"\x00" {
-            return key >= req_key;
-        }
-        key >= req_key && key < range_end
-    }
-
-    pub fn range_kvs(
-        &self,
-        req_key:   &[u8],
-        range_end: &[u8],
-        limit:     i64,
-        rev:       i64,
-        min_mod:   i64,
-        max_mod:   i64,
-        min_create:i64,
-        max_create:i64,
-    ) -> (Vec<Kv>, bool, i64) {
+    /// Key/limit/revision selection straight off the wire request; both
+    /// call sites (the Range RPC and Txn's RequestRange op) hold one.
+    pub fn range_kvs(&self, r: &crate::etcd::RangeRequest) -> (Vec<Kv>, bool, i64) {
         // Clamp the revision to what we actually have.
-        let at_rev = if rev == 0 { self.revision } else { rev.min(self.revision) };
+        let at_rev = if r.revision == 0 {
+            self.revision
+        } else {
+            r.revision.min(self.revision)
+        };
 
-        // Walk BTreeMap in ascending key order.
-        let all: Vec<&Kv> = if range_end.is_empty() {
-            self.kvs.get(req_key).into_iter().collect()
-        } else if range_end == b"\x00" {
-            self.kvs.range(req_key.to_vec()..).map(|(_, v)| v).collect()
+        // Walk BTreeMap in ascending key order. "\x00" is the sentinel
+        // "all keys ≥ key"; an empty range_end means exactly one key.
+        let all: Vec<&Kv> = if r.range_end.is_empty() {
+            self.kvs.get(&r.key).into_iter().collect()
+        } else if r.range_end == b"\x00" {
+            self.kvs.range(r.key.clone()..).map(|(_, v)| v).collect()
         } else {
             self.kvs
-                .range(req_key.to_vec()..range_end.to_vec())
+                .range(r.key.clone()..r.range_end.clone())
                 .map(|(_, v)| v)
                 .collect()
         };
@@ -146,15 +131,19 @@ impl Store {
             .into_iter()
             .filter(|kv| {
                 kv.mod_revision <= at_rev
-                    && (min_mod == 0 || kv.mod_revision >= min_mod)
-                    && (max_mod == 0 || kv.mod_revision <= max_mod)
-                    && (min_create == 0 || kv.create_revision >= min_create)
-                    && (max_create == 0 || kv.create_revision <= max_create)
+                    && (r.min_mod_revision == 0 || kv.mod_revision >= r.min_mod_revision)
+                    && (r.max_mod_revision == 0 || kv.mod_revision <= r.max_mod_revision)
+                    && (r.min_create_revision == 0 || kv.create_revision >= r.min_create_revision)
+                    && (r.max_create_revision == 0 || kv.create_revision <= r.max_create_revision)
             })
             .collect();
 
         let total = filtered.len() as i64;
-        let lim = if limit <= 0 { usize::MAX } else { limit as usize };
+        let lim = if r.limit <= 0 {
+            usize::MAX
+        } else {
+            r.limit as usize
+        };
         let more = filtered.len() > lim;
         let kvs: Vec<Kv> = filtered.into_iter().take(lim).cloned().collect();
         (kvs, more, total)
@@ -164,9 +153,9 @@ impl Store {
 
     pub fn put(
         &mut self,
-        key:          Vec<u8>,
-        value:        Vec<u8>,
-        lease:        i64,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        lease: i64,
         want_prev_kv: bool,
         ignore_value: bool,
         ignore_lease: bool,
@@ -203,17 +192,17 @@ impl Store {
         }
 
         let entry = Kv {
-            key:             key.clone(),
-            value:           use_value,
+            key: key.clone(),
+            value: use_value,
             create_revision: prev.as_ref().map(|k| k.create_revision).unwrap_or(rev),
-            mod_revision:    rev,
-            version:         prev.as_ref().map(|k| k.version + 1).unwrap_or(1),
-            lease:           use_lease,
+            mod_revision: rev,
+            version: prev.as_ref().map(|k| k.version + 1).unwrap_or(1),
+            lease: use_lease,
         };
 
         let ev = StoredEvent {
             ev_type: 0,
-            kv:      entry.clone(),
+            kv: entry.clone(),
             prev_kv: prev.clone(),
         };
         self.kvs.insert(key, entry);
@@ -224,14 +213,21 @@ impl Store {
 
     pub fn delete_range(
         &mut self,
-        req_key:      &[u8],
-        range_end:    &[u8],
+        req_key: &[u8],
+        range_end: &[u8],
         want_prev_kv: bool,
     ) -> (crate::etcd::ResponseHeader, i64, Vec<Kv>) {
         let keys: Vec<Vec<u8>> = if range_end.is_empty() {
-            self.kvs.contains_key(req_key).then(|| vec![req_key.to_vec()]).unwrap_or_default()
+            if self.kvs.contains_key(req_key) {
+                vec![req_key.to_vec()]
+            } else {
+                vec![]
+            }
         } else if range_end == b"\x00" {
-            self.kvs.range(req_key.to_vec()..).map(|(k, _)| k.clone()).collect()
+            self.kvs
+                .range(req_key.to_vec()..)
+                .map(|(k, _)| k.clone())
+                .collect()
         } else {
             self.kvs
                 .range(req_key.to_vec()..range_end.to_vec())
@@ -257,19 +253,21 @@ impl Store {
                     }
                 }
                 let del_kv = Kv {
-                    key:             k.clone(),
-                    value:           vec![],
+                    key: k.clone(),
+                    value: vec![],
                     create_revision: old.create_revision,
-                    mod_revision:    rev,
-                    version:         0,
-                    lease:           0,
+                    mod_revision: rev,
+                    version: 0,
+                    lease: 0,
                 };
                 events.push(StoredEvent {
                     ev_type: 1,
-                    kv:      del_kv,
+                    kv: del_kv,
                     prev_kv: Some(old.clone()),
                 });
-                if want_prev_kv { prev_kvs.push(old); }
+                if want_prev_kv {
+                    prev_kvs.push(old);
+                }
             }
         }
 
@@ -283,7 +281,11 @@ impl Store {
     pub fn txn(
         &mut self,
         req: &crate::etcd::TxnRequest,
-    ) -> (crate::etcd::ResponseHeader, bool, Vec<crate::etcd::ResponseOp>) {
+    ) -> (
+        crate::etcd::ResponseHeader,
+        bool,
+        Vec<crate::etcd::ResponseOp>,
+    ) {
         let ok = req.compare.iter().all(|c| self.eval_compare(c));
         let ops = if ok { &req.success } else { &req.failure };
         let responses = ops.iter().map(|op| self.exec_op(op)).collect();
@@ -298,10 +300,10 @@ impl Store {
 
         let kv = self.kvs.get(&c.key);
         let result = match c.result {
-            r if r == R::Equal as i32    => std::cmp::Ordering::Equal,
-            r if r == R::Greater as i32  => std::cmp::Ordering::Greater,
-            r if r == R::Less as i32     => std::cmp::Ordering::Less,
-            _                            => std::cmp::Ordering::Equal, // NOT_EQUAL handled below
+            r if r == R::Equal as i32 => std::cmp::Ordering::Equal,
+            r if r == R::Greater as i32 => std::cmp::Ordering::Greater,
+            r if r == R::Less as i32 => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Equal, // NOT_EQUAL handled below
         };
         let not_equal = c.result == R::NotEqual as i32;
 
@@ -313,7 +315,11 @@ impl Store {
                     _ => 0,
                 };
                 let ord = v.cmp(&target);
-                if not_equal { ord != std::cmp::Ordering::Equal } else { ord == result }
+                if not_equal {
+                    ord != std::cmp::Ordering::Equal
+                } else {
+                    ord == result
+                }
             }
             t if t == T::Create as i32 => {
                 let v = kv.map(|k| k.create_revision).unwrap_or(0);
@@ -322,7 +328,11 @@ impl Store {
                     _ => 0,
                 };
                 let ord = v.cmp(&target);
-                if not_equal { ord != std::cmp::Ordering::Equal } else { ord == result }
+                if not_equal {
+                    ord != std::cmp::Ordering::Equal
+                } else {
+                    ord == result
+                }
             }
             t if t == T::Mod as i32 => {
                 let v = kv.map(|k| k.mod_revision).unwrap_or(0);
@@ -331,7 +341,11 @@ impl Store {
                     _ => 0,
                 };
                 let ord = v.cmp(&target);
-                if not_equal { ord != std::cmp::Ordering::Equal } else { ord == result }
+                if not_equal {
+                    ord != std::cmp::Ordering::Equal
+                } else {
+                    ord == result
+                }
             }
             t if t == T::Value as i32 => {
                 let v = kv.map(|k| k.value.as_slice()).unwrap_or(&[]);
@@ -340,7 +354,11 @@ impl Store {
                     _ => &[],
                 };
                 let ord = v.cmp(target);
-                if not_equal { ord != std::cmp::Ordering::Equal } else { ord == result }
+                if not_equal {
+                    ord != std::cmp::Ordering::Equal
+                } else {
+                    ord == result
+                }
             }
             t if t == T::Lease as i32 => {
                 let v = kv.map(|k| k.lease).unwrap_or(0);
@@ -349,7 +367,11 @@ impl Store {
                     _ => 0,
                 };
                 let ord = v.cmp(&target);
-                if not_equal { ord != std::cmp::Ordering::Equal } else { ord == result }
+                if not_equal {
+                    ord != std::cmp::Ordering::Equal
+                } else {
+                    ord == result
+                }
             }
             _ => true,
         }
@@ -361,15 +383,14 @@ impl Store {
 
         match &op.request {
             Some(Request::RequestRange(r)) => {
-                let (kvs, more, count) = self.range_kvs(
-                    &r.key, &r.range_end, r.limit, r.revision,
-                    r.min_mod_revision, r.max_mod_revision,
-                    r.min_create_revision, r.max_create_revision,
-                );
+                let (kvs, more, count) = self.range_kvs(r);
                 let (kvs, count) = if r.count_only {
                     (vec![], count)
                 } else {
-                    let out = kvs.into_iter().map(|k| kv_to_proto(k, r.keys_only)).collect();
+                    let out = kvs
+                        .into_iter()
+                        .map(|k| kv_to_proto(k, r.keys_only))
+                        .collect();
                     (out, count)
                 };
                 crate::etcd::ResponseOp {
@@ -383,32 +404,40 @@ impl Store {
             }
             Some(Request::RequestPut(r)) => {
                 let (hdr, prev) = self.put(
-                    r.key.clone(), r.value.clone(), r.lease,
-                    r.prev_kv, r.ignore_value, r.ignore_lease,
+                    r.key.clone(),
+                    r.value.clone(),
+                    r.lease,
+                    r.prev_kv,
+                    r.ignore_value,
+                    r.ignore_lease,
                 );
                 crate::etcd::ResponseOp {
                     response: Some(Response::ResponsePut(crate::etcd::PutResponse {
-                        header:  Some(hdr),
+                        header: Some(hdr),
                         prev_kv: prev.map(|k| kv_to_proto(k, false)),
                     })),
                 }
             }
             Some(Request::RequestDeleteRange(r)) => {
-                let (hdr, deleted, prev_kvs) =
-                    self.delete_range(&r.key, &r.range_end, r.prev_kv);
+                let (hdr, deleted, prev_kvs) = self.delete_range(&r.key, &r.range_end, r.prev_kv);
                 crate::etcd::ResponseOp {
-                    response: Some(Response::ResponseDeleteRange(crate::etcd::DeleteRangeResponse {
-                        header:   Some(hdr),
-                        deleted,
-                        prev_kvs: prev_kvs.into_iter().map(|k| kv_to_proto(k, false)).collect(),
-                    })),
+                    response: Some(Response::ResponseDeleteRange(
+                        crate::etcd::DeleteRangeResponse {
+                            header: Some(hdr),
+                            deleted,
+                            prev_kvs: prev_kvs
+                                .into_iter()
+                                .map(|k| kv_to_proto(k, false))
+                                .collect(),
+                        },
+                    )),
                 }
             }
             Some(Request::RequestTxn(r)) => {
                 let (hdr, ok, resp) = self.txn(r);
                 crate::etcd::ResponseOp {
                     response: Some(Response::ResponseTxn(crate::etcd::TxnResponse {
-                        header:    Some(hdr),
+                        header: Some(hdr),
                         succeeded: ok,
                         responses: resp,
                     })),
@@ -440,12 +469,15 @@ impl Store {
             id
         };
         let actual_ttl = ttl.max(1);
-        self.leases.insert(actual_id, LeaseEntry {
-            id:          actual_id,
-            granted_ttl: actual_ttl,
-            deadline:    Instant::now() + Duration::from_secs(actual_ttl as u64),
-            keys:        vec![],
-        });
+        self.leases.insert(
+            actual_id,
+            LeaseEntry {
+                id: actual_id,
+                granted_ttl: actual_ttl,
+                deadline: Instant::now() + Duration::from_secs(actual_ttl as u64),
+                keys: vec![],
+            },
+        );
         (self.header(), actual_id, actual_ttl)
     }
 
@@ -468,9 +500,16 @@ impl Store {
         Some((self.header(), id, granted_ttl))
     }
 
-    pub fn lease_ttl(&self, id: i64, want_keys: bool) -> Option<(crate::etcd::ResponseHeader, i64, i64, Vec<Vec<u8>>)> {
+    pub fn lease_ttl(
+        &self,
+        id: i64,
+        want_keys: bool,
+    ) -> Option<(crate::etcd::ResponseHeader, i64, i64, Vec<Vec<u8>>)> {
         let le = self.leases.get(&id)?;
-        let remaining = le.deadline.saturating_duration_since(Instant::now()).as_secs() as i64;
+        let remaining = le
+            .deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs() as i64;
         let keys = if want_keys { le.keys.clone() } else { vec![] };
         // le is no longer used after this point; NLL ends the borrow.
         Some((self.header(), id, remaining, keys))
@@ -483,7 +522,8 @@ impl Store {
     // Returns the set of expired leases (caller should call lease_revoke on each).
     pub fn expired_leases(&self) -> Vec<i64> {
         let now = Instant::now();
-        self.leases.values()
+        self.leases
+            .values()
             .filter(|le| le.deadline <= now)
             .map(|le| le.id)
             .collect()
@@ -492,7 +532,8 @@ impl Store {
     // ── watch log ──────────────────────────────────────────────────────────
 
     pub fn events_since(&self, start_rev: i64) -> Vec<(i64, Vec<StoredEvent>)> {
-        self.log.iter()
+        self.log
+            .iter()
             .filter(|(rev, _)| *rev > start_rev)
             .cloned()
             .collect()
@@ -500,7 +541,10 @@ impl Store {
 
     fn emit(&mut self, rev: i64, events: Vec<StoredEvent>) {
         self.log.push((rev, events.clone()));
-        let _ = self.tx.send(BroadcastBatch { revision: rev, events });
+        let _ = self.tx.send(BroadcastBatch {
+            revision: rev,
+            events,
+        });
     }
 }
 
@@ -508,19 +552,19 @@ impl Store {
 
 pub fn kv_to_proto(k: Kv, keys_only: bool) -> crate::etcd::KeyValue {
     crate::etcd::KeyValue {
-        key:             k.key,
-        value:           if keys_only { vec![] } else { k.value },
+        key: k.key,
+        value: if keys_only { vec![] } else { k.value },
         create_revision: k.create_revision,
-        mod_revision:    k.mod_revision,
-        version:         k.version,
-        lease:           k.lease,
+        mod_revision: k.mod_revision,
+        version: k.version,
+        lease: k.lease,
     }
 }
 
 pub fn kv_to_event(ev: &StoredEvent) -> crate::etcd::Event {
     crate::etcd::Event {
-        r#type:  ev.ev_type,
-        kv:      Some(kv_to_proto(ev.kv.clone(), false)),
+        r#type: ev.ev_type,
+        kv: Some(kv_to_proto(ev.kv.clone(), false)),
         prev_kv: ev.prev_kv.as_ref().map(|k| kv_to_proto(k.clone(), false)),
     }
 }

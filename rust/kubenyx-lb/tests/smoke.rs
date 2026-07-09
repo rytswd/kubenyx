@@ -107,12 +107,18 @@ fn failover_and_drain() {
 
     let mut lb = Command::new(env!("CARGO_BIN_EXE_kubenyx-lb"))
         .args([
-            "--listen", "127.0.0.1:0",
-            "--backend", &format!("127.0.0.1:{}", b1.port),
-            "--backend", &format!("127.0.0.1:{}", b2.port),
-            "--probe-interval-ms", "50",
-            "--fail-threshold", "2",
-            "--drain-timeout-ms", "2000",
+            "--listen",
+            "127.0.0.1:0",
+            "--backend",
+            &format!("127.0.0.1:{}", b1.port),
+            "--backend",
+            &format!("127.0.0.1:{}", b2.port),
+            "--probe-interval-ms",
+            "50",
+            "--fail-threshold",
+            "2",
+            "--drain-timeout-ms",
+            "2000",
             "--probe-http",
         ])
         .stderr(Stdio::piped())
@@ -131,7 +137,10 @@ fn failover_and_drain() {
     });
 
     let listen = wait_for_line(&rx, "KUBENYX-LB-LISTEN ", Duration::from_secs(5));
-    let lb_addr = listen.trim_start_matches("KUBENYX-LB-LISTEN ").trim().to_string();
+    let lb_addr = listen
+        .trim_start_matches("KUBENYX-LB-LISTEN ")
+        .trim()
+        .to_string();
     wait_for_line(&rx, "KUBENYX-LB-READY", Duration::from_secs(5));
 
     // Both backends serve; round-robin should hit each within a few tries.
