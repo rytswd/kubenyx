@@ -1,0 +1,85 @@
+#+title: IPv6 Single-Stack Clusters
+#+state: ready
+#+FILETAGS: :network:core:
+
+* Summary
+
+A kubenyx cluster where every address is IPv6: node addresses, pod
+CIDRs, service CIDR, DNS VIP, apiserver advertise/SANs, inter-node
+routes. Single-stack only — dual-stack is out of scope (it doubles the
+option surface and the consumers that want v6 want it pure). The
+defaults stay IPv4 and byte-identical; v6 activates purely by
+declaring v6 values in the existing options.
+
+* Motivation
+
+The eval layer is v4-typed in exactly four places, and nothing else
+stands in the way: =lib/= CIDR math assumes dotted quads
+(=cidrHost=, =nodePodCidr= carving /24s), the network option defaults
+and firewall/NAT rules are v4-literal, inter-node routes call =ip
+route= with bare addresses, and address interpolations into URLs
+(etcd peers, controlPlaneEndpoint, LB backends) lack the =[...]=
+brackets v6 requires. Meanwhile the runtime layer is already
+family-agnostic: kubenyx-pki parses any =IpAddr= into SANs and
+autodetects v6, kube components take whatever family their flags
+carry, CoreDNS binds the node address whatever it is. This is
+eval-typing work, not architecture work.
+
+* Design
+
+** 1. Family-agnostic =lib/= CIDR math
+=cidrHost= and =nodePodCidr= grow v6 branches keyed on ":" in the
+CIDR. v6 carving: node N owns the Nth /64 of the cluster prefix
+(analogous to the Nth /24 of a v4 /16); =cidrHost= does hex arithmetic
+on the low hextets. Pure Nix, unit-testable via =lib.runTests= in the
+flake checks (eval-time, no VM).
+
+** 2. Options accept either family; defaults untouched
+=clusterCidr=, =serviceCidr=, =dns.address=, node =address= — same
+options, v6 values now legal. A single =family= derivation
+(=lib.isV6=) feeds every consumer. Assertion: no mixing — clusterCidr,
+serviceCidr and all node addresses must be one family (single-stack by
+construction, clear error otherwise).
+
+** 3. Family-switched dataplane (bridge mode works in v6 too)
+- conflist ipam ranges: the carved v6 node prefix.
+- NAT unit: =ip6= table/masquerade when v6 (test-cluster NAT66 — same
+  role as the v4 masquerade, egress convenience).
+- Firewall accepts: =ip6tables= when v6 (the NixOS firewall keeps
+  separate families).
+- =kubenyx-routes=: =ip -6 route replace= with bracket-free addresses
+  (ip(8) takes bare v6).
+External mode bypasses all of this as before.
+
+** 4. Bracketed interpolations
+Everywhere an address lands inside a URL or hostport —
+=controlPlaneEndpoint=, =internal.apiserverUrl=, etcd
+client/peer/initial-cluster URLs, kubenyx-lb =--backend=, the
+credential-handoff curl hints, apiserver =--advertise-address= (no
+bracket, flag takes bare) — route through one =klib.hostPort= helper
+that brackets v6. Audit every =:6443=/=:2379=/=:2380=/=:10125=
+interpolation site.
+
+** 5. Explicitly out of scope
+- Dual-stack (both families at once) — rejected for option-surface
+  cost; single-stack assertion instead.
+- v6 microVM variants (tap/bridge host plumbing is v4 today) — the
+  NixOS test driver legs cover v6; microVM v6 waits for a consumer.
+- NAT64/DNS64 edges — environment infrastructure, not cluster config;
+  =dns.extraCorefile= already accepts =dns64= blocks where needed.
+
+* Acceptance Criteria
+- =ipv6= leg: single-node, all-v6 (ULA node address, v6 cluster/service
+  CIDRs, bridge CNI): node Ready, pod Running with a v6 pod IP from
+  the carved prefix, service VIP curl from a pod, DNS resolution via
+  the v6 DNS VIP.
+- =ipv6-multi= leg: server + agent all-v6: both Ready, cross-node
+  pod-to-pod over the v6 static routes, agent joined via bracketed
+  v6 controlPlaneEndpoint.
+- Eval unit tests for the v6 CIDR math green (=nix flake check= level,
+  no VM).
+- Byte-identity: default (v4) config eval dump identical before/after
+  — the same 85-unit/97-etc proof as the byod work.
+
+* History
+- 2026-07-09: Graduated from byod.org §4 into its own doc; ready.
