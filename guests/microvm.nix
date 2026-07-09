@@ -130,6 +130,17 @@ lib.mkMerge [
     # fork"). No cost on ordinary boots.
     boot.kernelModules = [ "vmgenid" ];
 
+    # virtio_net loads in the INITRD, deterministically. Stage 2 must not
+    # depend on a udev coldplug replay to discover the NIC: virtio_net is
+    # not in the stock microVM initrd, the pci MODALIAS uevent fires before
+    # stage-2 udevd exists, and replaying the pci subsystem in stage 2 to
+    # compensate sets off a legacy-probe storm (thousands of trapped CMOS
+    # 0x70/0x71 I/O exits on an RTC-less firecracker — 3.5s boots became
+    # 32s). Forcing the module in stage 1 gives eth0 to the initrd udev,
+    # which records it initialized in /run/udev; the db survives
+    # switch-root, so networkd manages the link without any pci replay.
+    boot.initrd.kernelModules = [ "virtio_net" ];
+
     # ---- interactive console ---------------------------------------------------
     # Disposable host-only test VM: autolog the serial console in as root.
     # Without this there is no way in at all — root is locked by default and
@@ -280,16 +291,23 @@ lib.mkMerge [
         # top-level keys freely.
         systemd-random-seed.enable = false; # nothing to save/restore per boot
         systemd-networkd-persistent-state.enable = false; # volatile guest
-        # No stage-2 udev COLDPLUG replay: the microVM device set is static
-        # and tiny (one virtio disk, one NIC, serial ports); everything
-        # boot-critical is either handled by the initrd's own udev (store
-        # disk by-label mount) or arrives as a live uevent that the still-
-        # running stage-2 udevd processes normally. The trigger's only
-        # observable work here was re-plugging blkid/by-* symlink device
-        # units ~1.4s into stage 2 (systemd-analyze blame) and burning CPU
-        # inside the control-plane bring-up window on 4 vcpus. Live hotplug
-        # is unaffected.
-        systemd-udev-trigger.enable = false;
+        # Stage-2 udev COLDPLUG replay, SCOPED to net+tty. The full replay
+        # re-plugged blkid/by-* device units ~1.4s into stage 2 and burned
+        # CPU inside the control-plane bring-up window; the block work is
+        # dead weight (the store mount happens in stage 1). But a bare
+        # `enable = false` is a trap found the hard way: without ANY replay
+        # the NIC vanishes for stage 2 (see the virtio_net initrd note at
+        # boot.initrd.kernelModules) and host->guest networking goes dark
+        # while the in-guest markers still fire. With virtio_net now bound
+        # in stage 1, replay net (belt-and-braces udev-db initialization —
+        # networkd refuses links "pending udev initialization") and tty
+        # (activates dev-ttyS0.device so serial-getty doesn't sit in a 90s
+        # pending start job). Both sets are a handful of devices; the blkid
+        # storm stays gone and no pci replay means no legacy-probe storm.
+        systemd-udev-trigger.serviceConfig.ExecStart = [
+          ""
+          "${config.systemd.package}/bin/udevadm trigger --type=devices --subsystem-match=net --subsystem-match=tty --action=add"
+        ];
 
         # Post-restore wall-clock correction: a restored snapshot keeps
         # monotonic time (kvmclock state travels with the snapshot) but
