@@ -60,6 +60,18 @@ let
     builtins.toJSON (lib.recursiveUpdate kubeletSettings node.kubelet.settings)
   );
 
+  # Build-time pre-baked containerd store (prebake.org): the whole seed
+  # set — pause included — imported into a content store + bolt metadata
+  # inside the nix sandbox. The guest overlays it under
+  # /var/lib/containerd (tmpfs upper) and the seed unit disappears.
+  prebakedStore = pkgs.callPackage ../pkgs/prebake-store.nix {
+    containerd = cfg.packages.containerd;
+    images = [ pauseImage ] ++ node.seedImages;
+  };
+  # tmpfs-backed upper/work for the store overlay; /run is always tmpfs.
+  prebakeUpperDir = "/run/kubenyx/containerd-upper";
+  prebakeWorkDir = "/run/kubenyx/containerd-work";
+
   # Import nix-built images into containerd's k8s.io namespace so nothing
   # ever pulls from a registry. streamLayeredImage outputs an executable
   # that writes a docker archive to stdout; plain OCI/docker archive files
@@ -100,6 +112,22 @@ in
         plain OCI/docker archive files that ctr imports directly.
       '';
     };
+    prebakeImages = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Import the seed set (pause image + seedImages) into a containerd
+        content store at BUILD time and ship it in the closure; the guest
+        mounts it as the overlayfs lower layer under /var/lib/containerd
+        with a tmpfs upper, and the boot-time seed unit disappears
+        entirely. Layers unpack lazily into the tmpfs upper at first use,
+        via the `native` snapshotter (the store overlay itself rules out
+        overlayfs: an overlay upperdir cannot live on an overlayfs, and
+        the sandbox bake cannot produce snapshots anyway — see
+        pkgs/prebake-store.nix). Volatile/test-cluster oriented: every
+        container rootfs copy is tmpfs-backed RAM.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -132,7 +160,14 @@ in
           sandbox_image = pauseRef;
           containerd = {
             default_runtime_name = "crun";
-            snapshotter = "overlayfs";
+            # Prebaked stores force `native` (prebake.org): container
+            # snapshots land under /var/lib/containerd, which is then
+            # itself an overlay mount — and the kernel rejects an overlay
+            # upperdir that lives on an overlayfs, so the overlayfs
+            # snapshotter cannot operate there (probed in tests/prebake.nix).
+            # native's COW copies are tmpfs-backed in that setup. The
+            # default path stays overlayfs, byte-identical.
+            snapshotter = if node.prebakeImages then "native" else "overlayfs";
             runtimes.crun = {
               runtime_type = "io.containerd.runc.v2";
               options = {
@@ -150,7 +185,13 @@ in
         plugins."io.containerd.nri.v1.nri".disable = true;
       };
     };
-    systemd.services.containerd.serviceConfig.LimitNOFILE = 1048576;
+    systemd.services.containerd = {
+      serviceConfig.LimitNOFILE = 1048576;
+      # The baked store must be mounted before containerd opens its root
+      # (mkIf false contributes nothing — default path byte-identical).
+      after = lib.mkIf node.prebakeImages [ "kubenyx-prebaked-store.service" ];
+      requires = lib.mkIf node.prebakeImages [ "kubenyx-prebaked-store.service" ];
+    };
 
     # /opt/cni/bin stays a real directory so DaemonSet-shipped CNIs keep
     # working later; Nix plugins are symlinked in at boot.
@@ -169,7 +210,10 @@ in
       '';
     };
 
-    systemd.services.kubenyx-seed-images = {
+    # With a prebaked store every seed entry is already in the mounted
+    # content store — the unit disappears from the boot path entirely
+    # (mkIf false inside attrsOf removes the attribute, not just empties it).
+    systemd.services.kubenyx-seed-images = lib.mkIf (!node.prebakeImages) {
       description = "Import nix-built container images into containerd";
       wantedBy = [ "kubenyx.target" ];
       after = [ "containerd.service" ];
@@ -182,6 +226,34 @@ in
         RemainAfterExit = true;
         ExecStart = lib.getExe seedScript;
       };
+    };
+
+    # Prebaked-store mount (prebake.org): the immutable baked tree is the
+    # overlay lower, a tmpfs upper takes containerd's writes (bolt copies
+    # up on first open; lazy unpacks and container snapshots land here).
+    # A script unit rather than a fileSystems entry: the upper/work dirs
+    # must exist first and /run tmpfiles ordering under the early-boot
+    # microVM profile is not worth fighting.
+    systemd.services.kubenyx-prebaked-store = lib.mkIf node.prebakeImages {
+      description = "Mount the pre-baked containerd store (overlay, tmpfs upper)";
+      wantedBy = [ "kubenyx.target" ];
+      before = [ "containerd.service" ];
+      path = with pkgs; [
+        util-linux
+        coreutils
+      ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        mkdir -p /var/lib/containerd ${prebakeUpperDir} ${prebakeWorkDir}
+        if ! mountpoint -q /var/lib/containerd; then
+          mount -t overlay kubenyx-prebake \
+            -o lowerdir=${prebakedStore},upperdir=${prebakeUpperDir},workdir=${prebakeWorkDir} \
+            /var/lib/containerd
+        fi
+      '';
     };
 
     systemd.services.kubelet = {

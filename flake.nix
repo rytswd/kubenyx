@@ -595,6 +595,10 @@
           agent-add = runTest ./tests/agent-add.nix;
           external-cni = runTest ./tests/external-cni.nix;
           local-storage = runTest ./tests/local-storage.nix;
+          # Pre-baked image stores (prebake.org): correctness with
+          # prebake ON, and the >=90% import-elimination bench contract.
+          prebake = runTest ./tests/prebake.nix;
+          prebake-bench = runTest ./tests/prebake-bench.nix;
           ca-custody = runTest ./tests/ca-custody.nix;
           bench-vs-k3s = runTest ./tests/bench-vs-k3s.nix;
         }

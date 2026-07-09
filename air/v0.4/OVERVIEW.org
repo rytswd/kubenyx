@@ -33,3 +33,10 @@ untouched, and the single-node fast path must stay unit-identical.
   clusters (single + multi-node legs), 29 eval-level CIDR unit tests,
   v4 default path bit-identical (store-path-level). Pre-baked image
   stores remain the last staged item.
+- 2026-07-09: prebake.org implemented and complete — the milestone is
+  done. Build-time containerd stores (content + bolt, --no-unpack;
+  sandbox cannot mount, store normalization would corrupt snapshots),
+  overlay-mounted with tmpfs upper, native runtime snapshotter
+  (overlay-upper-on-overlayfs is kernel-rejected, probed in-guest);
+  99.7% of a ~300 MB set's import cost eliminated, cluster-ready
+  unregressed (paired A/B median −0.17 s), default path bit-identical.

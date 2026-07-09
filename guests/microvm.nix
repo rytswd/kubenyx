@@ -521,6 +521,10 @@ lib.mkMerge [
             "kubenyx-addons"
           ]
           ++ lib.optional (!isServer) "kubenyx-pki-fetch"
+          # Prebake variants only (prebake.org): the store mount gates
+          # containerd, so it must shed basic.target too. Conditional to
+          # avoid a stub unit on the default path (byte-identity).
+          ++ lib.optional cfg.node.prebakeImages "kubenyx-prebaked-store"
         )
         (_: {
           unitConfig.DefaultDependencies = lib.mkForce false;

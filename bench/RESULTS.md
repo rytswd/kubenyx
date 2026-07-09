@@ -7,6 +7,44 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-09 — Pre-baked image stores: 99.7% of import cost becomes a mount
+
+air/v0.4/prebake.org implemented — the last v0.4 item. The seed set
+(pause + seedImages, both formats) is imported into a containerd
+content store at BUILD time (`pkgs/prebake-store.nix`: containerd
+2.3.1 `--root $out` in the sandbox, CRI/runtime plugins disabled,
+sockets owned via config uid/gid) and overlay-mounted under
+`/var/lib/containerd` with a tmpfs upper; `kubenyx-seed-images`
+disappears from the boot path entirely.
+
+Two forced calls, both probed rather than assumed:
+
+- **The bake is `--no-unpack`** (content blobs + bolt metadata, no
+  snapshots): unpacking needs a bind mount even for the native
+  snapshotter and mount(2) is EPERM in the build userns (probe kept in
+  the doc); nix store normalization (0444/0555, uid 0) would corrupt
+  snapshot dirs anyway. Blobs are opaque tars — immune.
+- **The guest runs the `native` snapshotter when prebake is on**: the
+  kernel rejects an overlay upperdir living on an overlayfs — exactly
+  what the overlayfs snapshotter would create under the mounted store
+  (in-guest failed-mount probe in `tests/prebake.nix`). Layers unpack
+  lazily at first use into the tmpfs upper (CRI unpacks non-unpacked
+  images on sync; pods run from baked images of both seed formats).
+
+| Leg | Proves | Wall |
+|---|---|---|
+| `prebake-bench` | 10×30 MB AES-CTR layers (incompressible): in-guest import wall 23.304 s vs prebaked mount 0.063 s — **99.7% eliminated** (contract ≥90%) | 38.5 s |
+| `prebake` | seed unit ABSENT; baked refs listed with zero imports; pods from baked images; unpack lands in tmpfs upper; overlay-upper probe fails as recorded | 35.3 s |
+| `local-storage` | prebake OFF unchanged (seeds both formats at boot) | 84.6 s |
+
+Gate: default-config eval dump (85 unit texts + built-unit store
+paths, 97 etc sources, tmpfiles) identical; microvm-firecracker runner
+**bit-identical store path** base vs implementation. Cluster-ready
+unregressed by the overlay: interleaved firecracker A/B, 6 pairs,
+paired median **−0.17 s with prebake ON** (on faster in 4/6 pairs —
+the vanished seed unit offsets the mount + native COW; raw medians
+7.98/8.08 s sit inside the box's bimodal envelope).
+
 ## 2026-07-09 — IPv6 single-stack: all-v6 clusters, v4 path bit-identical
 
 air/v0.4/ipv6.org implemented in one campaign. The sizing insight

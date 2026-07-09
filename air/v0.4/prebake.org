@@ -1,5 +1,5 @@
 #+title: Pre-Baked Image Stores
-#+state: ready
+#+state: complete
 #+FILETAGS: :node:core:
 
 * Summary
@@ -46,3 +46,50 @@ call.
 
 * History
 - 2026-07-09: Graduated from byod.org §4 (last staged item); ready.
+- 2026-07-09: Implemented (=pkgs/prebake-store.nix=, =modules/node.nix=,
+  =guests/microvm.nix=). The bake: containerd 2.3.1 with =--root $out=
+  in the sandbox, CRI/runtime/task/NRI plugins disabled, grpc+ttrpc
+  sockets owned via config uid/gid (chown-to-root is EINVAL in the
+  build userns). =kubenyx.node.prebakeImages= (default false) mounts
+  the baked tree as overlay lower under =/var/lib/containerd= with a
+  tmpfs upper (=/run/kubenyx/containerd-{upper,work}=) via a oneshot
+  gating containerd; the seed unit is ABSENT with prebake on (mkIf
+  removes it from attrsOf), and vanishing is total since the bake
+  covers the whole set.
+- 2026-07-09: Snapshotter call, decided empirically as required.
+  (1) Baking SNAPSHOTS is impossible in the sandbox: unpack via the
+  walking differ needs a bind mount even for native — mount(2) is
+  EPERM for the unprivileged build user ("failed to mount ... fstype:
+  bind ... operation not permitted", probed with an import minus
+  =--no-unpack=). Store normalization would corrupt them anyway
+  (every baked file forced 0444/0555, uid 0 — a native snapshot is
+  plain dirs, so 1777 tmp dirs and non-root ownership inside images
+  would be destroyed). The bake therefore imports =--no-unpack=:
+  content blobs + bolt metadata only, both immune to normalization.
+  (2) The guest RUNTIME runs =native= when prebake is on: the kernel
+  rejects an overlay upperdir that itself lives on an overlayfs, which
+  is exactly what the overlayfs snapshotter would create under the
+  mounted store — probed in-guest in =tests/prebake.nix= (the mount
+  fails), not assumed. Layers unpack lazily at first use (CRI unpacks
+  non-unpacked images on image-store sync — proven by pods running
+  from baked images of both seed formats) and every snapshot copy
+  lands in the tmpfs upper. Default path keeps overlayfs untouched.
+- 2026-07-09: Acceptance closed, all three criteria:
+  - Bench (=checks.prebake-bench=, in-guest walls from each guest's
+    systemd monotonic clock): 10 distinct 30 MB AES-CTR layers
+    (~300 MB, incompressible); boot-time import wall 23.304 s vs
+    prebaked overlay mount 0.063 s — 99.7% of the import cost
+    eliminated (contract ≥90%). Cluster-ready unregressed by the
+    overlay: interleaved firecracker A/B (6 pairs, alternating order,
+    in-guest KUBENYX-CLUSTER-READY uptime) paired median −0.17 s
+    with prebake ON (faster in 4/6 pairs — the vanished seed unit
+    offsets the mount).
+  - Correctness: =local-storage= green with prebake OFF (84.55 s,
+    seeds both formats at boot); =tests/prebake.nix= green with
+    prebake ON (35.29 s): seed unit absent, all three baked refs
+    listed straight from the store, pods run from baked images
+    (executable + archive formats), unpack lands in the tmpfs upper.
+  - Byte-identity, prebake off: default-config eval dump (85 systemd
+    unit texts + built-unit store paths, 97 environment.etc sources,
+    tmpfiles rules) identical; the microvm-firecracker runner is a
+    bit-identical store path base vs implementation. Complete.
