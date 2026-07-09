@@ -199,6 +199,14 @@ lib.mkMerge [
     # ---- boot leanness -------------------------------------------------------
     documentation.enable = false;
     nix.enable = false; # guests are built, never build
+    # TERM=dumb: systemd 260 probes the console's capabilities with DCS/CSI
+    # escape queries (termcap name, window size, cursor position) and blocks
+    # on replies that a mute VMM serial console never sends — measured ~1.0s
+    # stalled in the initrd manager init AND ~1.0s again at the stage-2
+    # switch-root exec (host-timestamped console, perf governor). A dumb
+    # terminal is never queried. Costs status-line colors on the interactive
+    # console — nothing else; these guests are benchmarked, not admired.
+    boot.kernelParams = [ "TERM=dumb" ];
     # No DHCP wait: addresses are static per variant; boot must not block on
     # network-online for anything but the (instant) declared-address PKI.
     networking.useDHCP = false;
