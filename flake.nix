@@ -562,6 +562,26 @@
             );
         in
         {
+          # Eval-level unit tests for lib/ CIDR math (ipv6.org §1): pure
+          # lib.runTests at flake-check level, no VM. runTests returns the
+          # list of failures — an empty list is green.
+          lib-tests =
+            let
+              failures = import ./tests/lib-tests.nix { inherit (nixpkgs) lib; };
+            in
+            pkgs.runCommand "kubenyx-lib-tests"
+              {
+                failures = builtins.toJSON failures;
+                passAsFile = [ "failures" ];
+              }
+              ''
+                if [ "$(cat "$failuresPath")" != "[]" ]; then
+                  echo "kubenyx lib tests failed:" >&2
+                  cat "$failuresPath" >&2
+                  exit 1
+                fi
+                touch $out
+              '';
           single-node = runTest ./tests/single-node.nix;
           single-node-etcd = runTest ./tests/single-node-etcd.nix;
           multi-node = runTest ./tests/multi-node.nix;

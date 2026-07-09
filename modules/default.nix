@@ -14,10 +14,11 @@ let
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = ''
-          Routable IP of this node. May stay null on a single-node cluster
-          (the PKI generator and components autodetect the default-route
-          address at runtime); multi-node clusters must set it — static
-          routes and worker kubeconfigs need concrete peers.
+          Routable IP of this node, either family (single-stack: must match
+          the cluster/service CIDR family). May stay null on a single-node
+          cluster (the PKI generator and components autodetect the
+          default-route address at runtime); multi-node clusters must set
+          it — static routes and worker kubeconfigs need concrete peers.
         '';
       };
       index = lib.mkOption {
@@ -176,9 +177,11 @@ in
         internal = true;
         # `or` fallback keeps evaluation alive long enough for the friendly
         # assertion below to fire when nodeName is missing from nodes.
-        default = klib.nodePodCidr config.kubenyx.network.clusterCidr 24 (
-          (cfg.nodes.${cfg.nodeName} or { index = 0; }).index
-        );
+        # Family-aware carve (ipv6.org §1-2): the Nth /24 of a v4 cluster
+        # CIDR (unchanged), the Nth /64 of a v6 cluster prefix.
+        default = klib.nodePodCidr config.kubenyx.network.clusterCidr (
+          if klib.isV6 config.kubenyx.network.clusterCidr then 64 else 24
+        ) (cfg.nodes.${cfg.nodeName} or { index = 0; }).index;
         description = "Pod subnet owned by this node.";
       };
       tools = lib.mkOption {
@@ -244,13 +247,32 @@ in
             message = "kubenyx: multi-node clusters must set an address for every node";
           }
           {
-            # Node pod /24s must stay inside clusterCidr: index < 2^(24 - prefix).
+            # Single-stack by construction (ipv6.org §2): clusterCidr,
+            # serviceCidr and every declared node address must be one
+            # family. Dual-stack is out of scope; mixing is an error here,
+            # not a runtime surprise.
             assertion =
               let
-                prefix = klib.cidrPrefix config.kubenyx.network.clusterCidr;
+                v6 = klib.isV6 cfg.network.clusterCidr;
+                addresses = lib.filter (a: a != null) (map (n: n.address) (lib.attrValues cfg.nodes));
               in
-              prefix <= 24 && lib.all (n: n.index < klib.pow2 (24 - prefix)) (lib.attrValues cfg.nodes);
-            message = "kubenyx: a node index places its pod /24 outside network.clusterCidr (prefix must be <= 24 and index < 2^(24 - prefix))";
+              klib.isV6 cfg.network.serviceCidr == v6 && lib.all (a: klib.isV6 a == v6) addresses;
+            message = "kubenyx: single-stack only — network.clusterCidr, network.serviceCidr and every kubenyx.nodes.<name>.address must share one address family (all IPv4 or all IPv6); dual-stack is not supported";
+          }
+          {
+            # Node pod subnets must stay inside clusterCidr. The carve is
+            # /24 from a v4 prefix, /64 from a v6 prefix; index < 2^(carve
+            # - prefix). The `min 8` is exact, not a cap: node indices are
+            # typed 0-255, so any headroom of 8+ bits already admits every
+            # legal index (and pow2 of large v6 headroom would overflow).
+            assertion =
+              let
+                prefix = klib.cidrPrefix cfg.network.clusterCidr;
+                carve = if klib.isV6 cfg.network.clusterCidr then 64 else 24;
+              in
+              prefix <= carve
+              && lib.all (n: n.index < klib.pow2 (lib.min 8 (carve - prefix))) (lib.attrValues cfg.nodes);
+            message = "kubenyx: a node index places its pod subnet outside network.clusterCidr (v4: prefix <= 24, index < 2^(24 - prefix); v6: prefix <= 64, index < 2^(64 - prefix))";
           }
         ];
 

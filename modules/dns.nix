@@ -48,7 +48,11 @@ in
     address = lib.mkOption {
       type = lib.types.str;
       default = "169.254.20.10";
-      description = "Link-local address CoreDNS binds on every node; kubelet's clusterDNS.";
+      description = ''
+        Link-local address CoreDNS binds on every node; kubelet's
+        clusterDNS. Either family — v6 clusters set a v6 address here
+        (e.g. a ULA), since v6-only pods cannot reach the v4 default.
+      '';
     };
     upstream = lib.mkOption {
       type = lib.types.nullOr (lib.types.listOf lib.types.str);

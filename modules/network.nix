@@ -100,12 +100,20 @@ in
     clusterCidr = lib.mkOption {
       type = lib.types.str;
       default = "10.244.0.0/16";
-      description = "Pod network; node N owns the Nth /24.";
+      description = ''
+        Pod network, either family (single-stack: must match serviceCidr
+        and the node addresses). Node N owns the Nth /24 of a v4 CIDR, the
+        Nth /64 of a v6 prefix.
+      '';
     };
     serviceCidr = lib.mkOption {
       type = lib.types.str;
       default = "10.96.0.0/16";
-      description = "Service ClusterIP range; .1 is the apiserver, .10 the conventional DNS IP.";
+      description = ''
+        Service ClusterIP range, either family (single-stack: must match
+        clusterCidr and the node addresses); host 1 is the apiserver,
+        host 10 the conventional DNS IP.
+      '';
     };
     clusterDomain = lib.mkOption {
       type = lib.types.str;
