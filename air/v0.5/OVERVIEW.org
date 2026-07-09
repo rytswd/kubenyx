@@ -19,3 +19,8 @@ keep the whole 15-leg matrix green).
 * History
 - 2026-07-09: Milestone opened as part of the "complete everything"
   campaign (prebake + perf + cleanliness + full sweep).
+- 2026-07-09: Milestone complete: perf-floor (7.9s -> 3.4s cold boot,
+  ranked attack with paired A/B per keep, bimodality explained as
+  host CPU contention with an enforced bench contract) and cp-growth
+  (learner-based declarative CP scale-out, server-add leg 156s) both
+  landed; 18-leg matrix green.

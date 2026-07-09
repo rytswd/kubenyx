@@ -1,5 +1,5 @@
 #+title: Performance Floor — Profile, Attack, Prove
-#+state: ready
+#+state: complete
 #+FILETAGS: :core:
 
 * Summary
@@ -123,3 +123,10 @@ fast path A/B-neutral.
   Legs green at the final rev: lib-tests, single-node 30.9 s, ipv6
   39.9 s, multi-server 22.0 s; snap cycle ×3 median 35.2 ms
   (21.3–37.4).
+- 2026-07-09: Complete. Final sweep at the campaign tip: all 18 legs
+  green (incl. server-add 156s); cold boot median 3.425s controlled /
+  3.60s uncontrolled-idle (contract: bench/microvm-boot.sh — governor
+  + idleness gate + cpuset pin, worth ~0.16s); recreation 32.8ms;
+  mesh launch 4.24s at BOTH 3 and 7 nodes; mesh recreation 46/56ms
+  (3/7 nodes); k3s ratio 0.76. Every acceptance bullet of this doc is
+  satisfied with instruments cited in bench/RESULTS.md.
