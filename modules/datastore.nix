@@ -16,6 +16,7 @@ let
   ds = cfg.datastore;
   pki = cfg.internal.pkiDir;
   wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
+  klib = import ../lib { inherit lib; };
 
   kineSock = "/run/kubenyx/kine/kine.sock";
   etcdMemSock = "/run/kubenyx/etcd-mem/etcd-mem.sock";
@@ -40,9 +41,13 @@ let
   # with a diff, not where the member list comes from.
   #   Single server keeps today's loopback-only posture, flag-identical.
   etcdName = if multiServer then cfg.nodeName else "kubenyx";
+  # hostPort brackets v6 addresses in the peer URLs (ipv6.org §4); v4
+  # renders byte-identically.
   etcdInitialCluster =
     if multiServer then
-      lib.concatStringsSep "," (lib.mapAttrsToList (n: v: "${n}=https://${v.address}:2380") servers)
+      lib.concatStringsSep "," (
+        lib.mapAttrsToList (n: v: "${n}=https://${klib.hostPort v.address 2380}") servers
+      )
     else
       "kubenyx=https://127.0.0.1:2380";
 
@@ -261,12 +266,17 @@ in
                 "--listen-client-urls"
                 (
                   if multiServer then
-                    "https://127.0.0.1:2379,https://${thisNode.address}:2379"
+                    "https://127.0.0.1:2379,https://${klib.hostPort thisNode.address 2379}"
                   else
                     "https://127.0.0.1:2379"
                 )
                 "--advertise-client-urls"
-                (if multiServer then "https://${thisNode.address}:2379" else "https://127.0.0.1:2379")
+                (
+                  if multiServer then
+                    "https://${klib.hostPort thisNode.address 2379}"
+                  else
+                    "https://127.0.0.1:2379"
+                )
                 "--client-cert-auth"
                 "--trusted-ca-file"
                 "${pki}/ca.crt"
@@ -280,9 +290,19 @@ in
                 # address on multi-server — see pki.nix), peer client-cert
                 # auth on.
                 "--listen-peer-urls"
-                (if multiServer then "https://${thisNode.address}:2380" else "https://127.0.0.1:2380")
+                (
+                  if multiServer then
+                    "https://${klib.hostPort thisNode.address 2380}"
+                  else
+                    "https://127.0.0.1:2380"
+                )
                 "--initial-advertise-peer-urls"
-                (if multiServer then "https://${thisNode.address}:2380" else "https://127.0.0.1:2380")
+                (
+                  if multiServer then
+                    "https://${klib.hostPort thisNode.address 2380}"
+                  else
+                    "https://127.0.0.1:2380"
+                )
                 "--initial-cluster"
                 etcdInitialCluster
               ]

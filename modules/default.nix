@@ -156,13 +156,15 @@ in
         # TLS verification holds through the LB); other agents dial the
         # declared endpoint. This one default is the whole "extend, don't
         # fork" wiring: kubenyx-pki renders every agent kubeconfig from it.
+        # hostPort brackets a v6 endpoint (ipv6.org §4); v4 and DNS-name
+        # endpoints render exactly as before.
         default =
           if cfg.role == "server" then
             "https://127.0.0.1:6443"
           else if cfg.lb.enable then
             "https://127.0.0.1:${toString cfg.lb.port}"
           else
-            "https://${cfg.controlPlaneEndpoint}:6443";
+            "https://${klib.hostPort cfg.controlPlaneEndpoint 6443}";
         description = "URL local components use to reach the apiserver.";
       };
       apiserverServiceIp = lib.mkOption {

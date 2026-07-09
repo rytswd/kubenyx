@@ -19,6 +19,12 @@ let
 
   bridgeCni = net.cni == "bridge";
 
+  # Family switch (ipv6.org §3): one derivation feeds every dataplane
+  # consumer. The single-stack assertion in default.nix guarantees the
+  # cluster/service CIDRs and node addresses agree, so keying everything
+  # on clusterCidr is safe.
+  v6 = klib.isV6 net.clusterCidr;
+
   conflist = builtins.toJSON {
     cniVersion = "1.0.0";
     name = "kubenyx";
@@ -62,16 +68,20 @@ let
   );
 
   # NAT only traffic that actually leaves the cluster: pod-to-pod and
-  # pod-to-service must keep their source addresses.
+  # pod-to-service must keep their source addresses. Family-switched
+  # (ipv6.org §3): an ip6 table with ip6 matches when the cluster is v6
+  # (test-cluster NAT66, same egress-convenience role as the v4
+  # masquerade); the v4 text stays byte-identical.
+  natFam = if v6 then "ip6" else "ip";
   natRules = pkgs.writeText "kubenyx-nat.nft" ''
-    table ip kubenyx-nat
-    flush table ip kubenyx-nat
-    table ip kubenyx-nat {
+    table ${natFam} kubenyx-nat
+    flush table ${natFam} kubenyx-nat
+    table ${natFam} kubenyx-nat {
       chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        ip saddr ${net.clusterCidr} ip daddr ${net.clusterCidr} return
-        ip saddr ${net.clusterCidr} ip daddr ${net.serviceCidr} return
-        ip saddr ${net.clusterCidr} masquerade
+        ${natFam} saddr ${net.clusterCidr} ${natFam} daddr ${net.clusterCidr} return
+        ${natFam} saddr ${net.clusterCidr} ${natFam} daddr ${net.serviceCidr} return
+        ${natFam} saddr ${net.clusterCidr} masquerade
       }
     }
   '';
@@ -142,6 +152,16 @@ in
     # containerd loads the lexically first conflist it finds.
     environment.etc."cni/net.d/10-kubenyx.conflist" = lib.mkIf bridgeCni { text = conflist; };
 
+    # v6 twin of node.nix's net.ipv4.ip_forward (ipv6.org §3): routing
+    # pod traffic off cni0 needs v6 forwarding. `default` too — cni0 and
+    # the veths are created after boot and inherit conf/default, not
+    # conf/all. Family-gated so a v4 cluster's sysctl file stays
+    # byte-identical.
+    boot.kernel.sysctl = lib.mkIf v6 {
+      "net.ipv6.conf.all.forwarding" = 1;
+      "net.ipv6.conf.default.forwarding" = 1;
+    };
+
     networking.firewall = lib.mkIf net.openFirewall {
       allowedTCPPorts = [
         10250
@@ -164,18 +184,25 @@ in
       # arrives on whatever interface that CNI creates, so the same
       # accepts key on the pod source addresses alone. The external CNI
       # manages any further openings itself.
+      # ipv6.org §3: the NixOS firewall keeps separate families, so a v6
+      # cluster's pod-source accepts go through ip6tables (host prefix
+      # /128); the v4 command text is untouched.
       extraCommands =
+        let
+          ipt = if v6 then "ip6tables" else "iptables";
+          host = if v6 then "128" else "32";
+        in
         if bridgeCni then
           ''
-            iptables -A nixos-fw -i cni0 -s ${net.clusterCidr} -p tcp --dport 6443 -j nixos-fw-accept
-            iptables -A nixos-fw -i cni0 -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p udp --dport 53 -j nixos-fw-accept
-            iptables -A nixos-fw -i cni0 -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p tcp --dport 53 -j nixos-fw-accept
+            ${ipt} -A nixos-fw -i cni0 -s ${net.clusterCidr} -p tcp --dport 6443 -j nixos-fw-accept
+            ${ipt} -A nixos-fw -i cni0 -s ${net.clusterCidr} -d ${cfg.dns.address}/${host} -p udp --dport 53 -j nixos-fw-accept
+            ${ipt} -A nixos-fw -i cni0 -s ${net.clusterCidr} -d ${cfg.dns.address}/${host} -p tcp --dport 53 -j nixos-fw-accept
           ''
         else
           ''
-            iptables -A nixos-fw -s ${net.clusterCidr} -p tcp --dport 6443 -j nixos-fw-accept
-            iptables -A nixos-fw -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p udp --dport 53 -j nixos-fw-accept
-            iptables -A nixos-fw -s ${net.clusterCidr} -d ${cfg.dns.address}/32 -p tcp --dport 53 -j nixos-fw-accept
+            ${ipt} -A nixos-fw -s ${net.clusterCidr} -p tcp --dport 6443 -j nixos-fw-accept
+            ${ipt} -A nixos-fw -s ${net.clusterCidr} -d ${cfg.dns.address}/${host} -p udp --dport 53 -j nixos-fw-accept
+            ${ipt} -A nixos-fw -s ${net.clusterCidr} -d ${cfg.dns.address}/${host} -p tcp --dport 53 -j nixos-fw-accept
           '';
     };
 
@@ -186,7 +213,7 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
         ExecStart = "${pkgs.nftables}/bin/nft -f ${natRules}";
-        ExecStop = "${pkgs.nftables}/bin/nft delete table ip kubenyx-nat";
+        ExecStop = "${pkgs.nftables}/bin/nft delete table ${natFam} kubenyx-nat";
       };
     };
 
@@ -208,12 +235,18 @@ in
       # network-online.target before the node address is on the interface,
       # and `ip route ... via <peer>` needs the on-link source address to
       # exist. On hosts where wait-online is real, the first attempt wins.
+      # ipv6.org §3: family-aware carve (the Nth /64 of a v6 prefix, the
+      # Nth /24 of a v4 one) and `ip -6 route replace` with bracket-free
+      # addresses — ip(8) takes bare v6. The v4 command text is unchanged.
       script = ''
         for attempt in $(seq 1 150); do
           if ${
             lib.concatStringsSep " \\\n             && " (
               lib.mapAttrsToList (
-                name: peer: "ip route replace ${klib.nodePodCidr net.clusterCidr 24 peer.index} via ${peer.address}"
+                name: peer:
+                "ip ${lib.optionalString v6 "-6 "}route replace ${
+                  klib.nodePodCidr net.clusterCidr (if v6 then 64 else 24) peer.index
+                } via ${peer.address}"
               ) peers
             )
           }; then

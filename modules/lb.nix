@@ -23,11 +23,13 @@
 let
   cfg = config.kubenyx;
   pki = cfg.internal.pkiDir;
+  klib = import ../lib { inherit lib; };
   servers = lib.filterAttrs (_: n: n.role == "server") cfg.nodes;
   serverCount = lib.length (lib.attrNames servers);
   # Name-sorted (attrValues follows attrNames order): every agent carries
   # the same list; spreading comes from the LB's round-robin cursor.
-  backends = map (n: "${n.address}:6443") (lib.attrValues servers);
+  # hostPort brackets v6 backends (ipv6.org §4); v4 is byte-identical.
+  backends = map (n: klib.hostPort n.address 6443) (lib.attrValues servers);
 in
 {
   options.kubenyx.lb = {

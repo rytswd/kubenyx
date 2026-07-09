@@ -18,6 +18,11 @@
 let
   cfg = config.kubenyx;
   isServer = cfg.role == "server";
+  # v6 clusters need [brackets] wherever an address lands in a URL or
+  # hostport (ipv6.org §4); klib.hostPort leaves v4/DNS names bare, so
+  # these guests render byte-identically today (microVM host plumbing is
+  # still v4 — ipv6.org §5).
+  klib = import ../lib { inherit lib; };
 
   # ---- mesh membership (air/v0.2/multinode-microvm.org) ---------------------
   # Everything below derives from kubenyx.nodes; on a single-node cluster
@@ -316,8 +321,8 @@ lib.mkMerge [
                 # the host — the address is variant-specific, so print it
                 # rather than making people memorize it.
                 echo "KUBENYX-KUBECONFIG curl -s ${
-                  config.kubenyx.nodes.${config.kubenyx.nodeName}.address
-                }:10124 > kubenyx.kubeconfig" > /dev/console
+                  klib.hostPort config.kubenyx.nodes.${config.kubenyx.nodeName}.address 10124
+                } > kubenyx.kubeconfig" > /dev/console
               ''
             else
               # Agent flavor: no local apiserver and no admin identity — probe
@@ -332,7 +337,7 @@ lib.mkMerge [
                 probe() {
                   curl -s --max-time 5 \
                     --cacert "$pki/ca.crt" --cert "$pki/kubelet.crt" --key "$pki/kubelet.key" \
-                    "https://${cfg.controlPlaneEndpoint}:6443/api/v1/nodes/$node" 2>/dev/null \
+                    "https://${klib.hostPort cfg.controlPlaneEndpoint 6443}/api/v1/nodes/$node" 2>/dev/null \
                     | tr -d ' \n' | grep -q '"type":"Ready","status":"True"'
                 }
                 while ! probe; do
@@ -381,8 +386,8 @@ lib.mkMerge [
               printf 'HTTP/1.0 200 OK\r\nContent-Type: application/yaml\r\nConnection: close\r\n\r\n'
               exec ${pkgs.gnused}/bin/sed \
                 's|https://127.0.0.1:6443|https://${
-                  config.kubenyx.nodes.${config.kubenyx.nodeName}.address
-                }:6443|' \
+                  klib.hostPort config.kubenyx.nodes.${config.kubenyx.nodeName}.address 6443
+                }|' \
                 /var/lib/kubenyx/kubeconfigs/admin.kubeconfig
             '';
           };
@@ -453,7 +458,7 @@ lib.mkMerge [
             # Idempotent: tmpfs makes every boot fresh, but restarts happen.
             # (if-form, not `&& exit 0`: the script runs under set -e.)
             if [ -s "$pki/kubelet.key" ]; then exit 0; fi
-            url=http://${cfg.controlPlaneEndpoint}:${toString (agentPort cfg.nodeName)}
+            url=http://${klib.hostPort cfg.controlPlaneEndpoint (agentPort cfg.nodeName)}
             deadline=$(( $(cut -d. -f1 /proc/uptime) + 90 ))
             while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
               if curl -sf --connect-timeout 2 --max-time 5 "$url" -o /tmp/pki-bundle.tar; then

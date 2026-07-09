@@ -13,6 +13,11 @@ let
   dns = cfg.dns;
   kc = cfg.internal.kubeconfigDir;
   wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
+  klib = import ../lib { inherit lib; };
+  dnsV6 = klib.isV6 dns.address;
+  # CoreDNS's ready endpoint is a Go host:port — v6 needs brackets
+  # (ipv6.org §4); v4 renders the exact same string as before.
+  readyEndpoint = klib.hostPort dns.address 8181;
 
   upstream =
     if dns.upstream == null then cfg.internal.hostResolvConf else lib.concatStringsSep " " dns.upstream;
@@ -21,7 +26,7 @@ let
     .:53 {
         bind ${dns.address}
         errors
-        ready ${dns.address}:8181
+        ready ${readyEndpoint}
         kubernetes ${cfg.network.clusterDomain} in-addr.arpa ip6.arpa {
             kubeconfig ${kc}/coredns.kubeconfig
             pods insecure
@@ -80,9 +85,12 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
       };
+      # v6 (ipv6.org §3): host prefix is /128 and DAD is skipped — a dummy
+      # interface has no neighbors to probe, and CoreDNS starting against a
+      # tentative address fails its bind. The v4 command text is unchanged.
       script = ''
         ip link add kubenyx-dns0 type dummy 2>/dev/null || true
-        ip addr replace ${dns.address}/32 dev kubenyx-dns0
+        ip addr replace ${dns.address}/${if dnsV6 then "128" else "32"}${lib.optionalString dnsV6 " nodad"} dev kubenyx-dns0
         ip link set kubenyx-dns0 up
       '';
     };
@@ -103,7 +111,7 @@ in
         Type = "notify";
         NotifyAccess = "all";
         TimeoutStartSec = 60;
-        ExecStart = "${wrap} --url http://${dns.address}:8181/ready -- ${lib.getExe' cfg.packages.coredns "coredns"} -conf ${corefile}";
+        ExecStart = "${wrap} --url http://${readyEndpoint}/ready -- ${lib.getExe' cfg.packages.coredns "coredns"} -conf ${corefile}";
         Restart = "always";
         RestartSec = 2;
         SuccessExitStatus = "143"; # notify-wrapper exit on orderly stop
