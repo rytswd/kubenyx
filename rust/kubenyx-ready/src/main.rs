@@ -7,6 +7,14 @@
 //! probe became 10ms and zero forks — readiness is detected within
 //! milliseconds of the endpoint turning healthy, which compounds across
 //! every ordered unit on the boot path.
+//!
+//! `--wait` (no `--` command) turns the wrapper into a blocking probe:
+//! poll the URL every 10ms, exit 0 on the first 2xx. Built for
+//! ExecStartPre= gates where the needed predicate is an API response,
+//! not a unit state — e.g. "the RBAC authorizer's informers have caught
+//! up far enough to admit THIS principal to THIS resource", which no
+//! amount of After= ordering can express. The caller's TimeoutStartSec
+//! bounds the wait.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -226,6 +234,7 @@ fn main() {
     let mut cert = None;
     let mut key = None;
     let mut insecure = false;
+    let mut wait_only = false;
     let mut cmd_at = None;
     let mut i = 0;
     while i < args.len() {
@@ -250,6 +259,10 @@ fn main() {
                 insecure = true;
                 i += 1;
             }
+            "--wait" => {
+                wait_only = true;
+                i += 1;
+            }
             "--" => {
                 cmd_at = Some(i + 1);
                 break;
@@ -258,6 +271,16 @@ fn main() {
         }
     }
     let url = url.unwrap_or_else(|| die("--url is required"));
+    if wait_only {
+        if cmd_at.is_some() {
+            die("--wait takes no -- command");
+        }
+        let probe = build_probe(&url, cacert.as_deref(), cert.as_deref(), key.as_deref(), insecure);
+        while !probe.check() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        exit(0);
+    }
     let cmd_at = cmd_at.unwrap_or_else(|| die("missing -- command"));
     if cmd_at >= args.len() {
         die("empty command after --");

@@ -247,6 +247,34 @@ in
         Type = "notify";
         NotifyAccess = "all";
         TimeoutStartSec = 120;
+        # Without this gate kcm crashed on its FIRST start of every boot
+        # (12/12 profiled boots) and rejoined RestartSec=2s later: its
+        # fatal startup read of the extension-apiserver-authentication
+        # configmap raced the apiserver's RBAC *authorizer cache*. After=
+        # apiserver only orders on /readyz, and /readyz (which includes
+        # the rbac/bootstrap-roles poststarthook) proves the roles are in
+        # STORAGE — not that the authorizer's informers have seen them.
+        # Measured on a live boot: /readyz green at 2.453s monotonic, kcm
+        # denied at 2.810s ("clusterrole cluster-admin not found"),
+        # restart at 5.07s. The informer lag is real boot-time watch
+        # latency, the same pathology the report probe hit. The gate
+        # polls THE EXACT REQUEST kcm dies on — same resource, same
+        # client identity — every 10ms, fork-free, so kcm starts within
+        # ~10ms of the authorizer being able to admit it, and the crash
+        # (plus its 200ms of CPU inside the convergence window and the
+        # [FAILED] console noise) leaves the boot.
+        ExecStartPre = lib.concatStringsSep " " [
+          wrap
+          "--wait"
+          "--url"
+          "https://127.0.0.1:6443/api/v1/namespaces/kube-system/configmaps/extension-apiserver-authentication"
+          "--cacert"
+          "${pki}/ca.crt"
+          "--cert"
+          "${pki}/controller-manager.crt"
+          "--key"
+          "${pki}/controller-manager.key"
+        ];
         ExecStart = lib.concatStringsSep " " (
           [
             wrap
