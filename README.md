@@ -344,9 +344,10 @@ vde sockets and vm-state off it with no per-run namespace).
 |---|---|---|
 | `single-node` / `single-node-etcd` | Happy path on kine / real etcd | 37 s / 153 s |
 | `multi-node` / `multi-node-mem` | Server + agent on etcd / on etcd-mem | 38 s / 22 s |
-| `multi-server` | 3-server etcd quorum + LB agent + CA custody | 26 s |
-| `failover` | Server crash + etcd kill -9; API rides through the LB | 38 s |
+| `multi-server` | 3-server etcd quorum + LB agent + CA custody | 50 s |
+| `failover` | Server crash + etcd kill -9; API rides through the LB | 59 s |
 | `agent-add` | Hitless compute scale-out (zero restarts anywhere) | 95 s |
+| `server-add` | Declarative 1→3 control-plane growth via etcd learners; shrink refused | 156 s |
 | `server-reboot` | Full VM reboot of a quorum member; state survives | 98 s |
 | `ca-custody` | Durable CA gate refuses, then boots shipped | 30 s |
 | `bench-vs-k3s` | Head-to-head ratio in identical airgapped VMs | 50 s |

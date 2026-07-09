@@ -1,5 +1,5 @@
 #+title: Control-Plane Scale-Out — Growing the Quorum via Learners
-#+state: ready
+#+state: complete
 #+FILETAGS: :core:
 
 * Summary
@@ -37,12 +37,61 @@ DECLARED server set against =etcdctl member list=:
 - Idempotent and convergent: safe to run on every server (the etcd
   API rejects duplicate adds; first-writer wins, the rest observe).
 
+Implemented (2026-07-09, =modules/datastore.nix=). Every mechanism was
+probed on a live etcd 3.6.12 on the host before any Nix was written;
+what the probe taught:
+- One-at-a-time is etcd-ENFORCED, not just discipline: =max-learners=
+  defaults to 1 ("too many learner members in cluster"); a duplicate
+  add is "member ID already exist" — both rejections are what make
+  concurrent reconciles convergent.
+- Unstarted members are NAMELESS in =member list= (the name is
+  published only when the member first starts), so the reconcile and
+  the join probe match members by PEER URL throughout, never by name.
+- Attempting the promotion IS the sync check: the leader refuses with
+  "can only promote a learner member which is in sync with leader" —
+  strictly better than computing revision deltas client-side (no
+  race), so the reconcile just retries the promote.
+- The 1→N legacy transition: on the first multi-server restart etcd
+  ignores =--initial-*= entirely (member-initialized), ACCEPTS the
+  changed =--name= (kubenyx → nodeName) and republishes it to the
+  cluster — the name self-heals. Only the advertised peer URL is raft
+  state: the reconcile moves it (=member update=, live on the single
+  voter — quorum of 1) and does so BEFORE any learner add, because
+  joiners render their initial-cluster from the RUNTIME list and a
+  loopback peer URL would make them dial themselves.
+- The unit is =Type=exec= + =RemainAfterExit=: the start job completes
+  at spawn, so neither boot nor switch-to-configuration ever blocks on
+  convergence (the script waits out learner catch-up in the background,
+  bounded 900s, exiting early when runtime matches the declaration —
+  at which point it records the set for the guard). RemainAfterExit
+  keeps it active-exited so a changed declaration (= changed unit
+  text) makes the switch rerun it.
+- Division of labor discovered in the live run: the JOINING server
+  cannot promote itself — a learner fails the linearizable /readyz
+  check, so its etcd.service sits in "activating" until promoted,
+  and its own reconcile is ordered after etcd. The RUNNING servers'
+  long-lived reconcile is the promoter. In the acceptance run server2
+  was promoted by server1's reconcile and server3 by server2's — the
+  concurrent-by-design copies sharing the work.
+
 ** 2. The member-set guard learns "superset"
 The v0.3 guard (=<data-dir>/.kubenyx-member-set=) hard-errors on any
 change. Now: recorded set ⊂ declared set → allowed (reconcile is
 handling it; the guard rewrites its record AFTER the runtime member
 list matches the declaration). Shrink or rename → the existing hard
 error, unchanged.
+
+Implemented (2026-07-09). Two details fixed during implementation:
+- The record rewrite lives in the RECONCILE, not the guard, and fires
+  only when the runtime voting set equals the declaration EXACTLY —
+  undeclared extra members block recording (rewriting would bless a
+  shrink), they only earn the runbook warning.
+- The 1→N case has no record at all (the single-server unit runs no
+  guard): an initialized data dir with no record is recognized as
+  "bootstrapped single-server, grown around" and passes; the record
+  appears when the grower's reconcile converges. A fresh JOINER (empty
+  dir) records the declared — i.e. grown — set at first start, so all
+  three acceptance servers end with identical records.
 
 ** 3. The joining server: wait-to-be-added, then =existing=
 A fresh server with an empty data dir must not guess between
@@ -60,6 +109,43 @@ credentials exist by construction).
 Bounded wait with a loud DEGRADED marker; never silently bootstraps a
 second cluster.
 
+Implemented (2026-07-09) as etcd =ExecStartPre= (after the guard),
+writing the initial-cluster decision to =/run/kubenyx/etcd-cluster.env=
+for a launcher script the multi-server ExecStart execs — the one value
+eval cannot know. Details fixed during implementation:
+- "Wait until our name appears" became "until our PEER URL appears":
+  an added-but-unstarted learner has no name (§1 note); ours is the
+  one nameless row we can render (self-substitute), any OTHER nameless
+  row keeps us waiting — transient by one-learner-at-a-time.
+- "A quorum answers" is exactly =endpoint health= per endpoint: a
+  learner answers UNHEALTHY (it rejects the linearizable read behind
+  the check), so half-grown clusters never masquerade as joinable.
+- Probe window 15s, join wait 300s. On join-wait expiry the unit
+  FAILS with =KUBENYX-ETCD-JOIN-DEGRADED= and systemd retries — once a
+  healthy peer has answered we never fall through to bootstrap.
+- Missing client certs (custody flow, before the bundle ships) fail
+  the unit loudly instead of probing blind: falling through to
+  bootstrap certless would seed a datastore nobody asked for. This
+  keeps the multi-server custody choreography exactly as v0.3 (crash
+  loop until shipped, =reset-failed=, restart).
+- Initialized data dir skips probing entirely (etcd ignores
+  =--initial-*= on restart) — reboots pay zero probe cost
+  (server-reboot leg wall unchanged, 99.5s vs 98s historical).
+- Fresh-founder race: if a quorum formed before we probed and we are
+  already a VOTING (unstarted) member, state=existing with the runtime
+  set works (verified live); if OTHER founders are also still nameless
+  (N ≥ 5 with two late members), declared/new is used — safe because
+  etcd derives the cluster ID deterministically from the
+  initial-cluster set, so concurrent founders converge into one
+  cluster.
+- Residual risk, accepted and documented: a fresh joiner that hears
+  NOBODY (partition) takes the v0.3 bootstrap path by spec. With ≥2
+  declared members it cannot form quorum alone — it wedges loudly, no
+  split — but two+ partitioned-together fresh joiners could in
+  principle vote each other into a second cluster. Boot new servers
+  with the running quorum reachable; that is the same operator
+  sequencing the rolling activation already assumes.
+
 ** 4. What already just works (from v0.3's door-open design)
 - etcd cert SANs: every server issues the full declared-address set —
   a new declaration re-mints additively on rebuild (fingerprint-gated).
@@ -69,6 +155,33 @@ second cluster.
 - Rolling activation on existing servers restarts etcd one node at a
   time (operator sequences activation, as with agent-add) — quorum
   tolerates it by construction.
+
+Confirmed in implementation (2026-07-09): all four held with zero code
+— the SAN re-mint fired off the fingerprint (the leaf fingerprint
+already encodes the SAN set), the agent's activation brought
+kubenyx-lb up with the grown backend set and the shipped-kubelet probe
+identity, and =leaderElect= flipped on by its own default. One
+sharp-edge found: the LB-GAINING activation restarts the agent's
+kubelet exactly once — gaining kubenyx-lb rewires kubelet's unit
+ordering (lb.nix: After/Wants the LB), and a unit-text change means a
+restart. Running pods are untouched (kubelet re-attaches; the
+acceptance pod kept uid/containerID/restartCount=0 through it), and
+agent-add stays zero-restart-anywhere (no LB appears there); recorded
+here because "hitless" for CP growth means the WORKLOAD contract, not
+InvocationID stability of the agent's kubelet. One
+activation cost was NOT free and is new machinery in
+control-plane.nix/datastore.nix: NixOS restarts a changed unit by
+stopping it under the OLD definition before activation and starting it
+after (=stopIfChanged= defaults true), and a kube-apiserver stop hangs
+the full 60s ShutdownTimeout on idle watch connections ("Failed to
+shutdown server: context deadline exceeded", measured 60.06s) — so the
+1→3 activation's API outage spanned the whole switch, 66.8s measured.
+On the multi-server path only (single-server units byte-identical):
+=stopIfChanged = false= (restart after activation, under the new
+definition) + =TimeoutStopSec= 10 on the apiserver, =stopIfChanged =
+false= on etcd. /readyz is red and the listener draining for the whole
+bounded window, so only idle watches die, and watch clients re-list by
+design.
 
 * Acceptance Criteria
 - =server-add= test leg: 1 server + 1 agent with a running workload
@@ -88,5 +201,56 @@ second cluster.
 - Fast path: byte-identity for default and single-server configs
   (reconcile and probe units exist only at serverCount > 1).
 
+All four met (2026-07-09); =tests/server-add.nix= implements the first
+two end to end (the growth and shrink declarations are pre-built NixOS
+specialisations of the running nodes, the agent-add.nix pattern; the
+driver host is the custody operator, the multi-server.nix pattern).
+Interpretation note on the shrink clause: the guard's superset rule is
+one-directional by the Design section, so the shrink activation
+hard-errors etcd on the shrunk node (asserted verbatim) while the
+reconcile refuses removal with the runbook warning and the record
+keeps the grown set — "the guard still passes" is asserted as: after
+restoring the 3-server declaration the recorded set still validates
+and the member rejoins cleanly.
+
 * History
 - 2026-07-09: Drafted on user steer revising v0.3 Decision 3; ready.
+- 2026-07-09: Implemented complete; state → complete. All machinery in
+  =modules/datastore.nix= (guard superset rule, join probe + launcher,
+  =kubenyx-etcd-reconcile=) plus the activation-restart bounds in
+  =modules/control-plane.nix=; acceptance leg =tests/server-add.nix=
+  registered as =checks.server-add=. Every etcd mechanism was verified
+  on a live etcd 3.6.12 host cluster BEFORE writing Nix (learner
+  limits, nameless unstarted members, promote-as-sync-check, the
+  name-republish on restart, live single-voter =member update=) —
+  implementation notes recorded inline in each Design section. What
+  implementation taught, in one line each:
+  - Members are matched by peer URL everywhere; names are runtime
+    attributes that self-heal (the 1→N "kubenyx" member renames itself
+    at the first multi-server restart).
+  - The promoter of a joining learner is a RUNNING server's reconcile,
+    never the joiner (its /readyz stays red as a learner, holding its
+    own boot); reconcile is therefore Type=exec (never blocks a switch)
+    with RemainAfterExit (reruns on changed declarations).
+  - The activation outage was the real enemy: NixOS stop-early/
+    start-late plus the apiserver's 60s watch-drain hang put a 66.8s
+    API hole in the growth window; =stopIfChanged=false= +
+    =TimeoutStopSec=10= (multi-server-gated) collapse it to a bounded
+    blip covered by the write loop's single 30s-backoff retry. The
+    1→3 activation switch fell 68.9s → 8.7–19.1s measured across
+    runs; the green leg's loop landed 34 writes with exactly ONE
+    needing its single retry and zero failures.
+  - Byte-identity held at the strongest level: default and
+    single-server-etcd eval dumps identical, microvm-firecracker
+    toplevel bit-identical store path (b4s6aib8…) across the whole
+    change.
+  - Cost accepted: the join probe's 15s nobody-answered window rides
+    every FRESH multi-server bootstrap (multi-server leg 26→50s,
+    failover 38→59s); reboots skip it (initialized data dir,
+    server-reboot 99.5s vs 98s historical) and single-server pays
+    zero.
+  - =server-add= leg wall: 156s; the joiners' etcd went active 8.4s
+    and 8.8s after their custody restart (probe join-wait + learner
+    sync + peer-side promotion all inside the notify window).
+  - v0.3 legs re-run green at the final rev: multi-server, failover,
+    server-reboot, ca-custody.

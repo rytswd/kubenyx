@@ -36,49 +36,439 @@ let
 
   etcdDataDir = if ds.volatile then volatileDir else "/var/lib/etcd";
   # Quorum wiring is derived from kubenyx.nodes at EVAL time, never frozen
-  # at bootstrap (durable-ha.org Decision 3's door-open note): a future
-  # CP-growth path only has to change what the member-set guard below does
-  # with a diff, not where the member list comes from.
+  # at bootstrap (durable-ha.org Decision 3's door-open note) — which is
+  # exactly what lets cp-growth.org treat a grown declaration as a diff to
+  # reconcile rather than a re-bootstrap.
   #   Single server keeps today's loopback-only posture, flag-identical.
   etcdName = if multiServer then cfg.nodeName else "kubenyx";
   # hostPort brackets v6 addresses in the peer URLs (ipv6.org §4); v4
   # renders byte-identically.
+  serverPeerUrl = n: "https://${klib.hostPort n.address 2380}";
+  serverClientUrl = n: "https://${klib.hostPort n.address 2379}";
   etcdInitialCluster =
     if multiServer then
-      lib.concatStringsSep "," (
-        lib.mapAttrsToList (n: v: "${n}=https://${klib.hostPort v.address 2380}") servers
-      )
+      lib.concatStringsSep "," (lib.mapAttrsToList (n: v: "${n}=${serverPeerUrl v}") servers)
     else
       "kubenyx=https://127.0.0.1:2380";
 
-  # Bootstrap fingerprint (durable-ha.org §2): record the member SET on
-  # first bootstrap; a later mismatch is a hard, distinct error — the
-  # control-plane set is fixed at cluster creation, and re-running the
-  # bootstrap flags against a grown/shrunk set would silently split or
-  # wedge the quorum. It lives inside the data dir on purpose: wiping the
-  # data legitimately re-bootstraps, so the fingerprint must die with it.
-  #
-  # NOTE: this error site is the future CP-growth hook (durable-ha.org
-  # Decision 3). A supported grow path would diff recorded vs declared
-  # sets here and slot in `etcdctl member add` +
-  # `--initial-cluster-state existing` for the new member instead of
-  # erroring. Today: error, with the runbook pointer.
+  # ---- CP growth (air/v0.5/cp-growth.org) ---------------------------------
+  # Everything below the guard exists only at serverCount > 1; the
+  # single-server unit stays byte-identical to v0.1.
+  etcdCtl = lib.getExe' cfg.packages.etcd "etcdctl";
+  # The apiserver-etcd-client identity: present on every server by
+  # construction (kubenyx-pki mints it from the custody CA), and already
+  # authorized on the client port — no new credentials for growth.
+  ctlCreds = "--cacert=${pki}/ca.crt --cert=${pki}/apiserver-etcd-client.crt --key=${pki}/apiserver-etcd-client.key";
+  selfPeerUrl = serverPeerUrl thisNode;
+  declaredClientEps = lib.mapAttrsToList (_: v: serverClientUrl v) servers;
+  otherClientEps = lib.mapAttrsToList (_: v: serverClientUrl v) (
+    lib.filterAttrs (n: _: n != cfg.nodeName) servers
+  );
+  # Written by the join probe on every start, read by the launcher: etcd
+  # ignores --initial-* flags entirely once the member dir exists, so the
+  # declared values are placeholders on every boot after the first.
+  clusterEnvFile = "/run/kubenyx/etcd-cluster.env";
+
+  # Bootstrap fingerprint (durable-ha.org §2, revised by cp-growth.org §2):
+  # record the member SET on first bootstrap. GROWTH is now allowed —
+  # recorded ⊂ declared means kubenyx-etcd-reconcile is bringing the new
+  # members in as learners, and the record is rewritten only after the
+  # RUNTIME member list matches the declaration. Shrink or rename remain
+  # the hard, distinct error: re-running bootstrap flags against a shrunk/
+  # renamed set would silently split or wedge the quorum. The record lives
+  # inside the data dir on purpose: wiping the data legitimately
+  # re-bootstraps, so the fingerprint must die with it.
   etcdMemberGuard = pkgs.writeShellScript "kubenyx-etcd-member-guard" ''
     set -eu
     fp='${etcdDataDir}/.kubenyx-member-set'
     want='${etcdInitialCluster}'
     if [ -e "$fp" ]; then
       have=$(cat "$fp")
-      if [ "$have" != "$want" ]; then
-        echo "kubenyx: etcd member set changed since this datastore was bootstrapped:" >&2
-        echo "  recorded: $have" >&2
-        echo "  declared: $want" >&2
-        echo "kubenyx: the control-plane set is fixed at cluster creation (air/v0.3/durable-ha.org). Changing it means a new initial-cluster plus an 'etcdctl snapshot save/restore' migration — a documented runbook, not machinery. Refusing to start with mismatched bootstrap flags." >&2
+      if [ "$have" = "$want" ]; then
+        exit 0
+      fi
+      # Superset rule (cp-growth.org §2), one-directional: every recorded
+      # member still declared -> the set GREW -> allowed; the reconcile
+      # rewrites the record once runtime matches the declaration.
+      grew=1
+      set -f
+      IFS=','
+      for m in $have; do
+        case ",$want," in
+          *",$m,"*) ;;
+          *) grew=0 ;;
+        esac
+      done
+      unset IFS
+      set +f
+      if [ "$grew" = 1 ]; then
+        echo "kubenyx: declared etcd member set grew beyond the recorded bootstrap set (recorded: $have); kubenyx-etcd-reconcile adds the new members as learners and records the set once runtime matches" >&2
+        exit 0
+      fi
+      echo "kubenyx: etcd member set changed since this datastore was bootstrapped:" >&2
+      echo "  recorded: $have" >&2
+      echo "  declared: $want" >&2
+      echo "kubenyx: the control-plane set is fixed at cluster creation (air/v0.3/durable-ha.org). Changing it means a new initial-cluster plus an 'etcdctl snapshot save/restore' migration — a documented runbook, not machinery. Refusing to start with mismatched bootstrap flags." >&2
+      exit 1
+    fi
+    if [ -e '${etcdDataDir}/member' ]; then
+      # Initialized data dir without a record: bootstrapped by the
+      # single-server unit (which runs no guard) and grown around (1 -> N).
+      # The reconcile records the set once runtime matches the declaration.
+      exit 0
+    fi
+    printf '%s\n' "$want" > "$fp"
+  '';
+
+  # Join probe (cp-growth.org §3): a fresh server with an empty data dir
+  # must not guess between "bootstrap a new cluster" and "join an existing
+  # one". Probe the OTHER declared servers' client endpoints; a healthy
+  # answer proves a quorum-bearing cluster exists (learners answer
+  # unhealthy — they reject the linearizable read behind `endpoint
+  # health`), so we JOIN: wait until the peers' reconcile adds our peer
+  # URL as a learner, then start with --initial-cluster-state existing and
+  # the initial-cluster narrowed to the CURRENT member set + self (etcd
+  # join semantics; unstarted members carry no name in `member list`,
+  # which is why membership is matched by peer URL throughout). Nobody
+  # answering within the probe window is the v0.3 first-bootstrap path,
+  # unchanged. Once a healthy peer has answered we NEVER fall through to
+  # bootstrap: on join-wait expiry the unit fails loudly (DEGRADED marker)
+  # and systemd retries — a wedged join is recoverable, a second cluster
+  # is not.
+  etcdJoinProbe = pkgs.writeShellScript "kubenyx-etcd-join-probe" ''
+    set -eu
+    env_file='${clusterEnvFile}'
+    declared='${etcdInitialCluster}'
+    self_peer='${selfPeerUrl}'
+    write_env() {
+      mkdir -p /run/kubenyx
+      printf 'KUBENYX_ETCD_INITIAL_CLUSTER=%s\nKUBENYX_ETCD_INITIAL_CLUSTER_STATE=%s\n' "$1" "$2" > "$env_file"
+    }
+    # Initialized member: etcd ignores --initial-* flags entirely on
+    # restart; write the declared placeholders and get out of the way.
+    if [ -e '${etcdDataDir}/member' ]; then
+      write_env "$declared" new
+      exit 0
+    fi
+    # Custody flow: before the CA bundle lands and kubenyx-pki reruns
+    # there are no client certs. Fail loudly instead of probing blind —
+    # falling through to bootstrap here could seed a datastore with no
+    # peers reachable to contradict it.
+    for f in ${pki}/ca.crt ${pki}/apiserver-etcd-client.crt ${pki}/apiserver-etcd-client.key; do
+      if [ ! -s "$f" ]; then
+        echo "kubenyx-etcd-join-probe: $f missing; cannot probe the declared servers (ship the custody bundle and rerun kubenyx-pki)" >&2
         exit 1
       fi
-    else
-      printf '%s\n' "$want" > "$fp"
+    done
+    others='${lib.concatStringsSep " " otherClientEps}'
+    healthy_ep=""
+    probe_deadline=$(( $(date +%s) + 15 ))
+    while [ "$(date +%s)" -lt "$probe_deadline" ]; do
+      for ep in $others; do
+        if ${etcdCtl} --endpoints="$ep" ${ctlCreds} --dial-timeout=2s --command-timeout=3s endpoint health >/dev/null 2>&1; then
+          healthy_ep=$ep
+          break 2
+        fi
+      done
+      sleep 1
+    done
+    if [ -z "$healthy_ep" ]; then
+      echo "kubenyx-etcd-join-probe: no declared server answered; bootstrapping the declared initial-cluster" >&2
+      write_env "$declared" new
+      exit 0
     fi
+    # Render name=peerURL for the CURRENT members + self. rc 1 while we
+    # are not yet in the member list, or while another member is still
+    # nameless (unstarted — cannot be rendered; one-learner-at-a-time
+    # makes that transient on the growth path). rc 2 is the fresh-founder
+    # race: we are already a VOTING (unstarted, nameless) member next to
+    # other nameless founders — a concurrent first bootstrap where a
+    # quorum formed before we probed. etcd's cluster ID is derived
+    # deterministically from the initial-cluster set, so the v0.3
+    # declared/new path converges into that same cluster.
+    render_join() {
+      list=$(${etcdCtl} --endpoints="$1" ${ctlCreds} --dial-timeout=2s --command-timeout=3s member list 2>/dev/null) || return 1
+      printf '%s\n' "$list" | grep -qF "$self_peer" || return 1
+      ic=""
+      self_voting=0
+      nameless_other=0
+      while IFS= read -r row; do
+        name=$(printf '%s\n' "$row" | awk -F', ' '{print $3}')
+        peer=$(printf '%s\n' "$row" | awk -F', ' '{print $4}')
+        learner=$(printf '%s\n' "$row" | awk -F', ' '{print $6}')
+        [ -n "$peer" ] || continue
+        if [ "$peer" = "$self_peer" ]; then
+          name='${cfg.nodeName}'
+          [ "$learner" = "true" ] || self_voting=1
+        elif [ -z "$name" ]; then
+          nameless_other=1
+        fi
+        if [ -z "$ic" ]; then ic="$name=$peer"; else ic="$ic,$name=$peer"; fi
+      done <<KUBENYX_EOF
+    $list
+    KUBENYX_EOF
+      if [ "$nameless_other" = 1 ]; then
+        if [ "$self_voting" = 1 ]; then return 2; fi
+        return 1
+      fi
+      if [ "$self_voting" = 1 ]; then
+        printf 'voting %s\n' "$ic"
+      else
+        printf 'learner %s\n' "$ic"
+      fi
+    }
+    join_deadline=$(( $(date +%s) + 300 ))
+    while [ "$(date +%s)" -lt "$join_deadline" ]; do
+      for ep in $others; do
+        if out=$(render_join "$ep"); then
+          kind=''${out%% *}
+          ic=''${out#* }
+          if [ "$kind" = "learner" ]; then
+            # The grown-member path: the peers' reconcile added us.
+            echo "kubenyx-etcd-join-probe: joining the existing cluster as a learner: $ic" >&2
+          else
+            # Already a declared voting member (fresh-founder race, or a
+            # manual runbook add): same existing-state start.
+            echo "kubenyx-etcd-join-probe: rejoining the existing cluster as a declared voting member: $ic" >&2
+          fi
+          write_env "$ic" existing
+          exit 0
+        elif [ "$?" = 2 ]; then
+          echo "kubenyx-etcd-join-probe: concurrent first bootstrap detected (this node is already a declared voting member; other founders still unstarted); using the declared initial-cluster" >&2
+          write_env "$declared" new
+          exit 0
+        fi
+      done
+      sleep 2
+    done
+    echo "KUBENYX-ETCD-JOIN-DEGRADED: a healthy cluster answered at $healthy_ep but this node's peer URL never appeared in the member list within 300s — kubenyx-etcd-reconcile on the running servers adds declared members one learner at a time; refusing to bootstrap a second cluster (the unit fails and retries)" >&2
+    exit 1
+  '';
+
+  # etcd argument sets. The single-server list must render byte-identically
+  # to v0.1 (cp-growth.org acceptance), so it stays a literal list; the
+  # multi-server launcher reads the probe's initial-cluster decision at
+  # start time (the one thing eval cannot know: joiners narrow it to the
+  # runtime member set).
+  etcdTlsArgs = [
+    # Client-cert auth even on loopback: without it any local process
+    # could write past RBAC (security review finding). Multi-server adds
+    # the declared address as a second client listener (peers/etcdctl),
+    # but the LOCAL apiserver keeps dialing loopback: internal.etcdServers
+    # never changes.
+    "--client-cert-auth"
+    "--trusted-ca-file"
+    "${pki}/ca.crt"
+    "--cert-file"
+    "${pki}/etcd-server.crt"
+    "--key-file"
+    "${pki}/etcd-server.key"
+  ];
+  etcdPeerTlsArgs = [
+    # Peer port carries raft; leaving it plaintext would be the same local
+    # RBAC bypass the client port closes. Same cert (SANs cover
+    # localhost/127.0.0.1, plus every declared server address on
+    # multi-server — see pki.nix), peer client-cert auth on.
+    "--peer-client-cert-auth"
+    "--peer-trusted-ca-file"
+    "${pki}/ca.crt"
+    "--peer-cert-file"
+    "${pki}/etcd-server.crt"
+    "--peer-key-file"
+    "${pki}/etcd-server.key"
+    "--enable-pprof=false"
+  ]
+  ++ lib.optional ds.etcd.unsafeNoFsync "--unsafe-no-fsync"
+  ++ ds.etcd.extraFlags;
+  etcdStartScript = pkgs.writeShellScript "kubenyx-etcd-start" ''
+    set -eu
+    . '${clusterEnvFile}'
+    exec ${
+      lib.escapeShellArgs (
+        [
+          (lib.getExe' cfg.packages.etcd "etcd")
+          "--name"
+          etcdName
+          "--data-dir"
+          etcdDataDir
+          "--listen-client-urls"
+          "https://127.0.0.1:2379,${serverClientUrl thisNode}"
+          "--advertise-client-urls"
+          (serverClientUrl thisNode)
+        ]
+        ++ etcdTlsArgs
+        ++ [
+          "--listen-peer-urls"
+          selfPeerUrl
+          "--initial-advertise-peer-urls"
+          selfPeerUrl
+        ]
+        ++ etcdPeerTlsArgs
+      )
+    } \
+      --initial-cluster "$KUBENYX_ETCD_INITIAL_CLUSTER" \
+      --initial-cluster-state "$KUBENYX_ETCD_INITIAL_CLUSTER_STATE"
+  '';
+
+  # Declared-vs-runtime member reconcile (cp-growth.org §1). Learners are
+  # the correctness core, not an optimization: a plain member-add of an
+  # unstarted member COUNTS toward quorum — growing 1 -> 2 that way wedges
+  # the cluster until the new member starts. A learner does not, so
+  # unattended growth is safe at every intermediate step. One at a time is
+  # etcd-enforced anyway (max-learners defaults to 1). Members are matched
+  # by PEER URL, never name: unstarted members have no name in `member
+  # list`, and the legacy single-server member republishes its name on the
+  # first multi-server restart.
+  etcdReconcile = pkgs.writeShellScript "kubenyx-etcd-reconcile" ''
+    set -u
+    declared='${etcdInitialCluster}'
+    fp='${etcdDataDir}/.kubenyx-member-set'
+    self='${cfg.nodeName}'
+    self_peer='${selfPeerUrl}'
+    eps='https://127.0.0.1:2379 ${lib.concatStringsSep " " declaredClientEps}'
+    log() { echo "KUBENYX-ETCD-RECONCILE $*"; }
+
+    # Try every endpoint: loopback first (free when this member votes),
+    # then the declared set — learners reject member RPCs and the local
+    # member may be down; any voting member serves the whole cluster.
+    ctl() {
+      for ep in $eps; do
+        if out=$(${etcdCtl} --endpoints="$ep" ${ctlCreds} --dial-timeout=2s --command-timeout=5s "$@" 2>/dev/null); then
+          printf '%s\n' "$out"
+          return 0
+        fi
+      done
+      return 1
+    }
+    declared_has_peer() {
+      case ",$declared," in
+        *"=$1,"*) return 0 ;;
+      esac
+      return 1
+    }
+
+    deadline=$(( $(date +%s) + 900 ))
+    warned=" "
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      list=$(ctl member list) || {
+        sleep 2
+        continue
+      }
+
+      # Legacy 1 -> N transition: the single-server bootstrap advertised
+      # the loopback peer URL. Only the member's own node moves it (the
+      # name was republished as this nodeName on the multi-server
+      # restart); everyone else waits — adding learners against a loopback
+      # peer URL would hand joiners an initial-cluster that dials itself.
+      loopback=$(printf '%s\n' "$list" | awk -F', ' '$4 == "https://127.0.0.1:2380" { print $1 "," $3 }')
+      if [ -n "$loopback" ]; then
+        lid=''${loopback%%,*}
+        lname=''${loopback#*,}
+        if [ "$lname" = "$self" ]; then
+          if ctl member update "$lid" --peer-urls="$self_peer" >/dev/null; then
+            log "moved legacy single-server peer URL to $self_peer (member $lid)"
+          fi
+        else
+          log "waiting for $lname to move its legacy loopback peer URL"
+        fi
+        sleep 2
+        continue
+      fi
+
+      # Never remove: members outside the declaration get a loud warning
+      # citing the shrink runbook, once per member, and nothing else.
+      extras=""
+      while IFS= read -r row; do
+        peer=$(printf '%s\n' "$row" | awk -F', ' '{print $4}')
+        [ -n "$peer" ] || continue
+        if ! declared_has_peer "$peer"; then
+          extras="$extras $peer"
+          mid=$(printf '%s\n' "$row" | awk -F', ' '{print $1}')
+          case "$warned" in
+            *" $mid "*) ;;
+            *)
+              warned="$warned$mid "
+              log "WARNING: member $mid ($peer) is running but NOT in the declared server set. Refusing to remove it: shrinking the control plane is a destructive judgment call, not machinery (air/v0.5/cp-growth.org). Runbook: verify quorum health, then 'etcdctl member remove $mid' and drop the node from kubenyx.nodes."
+              ;;
+          esac
+        fi
+      done <<KUBENYX_EOF
+    $list
+    KUBENYX_EOF
+
+      # One learner at a time (etcd enforces it; we sequence around it):
+      # promote a started learner — the leader itself refuses until the
+      # learner's raft log is in sync, so attempting IS the sync check —
+      # and add nothing while any learner exists.
+      learner=$(printf '%s\n' "$list" | awk -F', ' '$6 == "true" { print $1 "," $2 "," $4; exit }')
+      if [ -n "$learner" ]; then
+        lid=''${learner%%,*}
+        rest=''${learner#*,}
+        lstatus=''${rest%%,*}
+        lpeer=''${rest#*,}
+        if [ "$lstatus" = "started" ]; then
+          if ctl member promote "$lid" >/dev/null; then
+            log "promoted learner $lid ($lpeer) to voting member"
+          else
+            log "learner $lid ($lpeer) not in sync yet; retrying promotion"
+          fi
+        fi
+        sleep 2
+        continue
+      fi
+
+      # Missing members: add the first (name-sorted) as a LEARNER.
+      missing=""
+      set -f
+      IFS=','
+      for m in $declared; do
+        peer=''${m#*=}
+        if ! printf '%s\n' "$list" | grep -qF "$peer"; then
+          missing=$m
+          break
+        fi
+      done
+      unset IFS
+      set +f
+      if [ -n "$missing" ]; then
+        mname=''${missing%%=*}
+        mpeer=''${missing#*=}
+        if ctl member add "$mname" --learner --peer-urls="$mpeer" >/dev/null; then
+          log "added $mname as learner ($mpeer)"
+        else
+          log "learner add for $mname pending (a concurrent reconcile may have won the race; retrying)"
+        fi
+        sleep 2
+        continue
+      fi
+
+      # Converged when every declared member is a started voting member.
+      all_in=1
+      set -f
+      IFS=','
+      for m in $declared; do
+        peer=''${m#*=}
+        row=$(printf '%s\n' "$list" | awk -F', ' -v p="$peer" '$4 == p && $2 == "started" && $6 == "false"')
+        [ -n "$row" ] || all_in=0
+      done
+      unset IFS
+      set +f
+      if [ "$all_in" = 1 ]; then
+        if [ -z "$extras" ]; then
+          if [ ! -e "$fp" ] || [ "$(cat "$fp")" != "$declared" ]; then
+            printf '%s\n' "$declared" > "$fp".tmp && mv "$fp".tmp "$fp"
+            log "runtime member set matches the declaration; recorded at $fp"
+          fi
+        else
+          log "declared members all voting, but undeclared members remain ($extras); NOT recording the declared set"
+        fi
+        log "converged: $declared"
+        exit 0
+      fi
+      sleep 2
+    done
+    log "did not converge within 900s (safe: the reconcile is idempotent — it reruns on the next boot/activation, or via 'systemctl restart kubenyx-etcd-reconcile')"
+    exit 0
   '';
 in
 {
@@ -233,14 +623,36 @@ in
           wantedBy = [ "kubenyx.target" ];
           after = [ "kubenyx-pki.service" ];
           wants = [ "kubenyx-pki.service" ];
+          # Restart-after-activation on the quorum path (see the apiserver
+          # unit for the measured rationale): the NixOS stop-early/
+          # start-late default takes the datastore down for the whole
+          # activation window; a post-reload restart is a ~2s blip that
+          # the collocated apiserver's etcd client rides through.
+          stopIfChanged = lib.mkIf multiServer false;
+          # The guard/probe/launcher scripts need coreutils/awk/grep beyond
+          # systemd's default path; gated so the single-server unit text
+          # stays byte-identical to v0.1.
+          path = lib.mkIf multiServer [
+            pkgs.coreutils
+            pkgs.gawk
+            pkgs.gnugrep
+          ];
           serviceConfig = {
             Type = "notify";
             NotifyAccess = "all";
-            TimeoutStartSec = 120;
-            # Multi-server only: the member-set guard (see the let binding)
-            # gates bootstrap flags against the recorded membership. The
-            # single-server unit stays byte-identical to v0.1.
-            ExecStartPre = lib.mkIf multiServer "${etcdMemberGuard}";
+            # Multi-server covers the join wait (probe window + learner add
+            # by a peer's reconcile + catch-up until /readyz greens — a
+            # learner fails the linearizable readyz check until promoted).
+            TimeoutStartSec = if multiServer then 900 else 120;
+            # Multi-server only: the member-set guard gates bootstrap flags
+            # against the recorded membership, then the join probe decides
+            # bootstrap-vs-join (cp-growth.org §3) and writes the
+            # initial-cluster the launcher execs with. The single-server
+            # unit stays byte-identical to v0.1.
+            ExecStartPre = lib.mkIf multiServer [
+              "${etcdMemberGuard}"
+              "${etcdJoinProbe}"
+            ];
             ExecStart = lib.escapeShellArgs (
               [
                 wrap
@@ -253,84 +665,68 @@ in
                 "--key"
                 "${pki}/apiserver-etcd-client.key"
                 "--"
-                (lib.getExe' cfg.packages.etcd "etcd")
-                "--name"
-                etcdName
-                "--data-dir"
-                etcdDataDir
-                # Client-cert auth even on loopback: without it any local
-                # process could write past RBAC (security review finding).
-                # Multi-server adds the declared address as a second client
-                # listener (peers/etcdctl), but the LOCAL apiserver keeps
-                # dialing loopback: internal.etcdServers never changes.
-                "--listen-client-urls"
-                (
-                  if multiServer then
-                    "https://127.0.0.1:2379,https://${klib.hostPort thisNode.address 2379}"
-                  else
+              ]
+              ++ (
+                if multiServer then
+                  # The launcher carries every static flag; only
+                  # --initial-cluster(-state) come from the probe's decision
+                  # at start time.
+                  [ "${etcdStartScript}" ]
+                else
+                  [
+                    (lib.getExe' cfg.packages.etcd "etcd")
+                    "--name"
+                    etcdName
+                    "--data-dir"
+                    etcdDataDir
+                    "--listen-client-urls"
                     "https://127.0.0.1:2379"
-                )
-                "--advertise-client-urls"
-                (
-                  if multiServer then
-                    "https://${klib.hostPort thisNode.address 2379}"
-                  else
+                    "--advertise-client-urls"
                     "https://127.0.0.1:2379"
-                )
-                "--client-cert-auth"
-                "--trusted-ca-file"
-                "${pki}/ca.crt"
-                "--cert-file"
-                "${pki}/etcd-server.crt"
-                "--key-file"
-                "${pki}/etcd-server.key"
-                # Peer port carries raft; leaving it plaintext would be the
-                # same local RBAC bypass the client port closes. Same cert
-                # (SANs cover localhost/127.0.0.1, plus every declared server
-                # address on multi-server — see pki.nix), peer client-cert
-                # auth on.
-                "--listen-peer-urls"
-                (
-                  if multiServer then
-                    "https://${klib.hostPort thisNode.address 2380}"
-                  else
+                  ]
+                  ++ etcdTlsArgs
+                  ++ [
+                    "--listen-peer-urls"
                     "https://127.0.0.1:2380"
-                )
-                "--initial-advertise-peer-urls"
-                (
-                  if multiServer then
-                    "https://${klib.hostPort thisNode.address 2380}"
-                  else
+                    "--initial-advertise-peer-urls"
                     "https://127.0.0.1:2380"
-                )
-                "--initial-cluster"
-                etcdInitialCluster
-              ]
-              # --initial-cluster-state new is etcd's default; stating it on
-              # the quorum path documents intent (and is the flag the future
-              # CP-growth hook would flip to "existing" for a joining
-              # member). Omitted single-server to stay flag-identical.
-              ++ lib.optionals multiServer [
-                "--initial-cluster-state"
-                "new"
-              ]
-              ++ [
-                "--peer-client-cert-auth"
-                "--peer-trusted-ca-file"
-                "${pki}/ca.crt"
-                "--peer-cert-file"
-                "${pki}/etcd-server.crt"
-                "--peer-key-file"
-                "${pki}/etcd-server.key"
-                "--enable-pprof=false"
-              ]
-              ++ lib.optional ds.etcd.unsafeNoFsync "--unsafe-no-fsync"
-              ++ ds.etcd.extraFlags
+                    "--initial-cluster"
+                    etcdInitialCluster
+                  ]
+                  ++ etcdPeerTlsArgs
+              )
             );
             Restart = "always";
             RestartSec = 2;
             SuccessExitStatus = "143"; # notify-wrapper exit on orderly stop
             StateDirectory = lib.mkIf (!ds.volatile) "etcd";
+          };
+        };
+
+        # Declared-vs-runtime member reconcile (cp-growth.org §1): one shot
+        # of convergence per boot AND per activation — the declared set is
+        # baked into the script text, so any membership change makes
+        # switch-to-configuration restart the (RemainAfterExit) unit.
+        # Type=exec: the start job completes at spawn, so neither boot nor
+        # switch ever blocks on convergence — the script waits out learner
+        # catch-up in the background and exits when runtime matches the
+        # declaration (or after 900s, warned, converging further on the
+        # next run). Safe on every server concurrently: adds are rejected
+        # as duplicates, promotes of in-sync learners are idempotent, and
+        # nothing is ever removed.
+        systemd.services.kubenyx-etcd-reconcile = lib.mkIf multiServer {
+          description = "Kubenyx etcd member reconcile (declared vs runtime)";
+          wantedBy = [ "kubenyx.target" ];
+          after = [ "etcd.service" ];
+          path = [
+            pkgs.coreutils
+            pkgs.gawk
+            pkgs.gnugrep
+          ];
+          serviceConfig = {
+            Type = "exec";
+            RemainAfterExit = true;
+            ExecStart = "${etcdReconcile}";
           };
         };
       })

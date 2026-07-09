@@ -215,10 +215,27 @@ in
       # rides through no-leader windows (server3 did exactly that).
       # (<= 1, not == 1: an undeclared-nodes single box has serverCount 0.)
       requires = lib.optional (serverCount <= 1) datastoreUnit;
+      # Multi-server only (single-server unit stays byte-identical), both
+      # halves load-bearing for cp-growth.org's write-loop contract:
+      # stopIfChanged=false makes a changed unit restart AFTER activation
+      # (NixOS default stops it under the OLD definition BEFORE activation
+      # and starts it after — measured: the API outage then spans the
+      # whole switch, 66.8s), and TimeoutStopSec bounds the stop under the
+      # NEW definition. Without the bound a deliberate stop hangs the full
+      # 60s ShutdownTimeout: idle WATCH connections (kcm/scheduler/
+      # kubelets hold ~10 at all times) keep the secure server's graceful
+      # Shutdown open until "Failed to shutdown server: context deadline
+      # exceeded" (measured 60.06s; the only in-binary knob is
+      # --request-timeout, the wrong one to bend). By kill time /readyz
+      # has been red and the listener draining for the whole window, so
+      # real requests are long done; only idle watches die, and watch
+      # clients re-list by design.
+      stopIfChanged = lib.mkIf (serverCount > 1) false;
       serviceConfig = hardening // {
         Type = "notify";
         NotifyAccess = "all";
         TimeoutStartSec = 120;
+        TimeoutStopSec = lib.mkIf (serverCount > 1) 10;
         ExecStart = lib.concatStringsSep " " (
           [
             wrap
