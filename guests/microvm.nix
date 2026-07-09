@@ -319,7 +319,7 @@ lib.mkMerge [
                     | tr -d ' \n' | grep -q '"type":"Ready","status":"True"'
                 }
                 while ! probe; do
-                  sleep 0.25
+                  sleep 0.05
                   up=$(cut -d. -f1 /proc/uptime)
                   if [ -z "$dumped" ] && [ "$up" -gt 300 ]; then
                     dumped=1
@@ -365,7 +365,7 @@ lib.mkMerge [
                     | tr -d ' \n' | grep -q '"type":"Ready","status":"True"'
                 }
                 while ! probe; do
-                  sleep 0.25
+                  sleep 0.05
                   up=$(cut -d. -f1 /proc/uptime)
                   if [ -z "$dumped" ] && [ "$up" -gt 300 ]; then
                     dumped=1
