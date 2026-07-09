@@ -327,8 +327,29 @@ lib.mkMerge [
         };
 
         # Grep-able readiness marker with the in-guest monotonic time — the
-        # benchmark interface for every variant. Polls with curl (cheap even
-        # under emulation); wall-clock-based self-diagnosis when late.
+        # benchmark interface for every variant. ONE curl process polling
+        # over ONE persistent TLS session instead of a fork + full handshake
+        # every 50ms: the fork-poll billed 0.5-0.6s of pure observation gap
+        # to every fast boot (kubelet "node just became ready" at 2.93s
+        # monotonic, marker at 3.49s) and 2.3-2.4s when the 4 vcpus were
+        # saturated — each fork+handshake cost 0.5-1s wall inside the
+        # convergence window it was supposed to observe. Mechanism: curl
+        # walks a 600-entry repeat of the node URL at --rate 20/s, reusing
+        # the connection across entries (5 GETs in 211ms measured in-guest,
+        # spacing-dominated); refused connects before the apiserver listens
+        # burn entries silently and cost no TLS; the shell reads the bodies
+        # fork-free and kills curl the instant one carries Ready=True.
+        # Tried and rejected: nodes?watch=1 (a real push channel) — during
+        # early bring-up the first frame arrives seconds late (node Ready at
+        # 3.03s, watch match at 5.61s — worse than the fork-poll it was
+        # meant to fix; warm-cluster watches match instantly, boot-time ones
+        # do not). ?pretty=false matters: the default for curl's user-agent
+        # is pretty-printed JSON, which splits the condition pair across
+        # lines (the old tr -d dance); compact bodies are one greppable line
+        # with a trailing newline.
+        # Wall-clock self-diagnosis when late, as before: 15s of silence or
+        # an exhausted URL list ends the attempt, so the outer loop's dump /
+        # give-up checks run at least every ~30s.
         kubenyx-report = {
           description = "Report cluster readiness to the console";
           wantedBy = [ "multi-user.target" ];
@@ -348,12 +369,39 @@ lib.mkMerge [
                 probe() {
                   # Admin identity: the healthz cert is deliberately unprivileged
                   # and only passes always-allowed /healthz-class paths — reading
-                  # a node object needs RBAC. tr strips pretty-print whitespace so
-                  # the condition pair is greppable on one line.
-                  curl -s --max-time 5 \
+                  # a node object needs RBAC (system:masters bypasses the RBAC
+                  # bootstrap race by construction). Returns 0 the instant a
+                  # body carries Ready=True; 1 on list exhaustion (~30s) or
+                  # 15s of silence (server stall — recycle the session).
+                  local pid line rc i
+                  local -a urls=()
+                  for ((i = 0; i < 600; i++)); do
+                    urls+=("https://127.0.0.1:6443/api/v1/nodes/$node?pretty=false")
+                  done
+                  exec 9< <(curl -s --rate 20/s --max-time 15 \
                     --cacert "$pki/ca.crt" --cert "$pki/admin.crt" --key "$pki/admin.key" \
-                    "https://127.0.0.1:6443/api/v1/nodes/$node" 2>/dev/null \
-                    | tr -d ' \n' | grep -q '"type":"Ready","status":"True"'
+                    "''${urls[@]}" 2>/dev/null)
+                  pid=$!
+                  while :; do
+                    IFS= read -r -t 15 -u9 line
+                    rc=$?
+                    if [ "$rc" -eq 0 ]; then
+                      case $line in
+                        *'"type":"Ready","status":"True"'*)
+                          kill "$pid" 2>/dev/null || true
+                          exec 9<&-
+                          return 0
+                          ;;
+                      esac
+                    elif [ "$rc" -gt 128 ]; then
+                      kill "$pid" 2>/dev/null || true
+                      exec 9<&-
+                      return 1
+                    else
+                      exec 9<&-
+                      return 1
+                    fi
+                  done
                 }
                 while ! probe; do
                   sleep 0.05
@@ -386,20 +434,46 @@ lib.mkMerge [
                 } > kubenyx.kubeconfig" > /dev/console
               ''
             else
-              # Agent flavor: no local apiserver and no admin identity — probe
+              # Agent flavor: no local apiserver and no admin identity — poll
               # this node's own Node object at the control-plane endpoint with
               # the kubelet client cert (the Node authorizer permits a node to
-              # get itself). Marker format is identical so the mesh launcher
+              # get itself). Same persistent-session mechanism as the server
+              # flavor above. Marker format is identical so the mesh launcher
               # greps one string.
               ''
                 node=${lib.escapeShellArg config.kubenyx.nodeName}
                 pki=/var/lib/kubenyx/pki
                 dumped=""
                 probe() {
-                  curl -s --max-time 5 \
+                  local pid line rc i
+                  local -a urls=()
+                  for ((i = 0; i < 600; i++)); do
+                    urls+=("https://${klib.hostPort cfg.controlPlaneEndpoint 6443}/api/v1/nodes/$node?pretty=false")
+                  done
+                  exec 9< <(curl -s --rate 20/s --max-time 15 \
                     --cacert "$pki/ca.crt" --cert "$pki/kubelet.crt" --key "$pki/kubelet.key" \
-                    "https://${klib.hostPort cfg.controlPlaneEndpoint 6443}/api/v1/nodes/$node" 2>/dev/null \
-                    | tr -d ' \n' | grep -q '"type":"Ready","status":"True"'
+                    "''${urls[@]}" 2>/dev/null)
+                  pid=$!
+                  while :; do
+                    IFS= read -r -t 15 -u9 line
+                    rc=$?
+                    if [ "$rc" -eq 0 ]; then
+                      case $line in
+                        *'"type":"Ready","status":"True"'*)
+                          kill "$pid" 2>/dev/null || true
+                          exec 9<&-
+                          return 0
+                          ;;
+                      esac
+                    elif [ "$rc" -gt 128 ]; then
+                      kill "$pid" 2>/dev/null || true
+                      exec 9<&-
+                      return 1
+                    else
+                      exec 9<&-
+                      return 1
+                    fi
+                  done
                 }
                 while ! probe; do
                   sleep 0.05
