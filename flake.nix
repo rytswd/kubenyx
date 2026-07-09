@@ -583,8 +583,9 @@
                 touch $out
               '';
           single-node = runTest ./tests/single-node.nix;
-          # IPv6 single-stack acceptance leg (ipv6.org §3-4).
+          # IPv6 single-stack acceptance legs (ipv6.org §3-4).
           ipv6 = runTest ./tests/ipv6.nix;
+          ipv6-multi = runTest ./tests/ipv6-multi.nix;
           single-node-etcd = runTest ./tests/single-node-etcd.nix;
           multi-node = runTest ./tests/multi-node.nix;
           multi-node-mem = runTest ./tests/multi-node-mem.nix;
