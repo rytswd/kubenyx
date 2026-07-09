@@ -111,6 +111,15 @@ lib.mkMerge [
       enable = true;
       datastore.backend = "etcd-mem";
       datastore.volatile = true;
+      # Prebaked image store (prebake.org): the seed set (pause image) is
+      # imported into a containerd content store at BUILD time and overlay-
+      # mounted (~60ms) instead of `ctr import`ed during boot — the import
+      # unit previously burned CPU inside the node-Ready convergence window
+      # (profiler rank 4: seed-images blame 1.76s concurrent with kubelet
+      # on 4 vcpus). Costs the `native` snapshotter (tmpfs-backed COW; the
+      # kernel rejects overlay-upperdir-on-overlayfs), which the prebake
+      # test legs validate end-to-end. Module default stays OFF.
+      node.prebakeImages = true;
     };
 
     # ---- snapshot/restore hygiene ---------------------------------------------
