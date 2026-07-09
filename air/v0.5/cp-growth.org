@@ -1,0 +1,92 @@
+#+title: Control-Plane Scale-Out — Growing the Quorum via Learners
+#+state: ready
+#+FILETAGS: :core:
+
+* Summary
+
+Revises v0.3's Decision 3 (user steer 2026-07-09): the control-plane
+set is no longer fixed at bootstrap — it GROWS declaratively. Add a
+=role = "server"= node to =kubenyx.nodes=, activate on the existing
+nodes, boot the new server: an etcd-learner-based reconcile brings it
+into the quorum with zero API downtime and zero workload disruption.
+Shrinking remains a documented =etcdctl= runbook — removal is a
+destructive judgment call, not machinery.
+
+The door was built for this: the member-set guard's distinct "member
+set changed" error site, eval-derived initial-cluster/LB-backends/SAN
+sets, and the fingerprint living in the data dir were all designed in
+v0.3 with this exact hook named in comments.
+
+* Design
+
+** 1. Reconcile on existing servers: =kubenyx-etcd-reconcile=
+A oneshot on every server (gated =serverCount > 1=), ordered after
+etcd is healthy, running on boot and on activation. It compares the
+DECLARED server set against =etcdctl member list=:
+- Missing members are added as *LEARNERS*, strictly one at a time
+  (=etcdctl member add <name> --learner --peer-urls=https://[addr]:2380=).
+  Learners do not count toward quorum — the safety property that makes
+  unattended growth sound. (Plain member-add of an unstarted member
+  DOES count toward quorum: growing 1→2 that way wedges the cluster
+  until the new member starts. Learners are not an optimization; they
+  are the correctness mechanism.)
+- Learners present and caught up (=member list= sync status /
+  =endpoint status= revision delta) are PROMOTED, one at a time.
+- Members present in the runtime set but absent from the declaration:
+  NEVER removed — loud journal warning citing the shrink runbook.
+- Idempotent and convergent: safe to run on every server (the etcd
+  API rejects duplicate adds; first-writer wins, the rest observe).
+
+** 2. The member-set guard learns "superset"
+The v0.3 guard (=<data-dir>/.kubenyx-member-set=) hard-errors on any
+change. Now: recorded set ⊂ declared set → allowed (reconcile is
+handling it; the guard rewrites its record AFTER the runtime member
+list matches the declaration). Shrink or rename → the existing hard
+error, unchanged.
+
+** 3. The joining server: wait-to-be-added, then =existing=
+A fresh server with an empty data dir must not guess between
+"bootstrap a new cluster" and "join an existing one". ExecStartPre
+probe: poll the OTHER declared servers' client endpoints (TLS, the
+apiserver-etcd-client identity from the shipped custody bundle —
+joining a durable quorum already requires the custody CA, so the
+credentials exist by construction).
+- A quorum answers → JOIN path: wait until our name appears in
+  =member list= (the peers' reconcile adds us as learner), then start
+  etcd with =--initial-cluster-state existing= and the initial-cluster
+  narrowed to the CURRENT member set + self (etcd join semantics).
+- Nobody answers and the declared set includes us at bootstrap →
+  the existing v0.3 bootstrap path (=new=), unchanged.
+Bounded wait with a loud DEGRADED marker; never silently bootstraps a
+second cluster.
+
+** 4. What already just works (from v0.3's door-open design)
+- etcd cert SANs: every server issues the full declared-address set —
+  a new declaration re-mints additively on rebuild (fingerprint-gated).
+- kubenyx-lb: backends are eval-derived from the declared servers;
+  the agent rebuild restarts the LB with the grown set.
+- =leaderElect=: already =serverCount > 1=-derived.
+- Rolling activation on existing servers restarts etcd one node at a
+  time (operator sequences activation, as with agent-add) — quorum
+  tolerates it by construction.
+
+* Acceptance Criteria
+- =server-add= test leg: 1 server + 1 agent with a running workload
+  pod and a pre-growth object. Activate the 3-server declaration on
+  server1; ship custody bundles; boot server2 and server3. Assert:
+  both join as learners and get promoted (member list shows 3 voting
+  members); the pre-growth object is readable from every server; a
+  write loop running THROUGH the growth window never fails longer
+  than a single retry; the workload pod never restarts; the agent's
+  kubenyx-lb backend set grew after its activation; the member-set
+  guard files on all three servers record the grown set.
+- Shrink attempt (declare 2 of 3): reconcile refuses with the runbook
+  warning; nothing is removed; the guard still passes (superset rule
+  is one-directional).
+- v0.3 legs unaffected: multi-server, failover, server-reboot,
+  ca-custody green unchanged.
+- Fast path: byte-identity for default and single-server configs
+  (reconcile and probe units exist only at serverCount > 1).
+
+* History
+- 2026-07-09: Drafted on user steer revising v0.3 Decision 3; ready.

@@ -14,6 +14,7 @@ keep the whole 15-leg matrix green).
 | Document | Scope |
 |----------+-------|
 | [[file:perf-floor.org][perf-floor.org]] | Profile → ranked costs → A/B-proven optimizations; recreation micro-pass; code cleanliness gate |
+| [[file:cp-growth.org][cp-growth.org]] | Declarative control-plane scale-out via etcd learners (revises v0.3 Decision 3) |
 
 * History
 - 2026-07-09: Milestone opened as part of the "complete everything"

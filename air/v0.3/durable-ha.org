@@ -325,3 +325,8 @@ overrides (D12).
   OS-upgrade shape without it. All six matrix legs green; the fast
   path held the performance gate (bench/RESULTS.md 2026-07-08
   campaign entry). Complete.
+- 2026-07-09: Decision 3 revised by user steer — CP growth is now
+  machinery, not a runbook: [[file:../v0.5/cp-growth.org][cp-growth.org]] (learner-based declarative
+  reconcile through exactly the door-open hooks this doc encoded:
+  the member-set guard error site, eval-derived member/backend/SAN
+  sets). Shrink remains a runbook.
