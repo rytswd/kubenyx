@@ -52,3 +52,39 @@ fast path A/B-neutral.
 
 * History
 - 2026-07-09: Drafted as the campaign contract; ready.
+- 2026-07-09: Profiled + attacked ranks 0–3 (see bench/RESULTS.md for
+  the consolidated table; every keep carries its paired A/B in its
+  commit message). Bimodality EXPLAINED: host CPU contention —
+  byte-identical runner 3.52 s vs 5.36 s across a sibling test storm;
+  320 busy threads reproduce 8.07/13.90 s with ~2.3× uniform phase
+  dilation; drop_caches no effect. Control is now enforced by
+  bench/microvm-boot.sh (governor + idleness gate + cpuset pin), used
+  by every subsequent A/B here.
+- 2026-07-09: Tried and REJECTED, with numbers:
+  - Blanket =systemd-udev-trigger.enable=false= (the earlier mask
+    commit): +0.110 s paired, but host-facing networking was DEAD
+    (ping 100% loss, :10124/:6443 http=000, dev-ttyS0 start job 90 s,
+    snap resume blocked) — part of the gain was networkd doing
+    nothing. Replaced by net+tty-scoped coldplug + initrd virtio_net:
+    +0.08 s paired vs the mask WITH reachability restored (ping 3/3
+    0.54 ms, handoff 200, apiserver 401, resume 77.9 ms median).
+    Also probed: replaying pci in stage 2 instead → legacy-probe
+    storm on RTC-less firecracker (CMOS 0x70/0x71 exits), 3.5 s
+    boots became 32 s.
+  - =nodes?watch=1= readiness probe (this doc's own attack idea for
+    the report gap): watch first-frame latency during bring-up is
+    seconds (node Ready 3.03 s, watch match 5.61 s ⇒ boots 5.4–5.6 s
+    vs 3.4 s); and =curl -N | grep -q= lingers ~2.9 s after match
+    (SIGPIPE needs a next event; Ready nodes go quiet). Landed
+    instead: one curl process, 600-URL list, =--rate 20/s=, one TLS
+    session, shell kill-on-match — +0.055 s paired over 10 pairs.
+  - kcm /readyz-gate framing was WRONG in the ranked table: kcm was
+    already ordered on /readyz. The crash is authorizer-informer lag
+    (readyz 2.453 s, denial 2.810 s, "cluster-admin not found").
+    Fixed by gating on the exact request with kcm's own identity
+    (=kubenyx-ready --wait=): crash 12/12 → 0, functional 5.26 →
+    3.61 s, marker +0.015 s paired.
+- 2026-07-09: Recreation path re-validated post rank-0 fix:
+  take + 5/5 resume cycles, median 77.9 ms (42.3–81.5). The parked
+  recreation micro-pass (kubenyx-snap probe timings) remains
+  unvalidated in its own wip — next session's material.

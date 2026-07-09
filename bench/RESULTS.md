@@ -7,6 +7,58 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-09 — Performance floor: profiled attack, cold boot 7.3 s → 3.4 s
+
+air/v0.5/perf-floor.org rules of engagement executed: instrumented
+ranked costs, attacked in rank order, every change judged by an
+interleaved paired A/B (alternating order, paired median or revert) on
+the in-guest `KUBENYX-CLUSTER-READY` marker, single-node +
+multi-node-mem legs green after each keep. Instruments: probe-variant
+`systemd-analyze time/blame/critical-chain` + short-monotonic journals
+over the autologin console, host-timestamped console markers, in-guest
+poll probes, host reachability probes, `kubenyx-snap cycle`.
+
+**The bimodality is the host, not the guest** (profiler, confirmed
+here): byte-identical runner booted 3.52 s and 5.36 s seven minutes
+apart; a sibling cargo-test storm spanned exactly the slow window; 320
+synthetic busy threads reproduce 8.07/13.90 s with uniform ~2.3×
+dilation of every phase; drop_caches changes nothing (ZFS ARC serves
+the store). Consequence is a bench CONTRACT, not a guest patch —
+`bench/microvm-boot.sh` / `bench/microvm-ab.sh` now enforce:
+performance governor on all cpus; an idleness gate (min-of-3 runnable
+samples > 16 ⇒ refuse, measured refusing at runnable=324 under the
+storm); VMM pinned to one L3 neighborhood (`taskset -c 8-15` — itself
++0.16 s paired median over 6 pairs vs free placement on an idle host,
+envelope 3.30–3.49 vs 3.38–3.73). Pinned numbers are not comparable to
+pre-contract logs. Under the off-range storm pinning helps but does
+not immunize (4.61 s vs 5.12 s free): frequency/LLC bleed — the gate
+is the primary control.
+
+Keeps this campaign (each with its A/B in the commit message; console
+TERM=dumb ~2×1.0 s, PID1 mount-dispatch unthrottle ~2×0.95 s, report
+probe 50 ms, microVM prebake +0.035 s landed earlier in-campaign):
+
+| Rank | Change | Paired A/B (prior/new) |
+|---|---|---|
+| 0 | udev coldplug scoped to net+tty (undoes the mask rev's DEAD tap networking + 90 s ttyS0 hang; virtio_net pinned into initrd — pci replay in stage 2 is a legacy-probe storm, 3.5 s → 32 s) | +0.08 s over 6 pairs vs mask, 3.57→3.48 raw; vs full revert −0.01 s (tie) but envelope 3.44–3.62 vs 3.48–3.93; ping 3/3, :10124=200, :6443=401, snap resume 5/5 median 77.9 ms |
+| 1 | bench contention contract (host-side only, zero guest bytes) | pin +0.16 s/6 pairs idle; gate refuses runnable=324 |
+| 2 | report probes over ONE persistent TLS session (`curl --rate 20/s` URL-list; fork+handshake per 50 ms leaves the boot) | +0.055 s over 10 pairs, 9/10 faster 0 slower, 3.41→3.35 raw |
+| 3 | kcm ExecStartPre gate on the exact configmap GET it crashed on (`kubenyx-ready --wait`, 10 ms fork-free) | +0.015 s over 10 pairs marker (kcm is off the marker path); kcm crash 10/10 → 0/10, functional 5.26 s → 3.61 s |
+
+Tried and REJECTED (numbers in perf-floor.org History): stage-2
+udev-trigger blanket mask (its +0.110 s was partly networkd doing
+nothing — host-facing networking dead, resume blocked);
+`nodes?watch=1` readiness probe (watch first-frame lands seconds late
+during bring-up: node Ready 3.03 s, match 5.61 s ⇒ 5.4–5.6 s boots;
+plus `curl -N | grep -q` sits ~2.9 s after match waiting for SIGPIPE).
+
+**Cumulative** (final vs campaign base = pre-perf-floor prebake rev,
+8 pairs, contract harness): paired median **+3.875 s**, final faster
+8/8 — 7.42/3.47 7.25/3.40 7.26/3.43 7.31/3.41 7.31/3.46 7.30/3.44
+7.31/3.42 7.25/3.31; raw medians **7.305 s → 3.425 s**. kcm now joins
+crash-free at ~3.6 s; kubenyx-snap recreation re-validated at median
+77.9 ms/5 cycles.
+
 ## 2026-07-09 — Pre-baked image stores: 99.7% of import cost becomes a mount
 
 air/v0.4/prebake.org implemented — the last v0.4 item. The seed set
