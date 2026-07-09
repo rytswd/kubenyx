@@ -206,7 +206,23 @@ lib.mkMerge [
     # switch-root exec (host-timestamped console, perf governor). A dumb
     # terminal is never queried. Costs status-line colors on the interactive
     # console — nothing else; these guests are benchmarked, not admired.
-    boot.kernelParams = [ "TERM=dumb" ];
+    #
+    # MOUNT_RATE_LIMIT_BURST: PID1's mountinfo monitor is rate-limited to 5
+    # events per 1s; the 7 API-fs mounts systemd itself performs at start
+    # exhaust that budget, so every boot-path mount unit dispatched after
+    # them (initrd: sysroot-nix-store.mount; stage 2: run-wrappers.mount)
+    # freezes until the window expires — two separate ~0.95s stalls observed
+    # via rd.systemd.log_level=debug ("mount-monitor-dispatch entered rate
+    # limit state"). Upstream ships this env knob for exactly this ("it
+    # stalls the boot sequence", core/mount.c mount_enumerate); a bare
+    # KEY=VALUE cmdline word becomes PID1's environment in both stages
+    # (switch-root preserves environ). 100 is arbitrary headroom: a boot
+    # produces ~20 mount events, and a throttled monitor only defers
+    # visibility of external mounts, so headroom is safe.
+    boot.kernelParams = [
+      "TERM=dumb"
+      "SYSTEMD_DEFAULT_MOUNT_RATE_LIMIT_BURST=100"
+    ];
     # No DHCP wait: addresses are static per variant; boot must not block on
     # network-online for anything but the (instant) declared-address PKI.
     networking.useDHCP = false;
