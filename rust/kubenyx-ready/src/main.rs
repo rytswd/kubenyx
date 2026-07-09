@@ -48,54 +48,6 @@ fn die(msg: &str) -> ! {
     exit(2);
 }
 
-/// Accepts "no client verification" — probes may target self-signed
-/// component endpoints (kcm/scheduler healthz) where the identity is
-/// irrelevant: only liveness of the port matters.
-#[derive(Debug)]
-struct NoVerify(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for NoVerify {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
-}
-
 fn load_pem_certs(path: &str) -> Vec<rustls::pki_types::CertificateDer<'static>> {
     let data = std::fs::read(path).unwrap_or_else(|e| die(&format!("read {path}: {e}")));
     rustls_pemfile::certs(&mut data.as_slice())
@@ -144,15 +96,11 @@ fn build_probe(
         .unwrap_or_else(|| (hostport.to_string(), if tls { 443 } else { 80 }));
 
     let tls_config = if tls {
-        let provider = rustls::crypto::ring::default_provider();
-        let provider = Arc::new(provider);
-        let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .expect("tls versions");
+        // --insecure probes only care about port liveness (self-signed
+        // component endpoints); the shared kubenyx-tls builder carries the
+        // one NoVerify implementation.
         let builder = if insecure {
-            builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
+            kubenyx_tls::insecure_client_builder()
         } else if let Some(ca) = cacert {
             let mut roots = rustls::RootCertStore::empty();
             for c in load_pem_certs(ca) {
@@ -160,7 +108,12 @@ fn build_probe(
                     .add(c)
                     .unwrap_or_else(|e| die(&format!("bad CA cert: {e}")));
             }
-            builder.with_root_certificates(roots)
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("tls versions")
+            .with_root_certificates(roots)
         } else {
             // A silent NoVerify fallback would let future call sites skip
             // verification by accident.

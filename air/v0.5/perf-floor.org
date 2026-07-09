@@ -103,3 +103,23 @@ fast path A/B-neutral.
   vs campaign base: single +38.4 ms paired (6/6), mesh +40.8 ms
   paired (6/6). Committed-rev re-validation: take + cycle 5/5 median
   31.9 ms; launcher mesh + mesh-take + mesh-cycle 5/5 median 43.9 ms.
+- 2026-07-09: Cleanliness gate DONE. Rust: clippy -D warnings green
+  workspace-wide (signal-handler casts via *const (), kubenyx-pki
+  Issue::ensure and etcd-mem range_kvs arg folds, dead in_range /
+  t_api / ip bindings out), the triplicated NoVerify verifier
+  deduplicated into a new kubenyx-tls crate (rustls-only dep), first
+  cargo fmt enforcement. Nix: dead usingKine binding, microVM variant
+  net boilerplate folded into mkGuestNet/mkSingleNodeMembership,
+  stale kine references in the guest profile (incl. the DEGRADED
+  journal dump querying a nonexistent kine unit), single-node tap
+  instructions reconciled with the bridge world, protobuf added to
+  the dev shell (cargo could not even check etcd-mem without it).
+  Neutrality proof: eval dump (unit texts + built-unit paths + etc
+  sources + tmpfiles) for default / all-v6 / multi-server(+agent)
+  configs byte-identical modulo the necessarily-rebuilt
+  kubenyx-tools//-lb store hash; flake refactor value-identical for
+  every variant's interfaces/network/kernelParams/membership; guest
+  runner delta bounded to exactly the intended kine→etcd-mem line.
+  Legs green at the final rev: lib-tests, single-node 30.9 s, ipv6
+  39.9 s, multi-server 22.0 s; snap cycle ×3 median 35.2 ms
+  (21.3–37.4).

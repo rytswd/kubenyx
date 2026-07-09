@@ -687,6 +687,7 @@ dependencies = [
 name = "kubenyx-lb"
 version = "0.1.0"
 dependencies = [
+ "kubenyx-tls",
  "libc",
  "rustls",
  "rustls-pemfile",
@@ -710,6 +711,7 @@ dependencies = [
 name = "kubenyx-ready"
 version = "0.1.0"
 dependencies = [
+ "kubenyx-tls",
  "libc",
  "rustls",
  "rustls-pemfile",
@@ -719,7 +721,15 @@ dependencies = [
 name = "kubenyx-snap"
 version = "0.1.0"
 dependencies = [
+ "kubenyx-tls",
  "libc",
+ "rustls",
+]
+
+[[package]]
+name = "kubenyx-tls"
+version = "0.1.0"
+dependencies = [
  "rustls",
 ]
 

@@ -1,10 +1,7 @@
 [package]
-name = "kubenyx-ready"
+name = "kubenyx-tls"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rustls-pemfile = "2"
-libc = "0.2"
-kubenyx-tls = { path = "../kubenyx-tls" }

@@ -15,7 +15,6 @@ let
   k8s = cfg.packages.kubernetes;
   wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
 
-  usingKine = cfg.datastore.backend == "kine-sqlite";
   usingEtcd = cfg.datastore.backend == "etcd";
   # systemd unit providing the datastore for this backend; a Requires= on a
   # nonexistent unit (e.g. etcd.service when backend = etcd-mem) fails the

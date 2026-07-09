@@ -259,11 +259,11 @@ lib.mkMerge [
     # ---- observability -------------------------------------------------------
     # Phase markers on the console: systemd stops mirroring unit status once
     # startup "finishes", so key units announce themselves explicitly.
-    # Semantics: notify units (kine, kube-apiserver, coredns) mark genuine
-    # readiness (ExecStartPost runs after READY=1); kubelet (Type=simple)
-    # and oneshots mark process start/completion. The list matches each
-    # role's fixed unit shape (etcd-mem backend) — adjust it if the
-    # profile ever changes backend.
+    # Semantics: notify units (etcd-mem, kube-apiserver, coredns) mark
+    # genuine readiness (ExecStartPost runs after READY=1); kubelet
+    # (Type=simple) and oneshots mark process start/completion. The list
+    # matches each role's fixed unit shape (etcd-mem backend) — adjust it
+    # if the profile ever changes backend.
     systemd.services =
       lib.genAttrs
         (
@@ -411,7 +411,7 @@ lib.mkMerge [
                     {
                       echo "KUBENYX-DEGRADED: not ready at uptime ''${up}s"
                       systemctl list-units --failed --no-legend || true
-                      for u in kubenyx-pki kine kube-apiserver kubelet; do
+                      for u in kubenyx-pki etcd-mem kube-apiserver kubelet; do
                         echo "--- $u:"
                         journalctl -u "$u" --no-pager -n 4 -o cat || true
                       done
@@ -619,11 +619,11 @@ lib.mkMerge [
   # than waiting for the full "Basic System" target (~5s). Each service also
   # needs DefaultDependencies=false to shed the implicit After=basic.target.
   #
-  # Safety: kine uses only Unix sockets + SQLite (no dbus/nss needed); the
-  # apiserver, kcm, and scheduler have explicit After= for their direct deps
-  # already; kubelet needs containerd which is co-opted here. The tap/routes
-  # still configure via networkd (parallel, not serialised through kubenyx),
-  # so pod networking converges in the background as it did before.
+  # Safety: etcd-mem uses only a Unix socket + its own memory (no dbus/nss
+  # needed); the apiserver, kcm, and scheduler have explicit After= for their
+  # direct deps already; kubelet needs containerd which is co-opted here. The
+  # tap/routes still configure via networkd (parallel, not serialised through
+  # kubenyx), so pod networking converges in the background as it did before.
   {
     systemd.targets.kubenyx = {
       wantedBy = lib.mkForce [ "sysinit.target" ];

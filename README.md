@@ -45,6 +45,13 @@ $ sudo ip addr add 10.100.0.1/24 dev kubenyx-tap0
 $ sudo ip link set kubenyx-tap0 up
 ```
 
+If you have ever run the mesh launcher (`nix run .#microvm-cluster`,
+see the variants table below) on this boot, skip the commands above: the launcher
+already created `kubenyx-tap0` enslaved to the `kubenyx-br0` bridge,
+and the bridge holds `10.100.0.1/24` — adding the address to the tap
+as well would put the same address on two interfaces. The single-node
+variant works unchanged behind the bridge.
+
 Boot a cluster:
 
 ```console

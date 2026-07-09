@@ -83,6 +83,34 @@
       cluster7Members = mkMicrovmClusterMembers 6;
       cluster7BootOrder = clusterBootOrderFor cluster7Members;
 
+      # One guest NIC with a static address — the stanza every microVM
+      # variant repeats: the interface (tap/user + id) is per-variant, the
+      # MAC keys the systemd.network match, and address/gateway complete
+      # the static config (no DHCP anywhere in these guests).
+      mkGuestNet =
+        {
+          interface,
+          mac,
+          address,
+          gateway,
+        }:
+        {
+          microvm.interfaces = [ (interface // { inherit mac; }) ];
+          systemd.network.networks."05-kubenyx" = {
+            matchConfig.MACAddress = mac;
+            address = [ "${address}/24" ];
+            routes = [ { Gateway = gateway; } ];
+          };
+        };
+      # The implicit one-node membership every single-node variant declares.
+      mkSingleNodeMembership = address: {
+        kubenyx.nodes.kubenyx = {
+          index = 0;
+          inherit address;
+          role = "server";
+        };
+      };
+
       mkMicrovmClusterNode =
         members: name:
         let
@@ -92,6 +120,17 @@
           }";
         in
         mkMicrovm "firecracker" {
+          imports = [
+            (mkGuestNet {
+              interface = {
+                type = "tap";
+                id = "kubenyx-tap${toString n.index}";
+              };
+              inherit mac;
+              address = n.address;
+              gateway = "10.100.0.1";
+            })
+          ];
           networking.hostName = name;
           # Same snapshot-safe xstate config as the single-node firecracker
           # variant (see its comment) — mesh snapshotting is phase 2, but
@@ -100,18 +139,6 @@
             "clearcpuid=amx_tile,amx_int8,amx_bf16"
             "noxsaves"
           ];
-          microvm.interfaces = [
-            {
-              type = "tap";
-              id = "kubenyx-tap${toString n.index}";
-              inherit mac;
-            }
-          ];
-          systemd.network.networks."05-kubenyx" = {
-            matchConfig.MACAddress = mac;
-            address = [ "${n.address}/24" ];
-            routes = [ { Gateway = "10.100.0.1"; } ];
-          };
           kubenyx = {
             nodes = members;
           }
@@ -125,91 +152,75 @@
       nixosModules.kubenyx = import ./modules;
       nixosModules.default = self.nixosModules.kubenyx;
 
-      nixosConfigurations = {
-        # KVM hosts: `nix run .#microvm-firecracker` (after creating the
-        # tap: ip tuntap add kubenyx-tap0 mode tap && ip addr add
-        # 10.100.0.1/24 dev kubenyx-tap0 && ip link set kubenyx-tap0 up).
-        # The firecracker and cloud-hypervisor variants are alternatives:
-        # they share the tap id, MAC and guest IP — run one at a time.
-        microvm-firecracker = mkMicrovm "firecracker" {
-          # Snapshot-safe xstate config (measured: no boot cost, 8.74s vs
-          # 8.31s baseline is within run variance). Restoring a snapshot
-          # into a FRESH firecracker process on AMX hosts (Granite Rapids)
-          # kernel-panics in restore_fpregs_from_fpstate: XRSTORS #GP on
-          # the AMX tile state (the new VMM never re-acquires the AMX
-          # xstate permission) and again on IA32_XSS-managed CET state.
-          # Masking AMX CPUID alone is not enough — noxsaves removes all
-          # supervisor xstates from XSAVES so the snapshot carries none.
-          boot.kernelParams = [
-            "clearcpuid=amx_tile,amx_int8,amx_bf16"
-            "noxsaves"
-          ];
-          microvm.interfaces = [
-            {
+      nixosConfigurations =
+        let
+          # Single-node tap identity shared by the KVM variants: the mesh
+          # launcher owns the host side these days (kubenyx-br0 holds
+          # 10.100.0.1/24 with kubenyx-tap0 enslaved — see mkClusterLauncher);
+          # for a tapless host, create the tap and either bridge it the same
+          # way or put 10.100.0.1/24 directly on it. The firecracker and
+          # cloud-hypervisor variants are alternatives: they share the tap
+          # id, MAC and guest IP — run one at a time.
+          singleNodeTapNet = mkGuestNet {
+            interface = {
               type = "tap";
               id = "kubenyx-tap0";
-              mac = "02:00:00:00:00:01";
-            }
-          ];
-          systemd.network.networks."05-kubenyx" = {
-            matchConfig.MACAddress = "02:00:00:00:00:01";
-            address = [ "10.100.0.2/24" ];
-            routes = [ { Gateway = "10.100.0.1"; } ];
-          };
-          kubenyx.nodes.kubenyx = {
-            index = 0;
+            };
+            mac = "02:00:00:00:00:01";
             address = "10.100.0.2";
-            role = "server";
+            gateway = "10.100.0.1";
           };
-        };
-        microvm-cloud-hypervisor = mkMicrovm "cloud-hypervisor" {
-          microvm.interfaces = [
-            {
-              type = "tap";
-              id = "kubenyx-tap0";
-              mac = "02:00:00:00:00:01";
-            }
-          ];
-          systemd.network.networks."05-kubenyx" = {
-            matchConfig.MACAddress = "02:00:00:00:00:01";
-            address = [ "10.100.0.2/24" ];
-            routes = [ { Gateway = "10.100.0.1"; } ];
+        in
+        {
+          # KVM hosts: `nix run .#microvm-firecracker`.
+          microvm-firecracker = mkMicrovm "firecracker" {
+            imports = [
+              singleNodeTapNet
+              (mkSingleNodeMembership "10.100.0.2")
+            ];
+            # Snapshot-safe xstate config (measured: no boot cost, 8.74s vs
+            # 8.31s baseline is within run variance). Restoring a snapshot
+            # into a FRESH firecracker process on AMX hosts (Granite Rapids)
+            # kernel-panics in restore_fpregs_from_fpstate: XRSTORS #GP on
+            # the AMX tile state (the new VMM never re-acquires the AMX
+            # xstate permission) and again on IA32_XSS-managed CET state.
+            # Masking AMX CPUID alone is not enough — noxsaves removes all
+            # supervisor xstates from XSAVES so the snapshot carries none.
+            boot.kernelParams = [
+              "clearcpuid=amx_tile,amx_int8,amx_bf16"
+              "noxsaves"
+            ];
           };
-          kubenyx.nodes.kubenyx = {
-            index = 0;
-            address = "10.100.0.2";
-            role = "server";
+          microvm-cloud-hypervisor = mkMicrovm "cloud-hypervisor" {
+            imports = [
+              singleNodeTapNet
+              (mkSingleNodeMembership "10.100.0.2")
+            ];
           };
-        };
-        # SLiRP user networking; runs anywhere (KVM with TCG fallback) —
-        # this is the variant CI/KVM-less machines can execute. q35: the
-        # `microvm` machine type needs KVM's in-kernel irqchip (pic=off)
-        # and cannot fall back to TCG.
-        microvm-qemu = mkMicrovm "qemu" {
-          microvm.qemu.machine = "q35";
-          # Explicit CPU model drops -enable-kvm/-cpu host from the runner
-          # (microvm.nix's emulation escape hatch). KVM hosts should use
-          # the firecracker/cloud-hypervisor variants instead.
-          microvm.cpu = "max";
-          microvm.interfaces = [
-            {
-              type = "user";
-              id = "u0";
-              mac = "02:00:00:00:00:01";
-            }
-          ];
-          systemd.network.networks."05-kubenyx" = {
-            matchConfig.MACAddress = "02:00:00:00:00:01";
-            address = [ "10.0.2.15/24" ];
-            routes = [ { Gateway = "10.0.2.2"; } ]; # SLiRP gateway
+          # SLiRP user networking; runs anywhere (KVM with TCG fallback) —
+          # this is the variant CI/KVM-less machines can execute. q35: the
+          # `microvm` machine type needs KVM's in-kernel irqchip (pic=off)
+          # and cannot fall back to TCG.
+          microvm-qemu = mkMicrovm "qemu" {
+            imports = [
+              (mkGuestNet {
+                interface = {
+                  type = "user";
+                  id = "u0";
+                };
+                mac = "02:00:00:00:00:01";
+                address = "10.0.2.15";
+                gateway = "10.0.2.2"; # SLiRP gateway
+              })
+              (mkSingleNodeMembership "10.0.2.15")
+            ];
+            microvm.qemu.machine = "q35";
+            # Explicit CPU model drops -enable-kvm/-cpu host from the runner
+            # (microvm.nix's emulation escape hatch). KVM hosts should use
+            # the firecracker/cloud-hypervisor variants instead.
+            microvm.cpu = "max";
           };
-          kubenyx.nodes.kubenyx = {
-            index = 0;
-            address = "10.0.2.15";
-            role = "server";
-          };
-        };
-      }
+        }
       # Mesh nodes: microvm-cluster-server, microvm-cluster-agent1, … —
       # per-node firecracker variants generated from the members sets.
       // nixpkgs.lib.listToAttrs (
@@ -610,6 +621,9 @@
             kubectl
             jq
             nixfmt-rfc-style
+            # etcd-mem's tonic-build needs protoc; without it `cargo
+            # clippy/test --workspace` cannot even check the tree.
+            protobuf
           ];
         };
       });

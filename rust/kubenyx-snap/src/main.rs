@@ -162,62 +162,10 @@ fn api_expect(sock: &Path, method: &str, path: &str, body: &str) {
 
 /// The guest CA lives in the guest's tmpfs and is unreachable from the host
 /// by design; the probe only proves the apiserver is serving TLS+HTTP (a
-/// 401 is a healthy answer for an unauthenticated client).
-#[derive(Debug)]
-struct NoVerify(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for NoVerify {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
-}
-
+/// 401 is a healthy answer for an unauthenticated client) — hence the
+/// shared kubenyx-tls NoVerify builder.
 fn tls_probe_config() -> Arc<rustls::ClientConfig> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    Arc::new(
-        rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .expect("tls versions")
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
-            .with_no_client_auth(),
-    )
+    Arc::new(kubenyx_tls::insecure_client_builder().with_no_client_auth())
 }
 
 fn probe_once(config: &Arc<rustls::ClientConfig>, addr: &str, host: &str) -> bool {
