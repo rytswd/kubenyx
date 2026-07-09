@@ -280,6 +280,16 @@ lib.mkMerge [
         # top-level keys freely.
         systemd-random-seed.enable = false; # nothing to save/restore per boot
         systemd-networkd-persistent-state.enable = false; # volatile guest
+        # No stage-2 udev COLDPLUG replay: the microVM device set is static
+        # and tiny (one virtio disk, one NIC, serial ports); everything
+        # boot-critical is either handled by the initrd's own udev (store
+        # disk by-label mount) or arrives as a live uevent that the still-
+        # running stage-2 udevd processes normally. The trigger's only
+        # observable work here was re-plugging blkid/by-* symlink device
+        # units ~1.4s into stage 2 (systemd-analyze blame) and burning CPU
+        # inside the control-plane bring-up window on 4 vcpus. Live hotplug
+        # is unaffected.
+        systemd-udev-trigger.enable = false;
 
         # Post-restore wall-clock correction: a restored snapshot keeps
         # monotonic time (kvmclock state travels with the snapshot) but
