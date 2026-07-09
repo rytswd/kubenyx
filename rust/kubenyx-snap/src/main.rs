@@ -216,6 +216,7 @@ fn probe_once(config: &Arc<rustls::ClientConfig>, addr: &str, host: &str) -> boo
     };
     stream.set_read_timeout(Some(Duration::from_millis(500))).ok();
     stream.set_write_timeout(Some(Duration::from_millis(500))).ok();
+    stream.set_nodelay(true).ok();
     let name = rustls::pki_types::ServerName::try_from(host.to_string())
         .unwrap_or_else(|_| die("bad probe host"));
     let Ok(conn) = rustls::ClientConnection::new(config.clone(), name) else {
@@ -237,7 +238,7 @@ fn wait_api(config: &Arc<rustls::ClientConfig>, addr: &str, timeout: Duration) -
         if probe_once(config, addr, &host) {
             return Some(start.elapsed());
         }
-        std::thread::sleep(Duration::from_millis(3));
+        std::thread::sleep(Duration::from_millis(1));
     }
     None
 }
@@ -508,7 +509,8 @@ fn cmd_cycle(flags: &Flags) {
         let (mut child, t) = resume_once(&firecracker, &snapshot, &api_sock, &probe_addr, &poke_addr, enable_pci, &config);
         let total_ms = (t.load + t.load_to_api).as_secs_f64() * 1e3;
         println!(
-            "round={round} load_ms={:.1} load_to_api_ms={:.1} total_ms={total_ms:.1}",
+            "round={round} spawn_to_sock_ms={:.1} load_ms={:.1} load_to_api_ms={:.1} total_ms={total_ms:.1}",
+            t.spawn_to_sock.as_secs_f64() * 1e3,
             t.load.as_secs_f64() * 1e3,
             t.load_to_api.as_secs_f64() * 1e3,
         );

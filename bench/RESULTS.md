@@ -7,6 +7,40 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-09 — Recreation micro-pass: TCP_NODELAY kills a ~40 ms Nagle stall, 66 → ~32 ms
+
+The parked kubenyx-snap fixed-cost pass (perf-floor.org item 3),
+host-tool changes only — zero guest bytes. A/B protocol: alternating
+`cycle -n 5` (single) / `mesh-cycle -n 5` (3-node mesh) runs against
+the SAME snapshot, observation = the run's median_total_ms, ≥6 pairs,
+judged by paired median; pinned (`taskset -c 8-15` single, `8-31`
+mesh), governor + idleness contract as everywhere else.
+
+Kept (paired A/B in the commit message):
+
+| Change | Paired A/B |
+|---|---|
+| `TCP_NODELAY` on the apiserver probe socket | **+36.8 ms** over 6 pairs, 6/6 faster (66.0–73.5 → 29.7–37.1); the dominant slow mode was the probe's TLS handshake parked on Nagle/delayed-ACK for ~40 ms — load_to_api collapses 50 → 12–15 ms. Dense 5 ms time-pokes had already ruled out clock-gating (mode unmoved). |
+| probe poll 3 → 1 ms | +0.5 ms over 10 pairs (mechanism-consistent: mean residual sleep 1.5 → 0.5 ms) |
+| `cycle` prints spawn_to_sock_ms per round | observability only, covered by the cumulative A/B |
+
+Tried and REJECTED: sock-wait poll 200 → 50 µs (+0.1 ms paired on
+spawn_to_sock — a segment excluded from the tool's own total — with a
+noise-level −2.3 ms paired read on total; microseconds, ambiguity, no);
+mesh probe overlapped with agent load tails via a server-loaded signal
+(−0.6 ms paired over 6 pairs, 3/6 — server load returns ~6 ms before
+the agents and post-NODELAY there is nothing left to hide).
+
+**Cumulative** (final vs campaign base, same snapshots): single paired
+median **+38.4 ms**, 6/6 faster (65.9–72.3 → 28.5–33.2 run medians);
+mesh paired median **+40.8 ms**, 6/6 faster (76.7–84.7 → 41.8–44.9).
+
+Re-validated from the committed rev (nix-built tool + runners):
+fresh `take` (snapshot written in 1.84 s) + `cycle -n 5` → 5/5, median
+**31.9 ms** (24.5–53.2; round 1 is the cold-ARC outlier); launcher-booted
+3-node mesh (MESH-READY 4.0 s) + `mesh-take` (2.6 s) + `mesh-cycle -n 5`
+→ 5/5, median **43.9 ms** (39.0–59.2).
+
 ## 2026-07-09 — Performance floor: profiled attack, cold boot 7.3 s → 3.4 s
 
 air/v0.5/perf-floor.org rules of engagement executed: instrumented

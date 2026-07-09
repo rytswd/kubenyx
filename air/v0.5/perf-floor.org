@@ -88,3 +88,18 @@ fast path A/B-neutral.
   take + 5/5 resume cycles, median 77.9 ms (42.3–81.5). The parked
   recreation micro-pass (kubenyx-snap probe timings) remains
   unvalidated in its own wip — next session's material.
+- 2026-07-09: Recreation micro-pass DONE (host tool only, zero guest
+  bytes; consolidated table in bench/RESULTS.md). KEPT: TCP_NODELAY
+  on the probe socket (+36.8 ms paired over 6 pairs, 6/6 — the
+  recorded 66 ms was mostly the probe's OWN TLS handshake sitting out
+  a ~40 ms Nagle/delayed-ACK stall, not guest wake time; dense 5 ms
+  time-pokes ruled out clock-gating first); probe poll 3→1 ms
+  (+0.5 ms paired over 10 pairs). Tried and REJECTED: sock-wait poll
+  200→50 µs (+0.1 ms on spawn_to_sock, a segment the tool's total
+  excludes, with a noise-level −2.3 ms paired read on total); mesh
+  probe overlapped with agent load tails via a server-loaded signal
+  (−0.6 ms paired over 6 pairs, 3/6 — the server loads ~6 ms before
+  the agents; post-NODELAY there is nothing left to hide). Cumulative
+  vs campaign base: single +38.4 ms paired (6/6), mesh +40.8 ms
+  paired (6/6). Committed-rev re-validation: take + cycle 5/5 median
+  31.9 ms; launcher mesh + mesh-take + mesh-cycle 5/5 median 43.9 ms.
