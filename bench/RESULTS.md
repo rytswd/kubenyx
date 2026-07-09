@@ -7,6 +7,45 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-09 — IPv6 single-stack: all-v6 clusters, v4 path bit-identical
+
+air/v0.4/ipv6.org implemented in one campaign. The sizing insight
+held: the runtime layer was already family-agnostic (kubenyx-pki,
+component flags, CoreDNS) — everything landed in the eval layer:
+
+- `lib/`: hextet-wise v6 CIDR math (never one 128-bit number — Nix
+  ints are signed 64-bit): `::` expansion, carry-propagating add,
+  RFC 5952 rendering; node N owns the Nth /64 of the cluster prefix.
+  **29 eval-level unit tests as `checks.lib-tests` (~1s, no VM)** —
+  CIDR math regressions now cost seconds to catch, forever.
+- Family-switched dataplane: NAT66 ip6 nftables (family-matched
+  ExecStop — a v6-only bug caught at eval before any VM run),
+  ip6tables accepts, `ip -6 route` carve, v6 forwarding sysctls.
+- Bracket audit: every address-into-URL site routed through
+  `klib.hostPort` (apiserverUrl, etcd quorum URLs, kubenyx-lb
+  backends, guest hint sites); bare-address flags stay bare.
+- Single-family assertion: mixing clusterCidr/serviceCidr/node
+  address families is a clear eval error. Dual-stack rejected.
+
+| Leg | Proves | Wall |
+|---|---|---|
+| `lib-tests` | 29 CIDR/hostPort cases, pure eval | ~1 s |
+| `ipv6` | Single node all-ULA: pod IP in the carved /64, v6 service VIP + DNS, live ip6 NAT/filter | 36–39 s |
+| `ipv6-multi` | server+agent: bracketed `https://[fd00:1::2]:6443` join (grepped from the rendered kubeconfig), cross-node pod-to-pod over `ip -6` routes | 40–41 s |
+
+Design note recorded in the test: `dns.address` lives OUTSIDE the
+service CIDR (own ULA), mirroring the v4 default's design — the
+nftables kube-proxy drops unallocated ClusterIPs inside the CIDR.
+
+Gate — the strongest identity result of any campaign: the
+microvm-firecracker runner and system toplevel are **bit-identical
+store paths** base vs final, despite an 833-insertion diff across 8
+modules — the family switch fully cancels on the v4 default path, so
+the cold-boot A/B was degenerate (regression impossible by
+construction; raw medians 8.61/8.35/7.49 s were the box's known
+bimodal envelope). Six-leg sweep green: lib-tests, ipv6, ipv6-multi,
+single-node, external-cni, multi-node.
+
 ## 2026-07-08 — v0.4 tier-1: bring-your-own-dataplane, gate held
 
 Three hand-offs landed (air/v0.4/byod.org), each replacing a kubenyx

@@ -1,5 +1,5 @@
 #+title: IPv6 Single-Stack Clusters
-#+state: ready
+#+state: complete
 #+FILETAGS: :network:core:
 
 * Summary
@@ -83,3 +83,11 @@ interpolation site.
 
 * History
 - 2026-07-09: Graduated from byod.org §4 into its own doc; ready.
+- 2026-07-09: Implemented and complete in one campaign (three commits:
+  CIDR math + lib-tests; family-switched dataplane + bracket audit +
+  ipv6 leg; ipv6-multi leg). All four acceptance criteria green. The
+  gate's identity proof was total: runner and toplevel store paths
+  bit-identical base-vs-final — the family switch cancels completely
+  on the v4 default path. One design note: dns.address sits outside
+  the service CIDR (own ULA), matching the v4 default's intent — the
+  nftables kube-proxy drops unallocated ClusterIPs inside the CIDR.

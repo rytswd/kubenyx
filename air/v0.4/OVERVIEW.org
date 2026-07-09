@@ -28,3 +28,7 @@ untouched, and the single-node fast path must stay unit-identical.
 - 2026-07-08: byod.org implemented and complete same-session:
   external-CNI mode, storage.localVolumes, archive seeding — all legs
   green, default path byte-identical. IPv6 + pre-bake remain staged.
+- 2026-07-09: ipv6.org implemented and complete: all-v6 single-stack
+  clusters (single + multi-node legs), 29 eval-level CIDR unit tests,
+  v4 default path bit-identical (store-path-level). Pre-baked image
+  stores remain the last staged item.
