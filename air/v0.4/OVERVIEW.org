@@ -20,6 +20,7 @@ untouched, and the single-node fast path must stay unit-identical.
 |----------+-------|
 | [[file:byod.org][byod.org]] | External-CNI mode, local PersistentVolumes, OCI-archive image seeding; IPv6 + pre-baked image stores staged |
 | [[file:ipv6.org][ipv6.org]] | IPv6 single-stack: family-agnostic CIDR math, family-switched dataplane, bracketed interpolations |
+| [[file:prebake.org][prebake.org]] | Build-time containerd content stores: boot-time import cost becomes a mount |
 
 * History
 - 2026-07-08: Milestone opened; byod.org drafted and moved to ready in

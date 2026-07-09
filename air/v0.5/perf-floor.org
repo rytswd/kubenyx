@@ -1,0 +1,54 @@
+#+title: Performance Floor — Profile, Attack, Prove
+#+state: ready
+#+FILETAGS: :core:
+
+* Summary
+
+The cold boot sits at a bimodal 7.4–8.8s. Nobody has yet asked WHERE
+the time goes with instruments rather than phase markers. This doc's
+contract: (1) a measured, ranked cost breakdown of the boot path
+(kernel, initrd, unit graph, component init); (2) optimizations
+attacked in rank order, each landed ONLY with paired interleaved A/B
+evidence (≥6 rounds, paired median improvement, else reverted);
+(3) the same treatment for the recreation path's fixed costs; (4) a
+code-cleanliness pass (clippy-clean Rust, dead-code removal, module
+simplification) that must keep the entire test matrix green and the
+fast path A/B-neutral.
+
+* Method
+
+** Profiling (before touching anything)
+- In-guest: =systemd-analyze time / blame / critical-chain= captured
+  via a probe variant (extendModules oneshot printing to console);
+  kernel + initrd stamps from the console (=KUBENYX-WARMUP= markers
+  already bracket initrd work); dmesg timestamps for kernel phases.
+- Establish a fresh 10-boot baseline (record both modes of the
+  bimodal envelope; investigate WHAT flips the mode — that itself is
+  a ranked item: a 1.4s bimodality dwarfs most unit-level wins).
+- Recreation: break down the 58–102ms (VMM spawn, sock wait, load,
+  probe interval quantization, first-probe latency).
+
+** Rules of engagement
+- Attack in measured-cost order, top 3 items minimum.
+- Every change: interleaved A/B (alternating order, same conditions),
+  ≥6 pairs; keep iff paired median improves; document losers in the
+  History as tried-and-rejected (they are knowledge too).
+- Correctness backstop after each kept change: single-node +
+  multi-node-mem legs green.
+- No opinion changes disguised as optimizations (defaults stay).
+
+* Acceptance
+- Ranked cost table recorded in bench/RESULTS.md with instruments
+  cited.
+- Bimodality explained (or bounded with evidence if external to the
+  guest).
+- Each kept optimization has its paired A/B numbers in RESULTS.md;
+  each rejected one a line in History.
+- Full 15+ leg matrix green at the final rev; mesh cold boot and
+  mesh recreation re-measured; bench-vs-k3s ratio re-run.
+- cargo clippy clean across the workspace; no dead code; flake +
+  modules pass nixfmt where formatting was already conformant
+  (no unrelated churn).
+
+* History
+- 2026-07-09: Drafted as the campaign contract; ready.

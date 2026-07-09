@@ -1,0 +1,20 @@
+#+title: v0.5 — Performance Floor
+
+* Purpose
+
+Every prior milestone measured performance to prove it did no harm.
+v0.5 turns the instruments on kubenyx itself: profile the cold-boot
+path end to end, attack the ranked costs with paired A/B evidence,
+and land only what measurably wins. The same discipline applies to
+the recreation path and the codebase (a cleanliness pass that must
+keep the whole 15-leg matrix green).
+
+* Document Map
+
+| Document | Scope |
+|----------+-------|
+| [[file:perf-floor.org][perf-floor.org]] | Profile → ranked costs → A/B-proven optimizations; recreation micro-pass; code cleanliness gate |
+
+* History
+- 2026-07-09: Milestone opened as part of the "complete everything"
+  campaign (prebake + perf + cleanliness + full sweep).

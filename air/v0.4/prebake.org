@@ -1,0 +1,48 @@
+#+title: Pre-Baked Image Stores
+#+state: ready
+#+FILETAGS: :node:core:
+
+* Summary
+
+Import the seed image set into a containerd content store at BUILD
+time and ship it in the guest image — boot-time import cost drops to
+mounting a filesystem. This is the capability image-bundling
+distributions structurally cannot offer: their airgap import happens
+on the node because their image IS the node payload; kubenyx's node
+payload is a Nix closure, and a containerd store is just more closure.
+
+* Design
+
+** =kubenyx.node.prebakeImages = true= (default false)
+At build time, a derivation runs containerd with =--root $out= inside
+the sandbox (no KVM, no root: containerd's content/metadata plugins
+run fine unprivileged with overlayfs snapshotter replaced by =native=
+for the bake; the runtime plugins are disabled), imports
+=[pauseImage] ++ seedImages= via ctr, and stops. The result is a
+complete =/var/lib/containerd= tree: content blobs + boltdb metadata.
+
+** Guest wiring
+The baked store ships in the closure; the guest mounts it as the
+overlayfs LOWER layer under =/var/lib/containerd= with a tmpfs upper
+(containerd needs write; the bake is immutable). The
+=kubenyx-seed-images= unit then has nothing to import for baked
+entries — it skips entirely when every entry is baked (the unit
+disappears from the boot path).
+Snapshotter note: the bake uses the =native= snapshotter; the guest
+runtime must read those snapshots — either the guest also runs
+=native= (acceptable for volatile test guests; snapshot COW cost is
+tmpfs-backed) or the bake is re-checked against overlayfs
+compatibility during implementation. Decide empirically; record the
+call.
+
+** Acceptance
+- A bench leg with a deliberately LARGE synthetic image set (~300MB+
+  of distinct layers): boot-time import wall vs prebaked mount, both
+  measured in-guest; the prebake side must eliminate ≥90% of the
+  import cost.
+- Existing seeding tests stay green with prebake OFF (default) and a
+  variant with prebake ON runs the same pod successfully.
+- Default path byte-identity (prebake off ⇒ nothing changes).
+
+* History
+- 2026-07-09: Graduated from byod.org §4 (last staged item); ready.
