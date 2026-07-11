@@ -1,0 +1,220 @@
+#+title: cp3 — an Honest Quorum Mesh at microVM Speed
+#+state: in-progress
+#+FILETAGS: :core:
+
+* Summary
+
+New run targets =cp3= / =cp3w2=: a 3-control-plane firecracker mesh
+with a REAL 3-member etcd quorum, in the volatile disposable posture.
+The naming scheme already reserved the name; this document earns it.
+
+The user constraint is explicit: the tradeoff vs =cp1= must be stated
+plainly AND minimized. Research (5-dimension fan-out + adversarial
+verification, 2026-07-11) shows the honest quorum itself is nearly
+free — ~120 ms median formation, ~3% of the 3.4 s cold boot. The real
+costs are two artifacts nobody would have guessed without measuring:
+a fixed *15 s join-probe window* in our own etcd ExecStartPre, and a
+*1–2 s bootstrap-probe tail* inside etcd itself (10–27% of launches).
+Both are attackable. cp3 should land within a few hundred ms of cp1w2,
+p50 — and the doc tracks p95 honestly.
+
+* Measured ground truth (host bench, etcd 3.6.12, tmpfs + loopback)
+
+| Variant                                   | First raft-committed write (median) |
+|-------------------------------------------+-------------------------------------|
+| 3-member, default timers                  | 483 ms (260–885, +2.1 s outliers)   |
+| 3-member, hb10/el100                      | 143 ms                              |
+| 3-member, hb5/el50                        | 118 ms                              |
+| 3-member, hb1/el10 + =--unsafe-no-fsync=  | 105 ms (floor)                      |
+| 3-member, full kubenyx TLS posture        | ≈ same (TLS delta within noise)     |
+| 1-member, default timers                  | 557 ms (!)                          |
+| 1-member, tuned                           | 84 ms — the quorum costs ~30 ms     |
+
+- =--unsafe-no-fsync= is a *no-op on tmpfs* (118 vs 116 ms). Keep it
+  off; the flag stays honest.
+- *The tail*: 10–27% of launches land at exactly +1.0 s or +2.0 s.
+  Adversarially verified mechanism (initial claim REFUTED, corrected
+  against etcd source): =bootstrapNewClusterNoWAL= →
+  =isMemberBootstrapped(..., BootstrapTimeoutEffective())= HTTP-GETs
+  the other members' =/members= endpoints with a *1 s default timeout
+  that has no CLI flag* (=server/config/config.go:357=). Peer
+  listeners BIND ~1 ms after start but only SERVE after bootstrap
+  completes — so the probe's TCP connect succeeds and then hangs the
+  full second. Connection-refused is the FAST path. Consequence:
+  launch staggering and dial-retry tuning are worthless or harmful;
+  the fixes are an etcd patch (expose/lower =BootstrapTimeout=) or
+  accepting p95 ≈ p50 + 2 s.
+- One run in ~23 exceeded a 30 s no-quorum guard (cause lost).
+  Launchers need a watchdog + DEGRADED path regardless.
+- Host-bench caveat: guests add virtio cold-load and vCPU contention.
+  el50 is aggressive under contention (one >50 ms scheduling stall =
+  spurious election); *ship hb10/el100*, revisit only with in-guest
+  measurements.
+
+* What the modules already give us (verified against source)
+
+- =profile= is an enum of =testing|balanced= — there is no
+  "performance" profile. Volatile + etcd + 3 servers *evals and runs
+  today*: the etcd backend branch has no serverCount assertion (only
+  kine-sqlite and etcd-mem are restricted).
+- =etcdInitialCluster= is already *static full-membership at eval
+  time* from =kubenyx.nodes=. A fresh simultaneous 3-server boot
+  takes the declared/new static-bootstrap path on all three; learner
+  joins are only the runtime growth path (v0.5).
+- *The 15 s join-probe window* (=modules/datastore.nix:165-178=,
+  ExecStartPre): on an all-fresh boot nobody serves, so all three
+  servers burn the full 15 s before etcd even launches. 125× the
+  quorum-formation cost; the single biggest cp3 line item.
+- =kubenyx-pki= self-mint is *present-file gated*: =ensure_ca= /
+  =ensure_sa= return immediately when the custody files exist. Land
+  the same 6 files in =/var/lib/kubenyx/pki= before the unit runs and
+  all three servers share one CA with zero Rust changes.
+- Without that, volatile multi-server is fatally broken today: three
+  self-minted CAs, etcd peer TLS rejects every raft connection, no
+  quorum ever forms — and it *looks* like a hang, not an error.
+  There is no server→server CA path (the agent handoff excludes
+  =ca.key= by design).
+
+* Decisions
+
+** D1. Real etcd, volatile, tmpfs — reuse the multiServer branch wholesale
+Timers =hb10/el100=. No =--unsafe-no-fsync=. Data dir on the existing
+=volatileDir= tmpfs. Rejected alternatives:
+- *raft-capable etcd-mem*: prize is ~100 ms median + the tail;
+  cost is weeks with real correctness cliffs (ReadIndex,
+  lease-under-leader-change, deterministic MVCC ordering). The repo
+  pre-authorizes rebuilding *measured bottlenecks* — 120 ms is not
+  the bottleneck while the 15 s probe and the 1–2 s tail exist.
+- *learner topologies* (1 voter + N learners): not quorums. No fault
+  tolerance, learners reject linearizable reads (our own join probe
+  depends on exactly that).
+- *cp3w-mem middle tier* (3 apiservers × one etcd-mem): consistency-
+  safe and honest-if-documented (apiserver HA, datastore SPOF,
+  DR = 33 ms recreation), but needs a TCP+TLS listener in etcd-mem
+  and an assertion relax. DEFERRED — separate door, not this campaign.
+
+** D2. CA: launcher-minted per run, served over the bridge
+The launcher runs =kubenyx-pki mint-ca= (~8 ms, 6 files, 2,034 B),
+serves the bundle as a tar on =10.100.0.1= before any VM launches;
+each cp3 server runs a =kubenyx-ca-fetch= oneshot (clone of the
+proven agent =kubenyx-pki-fetch= retry loop, =Before=kubenyx-pki.service=)
+that lands the custody files; self-mint then no-ops. The bundle dies
+with the run dir — never operator custody; trust model unchanged
+(the bridge is already the host trust boundary).
+
+Hardening (Nix-only): widen the =--require-shipped-ca= gate from
+=durablePosture= to =durablePosture || multiServer= — a failed fetch
+must be a *loud boot error*, never a silent self-mint that splits the
+mesh into three trust roots. Host-side serving lands in Rust
+(=kubenyx-pki serve --dir D --listen A --count N=, exits after N
+transfers) rather than dragging python/busybox into hostTools.
+
+Dead channels (measured/verified, do not revisit):
+- microvm.nix shares: firecracker runner *throws* ("9p/virtiofs not
+  implemented") at the pinned rev.
+- kernel cmdline: bundle base64 = 2,712 B > the 2,048 B x86 guest
+  truncation limit, and =/proc/cmdline= is world-readable in every
+  container — would hand the CA key to all workloads.
+- SMBIOS OEM strings: no firecracker surface.
+
+** D3. Attack the 15 s probe window
+New option =kubenyx.datastore.etcd.joinProbeSec= (default 15 —
+single-server and NixOS-host behavior unchanged); the cp3 preset sets
+~3 s. On the host bridge a live quorum answers =endpoint health= in
+<1 s and dead peers refuse instantly, so 3 s is a measured candidate,
+not a guess — A/B the cold cp3 wall at 15 vs 3 before committing.
+A fast-exit heuristic (all declared peers connection-refused → first
+boot, bootstrap immediately) is the sharper fix; keep it as a
+follow-up if 3 s still shows on the critical chain.
+
+** D4. The 1–2 s bootstrap tail: etcd patch, measured first
+=BootstrapTimeout= is a ServerConfig field with no stock flag.
+Candidate patch: expose it (or lower the effective default for our
+unit) via the nixpkgs etcd override. Patch only if the in-guest tail
+rate is material after D3 — the tail costs p95, not p50, and an etcd
+patch is a maintenance liability the bench must justify.
+
+** D5. Naming and drv-purity
+=mkMembers servers=1= keeps the single name =server= — cp1w2/cp1w6
+node names, taps, MACs, addresses, and therefore *drvs stay
+byte-identical* (hard requirement, verified in the naming refactor).
+=servers>1= names them =server1..serverN=, indexes 0..s-1; agents
+shift to s..s+a-1. All launcher/guest additions are gated on
+=servers > 1= so existing presets' scripts are also unchanged.
+
+** D6. cp3w2 agents ride kubenyx-lb
+Drop =controlPlaneEndpoint= from the agent node config when
+=servers > 1= → =lb.enable= defaults on, agents dial
+=https://127.0.0.1:6444= (the tests/multi-server.nix posture).
+Prerequisites found by research: two guest units dereference
+=controlPlaneEndpoint= today (agent pki-fetch, readiness report) and
+need lb-aware fallbacks; =guests/microvm.nix= hardcodes
+=backend=etcd-mem= and must become =lib.mkDefault= (drv-neutral).
+
+** D7. Ready gate and host kubectl
+Per-server =KUBENYX-CLUSTER-READY= already transitively requires
+quorum (local apiserver serving → etcd healthy), so the launcher's
+existing all-N marker count IS the honest mesh gate — zero changes.
+Kubeconfig: every server serves its own-address-pinned admin
+kubeconfig on =:10124=; the story is "curl any server; on server
+loss, re-curl a survivor". Host-side kubenyx-lb (=127.0.0.1:6444=,
+SANs already include it) is a convenience follow-up, not honesty.
+
+** D8. Snapshots: cold start guaranteed, recreation as gated fast-follow
+Mechanism is sound: etcd elections tick on a Go monotonic ticker and
+leases compare =time.Now()= monotonic — both freeze with the VM and
+the mesh cut is ~4 ms, ~25× under el100. Wall-clock pokes don't touch
+raft. But the claim ships only when the bench exists:
+- add a *quorum-write probe* to the mesh verbs (TLS-answer ms AND
+  first-quorum-write ms; expected envelope ~45 ms + ≤150 ms);
+- fix =kubenyx-snap= single-server assumptions (=conventional_ip()=
+  for serverN, probe endpoint selection);
+- assert *volatile-only* for cp3 snapshots: firecracker snapshots
+  exclude virtio disk contents — a durable quorum resume against a
+  mutated disk corrupts; tmpfs-in-guest-RAM rides inside =snap.mem=
+  exactly like etcd-mem did;
+- gate tests: no term bump across 5 cycles; aged-resume (>60 s,
+  >10 min) node-flap check (hazard exists on cp1 meshes today too —
+  never tested); one deliberately skewed resume (expect exactly one
+  bounded pre-vote election, ~1–1.3 s) as the documented envelope.
+Budget statement: cp3 ≈ 11 GB snapshot on tmpfs (cp3w2 ≈ 18 GB) plus
+equal live-guest RAM — ~21/35 GB peak during mesh-cycle.
+
+** D9. Honesty paragraph for the README (verbatim intent)
+All cp3 members hang off one host bridge on one physical host: the
+quorum protects against *VM/process* failure, never host failure —
+host loss kills all three tmpfs members exactly like it kills
+etcd-mem. What cp3 buys over cp1: apiserver/etcd process failover,
+rolling CP restarts, testing HA behaviors (leader elections,
+LB failover) against a real quorum. What it costs: the measured
+quorum tax (~120 ms p50 + tail), =backend=etcd= instead of etcd-mem,
+and a bigger memory/tmpfs footprint.
+
+* Work plan
+
+1. Module: =joinProbeSec= option; =--require-shipped-ca= gate widen;
+   agent lb-aware fallbacks (pki-fetch, report); =guests/microvm.nix=
+   backend → =mkDefault=. All drv-neutral for existing legs.
+2. Rust: =kubenyx-pki serve= subcommand (bounded tar-over-HTTP).
+3. lib/microvm.nix: unpin =servers=, role-aware =mkNode=
+   (etcd backend + ca-fetch unit for multi-server servers), launcher
+   CA mint+serve step, per-server kubeconfig hint, teardown batching.
+   cp1w2/cp1w6 drv-identity is the regression gate.
+4. Presets: =cp3=, =cp3w2= apps (+ =-down=).
+5. Bench: cold cp3 wall (probe 15 vs 3 A/B), in-guest tail rate,
+   READY-marker phase breakdown; then D4 decision.
+6. Checks: volatile-quorum NixOS test leg (3 servers, launcher-shape
+   CA pre-seed, quorum + failover smoke) — the microVM launcher
+   itself stays host-tested via the bench.
+7. README: cp3 row in the matrix + D9 honesty paragraph. LAST.
+
+* Status
+
+- [X] Research fan-out + adversarial verification (2026-07-11)
+- [ ] Module changes
+- [ ] kubenyx-pki serve
+- [ ] lib/microvm.nix generalization
+- [ ] cp3/cp3w2 presets
+- [ ] Bench + D4 decision
+- [ ] Check leg
+- [ ] README
