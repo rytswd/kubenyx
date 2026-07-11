@@ -130,11 +130,12 @@ let
   # the initial-cluster narrowed to the CURRENT member set + self (etcd
   # join semantics; unstarted members carry no name in `member list`,
   # which is why membership is matched by peer URL throughout). Nobody
-  # answering within the probe window is the v0.3 first-bootstrap path,
-  # unchanged. Once a healthy peer has answered we NEVER fall through to
-  # bootstrap: on join-wait expiry the unit fails loudly (DEGRADED marker)
-  # and systemd retries — a wedged join is recoverable, a second cluster
-  # is not.
+  # answering within the probe window (etcd.joinProbeSec — the window IS
+  # the cp3 cold-boot tax, quorum-mesh.org §D3) is the v0.3
+  # first-bootstrap path, unchanged. Once a healthy peer has answered we
+  # NEVER fall through to bootstrap: on join-wait expiry the unit fails
+  # loudly (DEGRADED marker) and systemd retries — a wedged join is
+  # recoverable, a second cluster is not.
   etcdJoinProbe = pkgs.writeShellScript "kubenyx-etcd-join-probe" ''
     set -eu
     env_file='${clusterEnvFile}'
@@ -162,7 +163,7 @@ let
     done
     others='${lib.concatStringsSep " " otherClientEps}'
     healthy_ep=""
-    probe_deadline=$(( $(date +%s) + 15 ))
+    probe_deadline=$(( $(date +%s) + ${toString ds.etcd.joinProbeSec} ))
     while [ "$(date +%s)" -lt "$probe_deadline" ]; do
       for ep in $others; do
         if ${etcdCtl} --endpoints="$ep" ${ctlCreds} --dial-timeout=2s --command-timeout=3s endpoint health >/dev/null 2>&1; then
@@ -505,6 +506,20 @@ in
         type = lib.types.bool;
         default = false;
         description = "DANGER: --unsafe-no-fsync. Massive latency win; crash can corrupt the datastore.";
+      };
+      joinProbeSec = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 15;
+        description = ''
+          Seconds a fresh multi-server member's join probe waits for an
+          existing quorum before deciding first-bootstrap. On an all-fresh
+          cold boot nobody answers, so EVERY server burns the full window
+          before etcd even launches — ~125x the measured quorum-formation
+          cost and the single biggest cp3 cold-boot line item
+          (air/v0.7/quorum-mesh.org §D3). The 15s default preserves today's
+          behavior; on a local bridge where live quorums answer in <1s and
+          dead peers refuse instantly, ~3s is a measured candidate.
+        '';
       };
       extraFlags = lib.mkOption {
         type = lib.types.listOf lib.types.str;

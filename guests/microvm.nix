@@ -36,6 +36,22 @@ let
   # agent. Server and agents derive the identical mapping from the same
   # nodes attrset — no runtime negotiation.
   agentPort = name: 10125 + lib.lists.findFirstIndex (n: n == name) 0 agentNames;
+  # ---- agent dial targets (air/v0.7/quorum-mesh.org §D6) ---------------------
+  # Multi-server drops controlPlaneEndpoint so lb.enable defaults on and
+  # agents ride kubenyx-lb; with an endpoint declared (every cp1 mesh) both
+  # bindings render byte-identically to the previously hardcoded text.
+  #   Apiserver traffic goes through the LB. The plain-HTTP credential
+  # handoff cannot (the LB forwards apiserver TLS only), so pki-fetch walks
+  # the declared servers instead — all of them mint from the one shipped CA
+  # (see pki.nix), so whichever answers first hands over the same trust.
+  serverAddrs = lib.filter (a: a != null) (
+    lib.mapAttrsToList (_: n: n.address) (lib.filterAttrs (_: n: n.role == "server") cfg.nodes)
+  );
+  agentApiBase =
+    if cfg.lb.enable then
+      "https://127.0.0.1:${toString cfg.lb.port}"
+    else
+      "https://${klib.hostPort cfg.controlPlaneEndpoint 6443}";
   # The complete per-node bundle kubenyx-pki packages under nodes/<name>/
   # (mirrors the `needed` list in kubenyx-pki agent mode).
   bundleFiles = [
@@ -109,8 +125,11 @@ lib.mkMerge [
 
     kubenyx = {
       enable = true;
-      datastore.backend = "etcd-mem";
-      datastore.volatile = true;
+      # mkDefault: cp3 mesh members need backend = "etcd" (a real quorum,
+      # quorum-mesh.org §D1) without forking this profile; unset, the merged
+      # value is unchanged, so existing single-node drvs stay byte-identical.
+      datastore.backend = lib.mkDefault "etcd-mem";
+      datastore.volatile = lib.mkDefault true;
       # Prebaked image store (prebake.org): the seed set (pause image) is
       # imported into a containerd content store at BUILD time and overlay-
       # mounted (~60ms) instead of `ctr import`ed during boot — the import
@@ -435,11 +454,12 @@ lib.mkMerge [
               ''
             else
               # Agent flavor: no local apiserver and no admin identity — poll
-              # this node's own Node object at the control-plane endpoint with
-              # the kubelet client cert (the Node authorizer permits a node to
-              # get itself). Same persistent-session mechanism as the server
-              # flavor above. Marker format is identical so the mesh launcher
-              # greps one string.
+              # this node's own Node object with the kubelet client cert (the
+              # Node authorizer permits a node to get itself), dialing the
+              # control-plane endpoint or kubenyx-lb (agentApiBase). Same
+              # persistent-session mechanism as the server flavor above.
+              # Marker format is identical so the mesh launcher greps one
+              # string.
               ''
                 node=${lib.escapeShellArg config.kubenyx.nodeName}
                 pki=/var/lib/kubenyx/pki
@@ -448,7 +468,7 @@ lib.mkMerge [
                   local pid line rc i
                   local -a urls=()
                   for ((i = 0; i < 600; i++)); do
-                    urls+=("https://${klib.hostPort cfg.controlPlaneEndpoint 6443}/api/v1/nodes/$node?pretty=false")
+                    urls+=("${agentApiBase}/api/v1/nodes/$node?pretty=false")
                   done
                   exec 9< <(curl -s --rate 20/s --max-time 15 \
                     --cacert "$pki/ca.crt" --cert "$pki/kubelet.crt" --key "$pki/kubelet.key" \
@@ -587,26 +607,57 @@ lib.mkMerge [
             RemainAfterExit = true;
             TimeoutStartSec = 180;
           };
-          script = ''
-            pki=/var/lib/kubenyx/pki
-            mkdir -p "$pki"
-            # Idempotent: tmpfs makes every boot fresh, but restarts happen.
-            # (if-form, not `&& exit 0`: the script runs under set -e.)
-            if [ -s "$pki/kubelet.key" ]; then exit 0; fi
-            url=http://${klib.hostPort cfg.controlPlaneEndpoint (agentPort cfg.nodeName)}
-            deadline=$(( $(cut -d. -f1 /proc/uptime) + 90 ))
-            while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
-              if curl -sf --connect-timeout 2 --max-time 5 "$url" -o /tmp/pki-bundle.tar; then
-                tar x -f /tmp/pki-bundle.tar -C "$pki"
-                rm -f /tmp/pki-bundle.tar
-                echo "KUBENYX-PHASE pki-fetch up=$(cut -d' ' -f1 /proc/uptime)" > /dev/console
+          script =
+            if cfg.controlPlaneEndpoint != null then
+              ''
+                pki=/var/lib/kubenyx/pki
+                mkdir -p "$pki"
+                # Idempotent: tmpfs makes every boot fresh, but restarts happen.
+                # (if-form, not `&& exit 0`: the script runs under set -e.)
+                if [ -s "$pki/kubelet.key" ]; then exit 0; fi
+                url=http://${klib.hostPort cfg.controlPlaneEndpoint (agentPort cfg.nodeName)}
+                deadline=$(( $(cut -d. -f1 /proc/uptime) + 90 ))
+                while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
+                  if curl -sf --connect-timeout 2 --max-time 5 "$url" -o /tmp/pki-bundle.tar; then
+                    tar x -f /tmp/pki-bundle.tar -C "$pki"
+                    rm -f /tmp/pki-bundle.tar
+                    echo "KUBENYX-PHASE pki-fetch up=$(cut -d' ' -f1 /proc/uptime)" > /dev/console
+                    exit 0
+                  fi
+                  sleep 0.25
+                done
+                echo "KUBENYX-DEGRADED: credential bundle fetch from $url timed out (90s)" > /dev/console
                 exit 0
-              fi
-              sleep 0.25
-            done
-            echo "KUBENYX-DEGRADED: credential bundle fetch from $url timed out (90s)" > /dev/console
-            exit 0
-          '';
+              ''
+            else
+              # No declared endpoint (the lb posture, quorum-mesh.org §D6):
+              # the LB cannot front this plain-HTTP port, so walk every
+              # declared server — see the serverAddrs comment for why any
+              # answer carries identical trust.
+              ''
+                pki=/var/lib/kubenyx/pki
+                mkdir -p "$pki"
+                # Idempotent: tmpfs makes every boot fresh, but restarts happen.
+                # (if-form, not `&& exit 0`: the script runs under set -e.)
+                if [ -s "$pki/kubelet.key" ]; then exit 0; fi
+                urls='${
+                  lib.concatStringsSep " " (map (a: "http://${klib.hostPort a (agentPort cfg.nodeName)}") serverAddrs)
+                }'
+                deadline=$(( $(cut -d. -f1 /proc/uptime) + 90 ))
+                while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
+                  for url in $urls; do
+                    if curl -sf --connect-timeout 2 --max-time 5 "$url" -o /tmp/pki-bundle.tar; then
+                      tar x -f /tmp/pki-bundle.tar -C "$pki"
+                      rm -f /tmp/pki-bundle.tar
+                      echo "KUBENYX-PHASE pki-fetch up=$(cut -d' ' -f1 /proc/uptime)" > /dev/console
+                      exit 0
+                    fi
+                  done
+                  sleep 0.25
+                done
+                echo "KUBENYX-DEGRADED: credential bundle fetch timed out (90s; tried: $urls)" > /dev/console
+                exit 0
+              '';
         };
       };
 

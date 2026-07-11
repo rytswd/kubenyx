@@ -26,8 +26,11 @@ let
   # (`kubenyx-pki mint-ca --out ca-bundle/` off-cluster, bundle shipped over
   # the operator channel). kubenyx-pki then treats missing trust roots as a
   # hard boot error, never a silent re-mint — a re-minted CA would partition
-  # the cluster's trust. testing/volatile keeps per-boot self-mint, so no
-  # single-node testing guest changes shape here.
+  # the cluster's trust. Volatile MULTI-server needs a shipped CA too — the
+  # launcher channel, a per-run mint that dies with the run dir
+  # (air/v0.7/quorum-mesh.org §D2) — so the gate below widens beyond the
+  # durable posture. testing/volatile single-server keeps per-boot
+  # self-mint, so no single-node testing guest changes shape here.
   durablePosture = cfg.profile == "balanced" && !cfg.datastore.volatile;
 
   # Multi-server etcd quorum (durable-ha.org §2): peer/client TLS terminates
@@ -92,7 +95,12 @@ let
         "IP:${a}"
       ]) serverAddresses
     )
-    ++ lib.optional durablePosture "--require-shipped-ca";
+    # Shipped-CA gate, widened from durablePosture alone (quorum-mesh.org
+    # §D2): on ANY multi-server cluster a failed CA delivery must be a loud
+    # boot error, never a silent self-mint — three self-minted CAs mean
+    # etcd peer TLS rejects every raft connection and no quorum ever forms,
+    # which looks like a hang, not an error.
+    ++ lib.optional (durablePosture || multiServer) "--require-shipped-ca";
 
   agentArgs = commonArgs ++ [
     "--mode"

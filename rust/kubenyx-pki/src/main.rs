@@ -10,8 +10,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
-use std::net::IpAddr;
+use std::io::{Read, Write};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -45,6 +45,9 @@ struct Cfg {
     etcd_sans: Vec<String>,
     out: PathBuf,
     require_shipped_ca: bool,
+    dir: PathBuf,
+    listen: String,
+    count: Option<u64>,
 }
 
 fn parse_args() -> Cfg {
@@ -65,6 +68,9 @@ fn parse_args() -> Cfg {
         etcd_sans: vec![],
         out: PathBuf::new(),
         require_shipped_ca: false,
+        dir: PathBuf::new(),
+        listen: String::new(),
+        count: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -77,7 +83,19 @@ fn parse_args() -> Cfg {
             // CLI, durable-ha.org §3) rides the same parser as the flag
             // style the units use.
             "mint-ca" => cfg.mode = "mint-ca".into(),
+            // `kubenyx-pki serve --dir DIR --listen ADDR:PORT [--count N]`:
+            // launcher-side CA bundle handoff (quorum-mesh.org D2).
+            "serve" => cfg.mode = "serve".into(),
             "--out" => cfg.out = val().into(),
+            "--dir" => cfg.dir = val().into(),
+            "--listen" => cfg.listen = val(),
+            "--count" => {
+                let v = val();
+                cfg.count = Some(
+                    v.parse()
+                        .unwrap_or_else(|_| die(&format!("bad --count {v}"))),
+                );
+            }
             "--require-shipped-ca" => cfg.require_shipped_ca = true,
             "--mode" => cfg.mode = val(),
             "--pki-dir" => cfg.pki = val().into(),
@@ -107,7 +125,7 @@ fn parse_args() -> Cfg {
             other => die(&format!("unknown flag {other}")),
         }
     }
-    if cfg.node_name.is_empty() && cfg.mode != "mint-ca" {
+    if cfg.node_name.is_empty() && cfg.mode != "mint-ca" && cfg.mode != "serve" {
         die("--node-name is required");
     }
     cfg
@@ -122,6 +140,10 @@ fn main() {
     let cfg = parse_args();
     if cfg.mode == "mint-ca" {
         mint_ca(&cfg);
+        return;
+    }
+    if cfg.mode == "serve" {
+        serve(&cfg);
         return;
     }
     fs::create_dir_all(&cfg.pki).unwrap_or_else(|e| die(&format!("mkdir pki: {e}")));
@@ -812,4 +834,244 @@ fn mint_ca(cfg: &Cfg) {
         eprintln!("kubenyx-pki:   {f}");
     }
     eprintln!("kubenyx-pki: ship these files into each durable server's pki directory (default /var/lib/kubenyx/pki) over the operator channel, and keep this directory wherever secrets live — the fingerprint gate cascades leaf reissuance from the shipped CA automatically");
+}
+
+// ---------------------------------------------------------------------------
+// serve: launcher-side CA bundle handoff (quorum-mesh.org D2)
+// ---------------------------------------------------------------------------
+
+/// One 512-byte POSIX ustar header. Hand-rolled rather than a tar crate:
+/// the archive is six small fixed-name files consumed by GNU tar in the
+/// guest, so the whole format surface is one header layout plus a
+/// checksum — not worth a dependency on the boot toolchain.
+fn tar_header(name: &str, size: u64) -> [u8; 512] {
+    let mut h = [0u8; 512];
+    h[..name.len()].copy_from_slice(name.as_bytes());
+    // 0600 like write_private: keys ride in this archive. uid/gid/mtime 0 —
+    // the fetch side re-owns and the bundle is per-run, so real values
+    // would only make the stream nondeterministic.
+    h[100..108].copy_from_slice(b"0000600\0");
+    h[108..116].copy_from_slice(b"0000000\0");
+    h[116..124].copy_from_slice(b"0000000\0");
+    h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+    h[136..148].copy_from_slice(b"00000000000\0");
+    h[156] = b'0'; // regular file
+    h[257..263].copy_from_slice(b"ustar\0");
+    h[263..265].copy_from_slice(b"00");
+    // Checksum is summed with its own field as spaces, then written back.
+    h[148..156].copy_from_slice(b"        ");
+    let sum: u32 = h.iter().map(|b| u32::from(*b)).sum();
+    h[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
+    h[155] = b' ';
+    h
+}
+
+/// The six custody files as one in-memory tar stream. Read once up front:
+/// the launcher mints before serving, so the bundle is immutable for the
+/// process lifetime and every transfer ships identical bytes.
+fn tar_bundle(dir: &Path) -> Vec<u8> {
+    let mut out = Vec::new();
+    for f in CUSTODY_FILES {
+        let data = fs::read(dir.join(f)).unwrap_or_else(|e| die(&format!("serve: read {f}: {e}")));
+        out.extend_from_slice(&tar_header(f, data.len() as u64));
+        out.extend_from_slice(&data);
+        // Contents pad to the 512-byte block boundary.
+        let pad = out.len().next_multiple_of(512);
+        out.resize(pad, 0);
+    }
+    // End-of-archive: two zero blocks.
+    out.resize(out.len() + 1024, 0);
+    out
+}
+
+/// One handoff over an accepted connection. Ok(()) only when the peer read
+/// the whole bundle and closed cleanly — --count must mean "N servers
+/// actually landed the CA", not "N sockets opened", or the launcher would
+/// boot a mesh whose members split into distinct trust roots.
+fn serve_conn(mut s: TcpStream, payload: &[u8]) -> std::io::Result<()> {
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    // Drain the ENTIRE request through the blank line: bytes left unread
+    // turn our close() into an RST that can destroy the in-flight response
+    // tail — the exact hazard the guest handoff scripts document
+    // (guests/microvm.nix serve-kubeconfig). On timeout, respond anyway,
+    // matching the shell version's `read -t 5` behavior.
+    let mut req = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                req.extend_from_slice(&buf[..n]);
+                if req.windows(4).any(|w| w == b"\r\n\r\n") || req.len() > 8192 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    // Same wire format as the guest-side agent handoff: trivial HTTP/1.0,
+    // tar body, connection-close framing — the cp3 ca-fetch unit is a
+    // clone of the proven agent fetch loop and must parse identically.
+    s.write_all(
+        b"HTTP/1.0 200 OK\r\nContent-Type: application/x-tar\r\nConnection: close\r\n\r\n",
+    )?;
+    s.write_all(payload)?;
+    // Half-close, then wait for the peer's EOF: write_all returning only
+    // proves the bytes reached our socket buffer, not the fetcher.
+    s.shutdown(Shutdown::Write)?;
+    while s.read(&mut buf)? > 0 {}
+    Ok(())
+}
+
+/// Sequential accept loop; returns after `count` successful transfers.
+/// Deliberately not a web server (quorum-mesh.org D2): one bounded handoff
+/// per cp3 run, on the host bridge — the bridge is already the host trust
+/// boundary and the bundle dies with the run dir, so TLS and concurrency
+/// would be complexity without a threat model.
+fn serve_loop(listener: TcpListener, payload: &[u8], count: Option<u64>) {
+    let mut done = 0u64;
+    loop {
+        let (stream, peer) = match listener.accept() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("kubenyx-pki: serve: accept: {e}");
+                continue;
+            }
+        };
+        match serve_conn(stream, payload) {
+            Ok(()) => {
+                done += 1;
+                eprintln!("kubenyx-pki: serve: bundle handed to {peer} ({done})");
+            }
+            // A failed transfer never counts: the fetch side retries.
+            Err(e) => eprintln!("kubenyx-pki: serve: {peer}: {e}"),
+        }
+        if count.is_some_and(|n| done >= n) {
+            return;
+        }
+    }
+}
+
+fn serve(cfg: &Cfg) {
+    if cfg.dir.as_os_str().is_empty() || cfg.listen.is_empty() {
+        die("serve requires --dir and --listen");
+    }
+    // Missing custody files are a hard error, never a 503-until-ready: the
+    // launcher mints before it serves, so absence here means the launch
+    // sequence is wrong — failing loudly beats a mesh hung in fetch loops.
+    let missing: Vec<&str> = CUSTODY_FILES
+        .iter()
+        .filter(|f| !non_empty(&cfg.dir.join(f)))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        die(&format!(
+            "serve: {} is missing: {} — run `kubenyx-pki mint-ca --out` first",
+            cfg.dir.display(),
+            missing.join(" ")
+        ));
+    }
+    let payload = tar_bundle(&cfg.dir);
+    let listener = TcpListener::bind(&cfg.listen)
+        .unwrap_or_else(|e| die(&format!("serve: bind {}: {e}", cfg.listen)));
+    // The one stdout line is the contract: with --listen port 0 the kernel
+    // picks the port, and the launcher (and tests) learn the real address
+    // from here rather than racing a log scrape.
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|e| die(&format!("serve: local_addr: {e}")));
+    println!("{addr}");
+    std::io::stdout()
+        .flush()
+        .unwrap_or_else(|e| die(&format!("serve: stdout: {e}")));
+    serve_loop(listener, &payload, cfg.count);
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A throwaway custody dir: the six files with distinct, non-block-
+    /// aligned sizes so padding arithmetic is actually exercised.
+    fn custody_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kubenyx-pki-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        for (i, f) in CUSTODY_FILES.iter().enumerate() {
+            fs::write(dir.join(f), vec![b'a' + i as u8; 100 * i + 7]).unwrap();
+        }
+        dir
+    }
+
+    /// Minimal ustar reader: (name, size) per entry, checksum verified —
+    /// the round-trip stand-in for the GNU tar the guest actually runs.
+    fn parse_tar(payload: &[u8]) -> Vec<(String, u64)> {
+        let mut entries = Vec::new();
+        let mut off = 0;
+        while payload[off..off + 512].iter().any(|b| *b != 0) {
+            let h = &payload[off..off + 512];
+            assert_eq!(&h[257..263], b"ustar\0");
+            let mut sum: u32 = h.iter().map(|b| u32::from(*b)).sum();
+            for b in &h[148..156] {
+                sum = sum - u32::from(*b) + u32::from(b' ');
+            }
+            let stored = std::str::from_utf8(&h[148..154]).unwrap();
+            assert_eq!(u32::from_str_radix(stored, 8).unwrap(), sum);
+            let name_len = h.iter().position(|b| *b == 0).unwrap();
+            let name = std::str::from_utf8(&h[..name_len]).unwrap().to_string();
+            let size_s = std::str::from_utf8(&h[124..135]).unwrap();
+            let size = u64::from_str_radix(size_s, 8).unwrap();
+            entries.push((name, size));
+            off += 512 + (size as usize).next_multiple_of(512);
+        }
+        // End-of-archive: two all-zero blocks close the stream.
+        assert!(payload[off..off + 1024].iter().all(|b| *b == 0));
+        assert_eq!(off + 1024, payload.len());
+        entries
+    }
+
+    #[test]
+    fn tar_payload_round_trips_names_and_sizes() {
+        let dir = custody_dir("tar");
+        let entries = parse_tar(&tar_bundle(&dir));
+        let want: Vec<(String, u64)> = CUSTODY_FILES
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.to_string(), 100 * i as u64 + 7))
+            .collect();
+        assert_eq!(entries, want);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn serve_hands_off_bundle_over_http_and_exits_at_count() {
+        let dir = custody_dir("serve");
+        let payload = tar_bundle(&dir);
+        // Ephemeral port: the same bind-then-report shape serve() itself
+        // uses for --listen with port 0.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = payload.clone();
+        let server = std::thread::spawn(move || serve_loop(listener, &served, Some(1)));
+
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"GET / HTTP/1.0\r\nHost: test\r\n\r\n")
+            .unwrap();
+        let mut resp = Vec::new();
+        s.read_to_end(&mut resp).unwrap();
+        drop(s); // our close is the peer-EOF the transfer accounting waits on
+
+        assert!(resp.starts_with(b"HTTP/1.0 200 OK\r\n"));
+        let split = resp.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = std::str::from_utf8(&resp[..split]).unwrap();
+        assert!(head.contains("Content-Type: application/x-tar"));
+        assert_eq!(&resp[split + 4..], &payload[..]);
+
+        // --count 1 satisfied: the loop must return, not serve forever.
+        server.join().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
