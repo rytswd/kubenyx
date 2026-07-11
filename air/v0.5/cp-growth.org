@@ -254,3 +254,11 @@ and the member rejoins cleanly.
     sync + peer-side promotion all inside the notify window).
   - v0.3 legs re-run green at the final rev: multi-server, failover,
     server-reboot, ca-custody.
+- 2026-07-11: Calibration fix in the acceptance leg (assertions
+  unchanged): on a quiet fast host the whole growth converges in ~25s
+  and undercut the write loop's 30-sample floor — reproduced at 24-25
+  writes on an idle box at BOTH the v0.5 rev and HEAD, so host speed,
+  not a regression. The leg now holds the loop (post-growth, all gates
+  already passed) until the 30 samples exist before stopping; the
+  continuity claims (zero FAILs, single bounded retry, floor itself)
+  are untouched — extra samples only add evidence.

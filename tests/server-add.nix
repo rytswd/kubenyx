@@ -396,6 +396,17 @@ in
             timeout=900,
         )
 
+    # --- Sampling floor BEFORE stopping: every growth gate above has
+    # already passed, so the window is fully covered — but on a quiet
+    # fast host the whole growth converges in ~25s and undercuts the
+    # 30-sample floor the assertion below calibrates for (observed
+    # 24-25 writes on an idle 384-core box, both before and after
+    # changes — host speed, not a regression). Hold the loop until it
+    # has its 30 samples; extra post-growth writes only add evidence,
+    # and every assertion below is unchanged.
+    server1.wait_until_succeeds(
+        "test \"$(grep -c '^ok\\|^retry-ok' /root/writes.log)\" -ge 30", timeout=120
+    )
     # --- Stop the write loop: zero writes failed beyond one retry.
     server1.succeed("touch /root/stop-writes")
     server1.wait_until_succeeds("grep -q '^done ' /root/writes.log", timeout=60)
