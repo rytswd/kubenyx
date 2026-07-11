@@ -10,8 +10,9 @@ something a test harness can afford to say:
 
 | What | Measured¹ |
 |---|---|
-| Fresh microVM cluster, cold boot → node Ready + CoreDNS | **~7.8 s** |
-| Recreating a cluster from a snapshot (`kubenyx-snap`) | **~66 ms** |
+| Fresh microVM cluster, cold boot → node Ready | **~3.4 s** |
+| Recreating a cluster from a snapshot (`kubenyx-snap`) | **~28 ms** |
+| 3-node mesh: launch → all-Ready / recreate all nodes | **~3.8 s / ~45 ms** |
 | Full-VM node Ready vs k3s in identical airgapped VMs | **0.67–0.80×** (faster) |
 | PKI: full cluster CA + 18 certs + kubeconfigs, per boot | **~6 ms** |
 
@@ -57,10 +58,11 @@ Boot a cluster:
 ```console
 $ nix run github:rytswd/kubenyx#microvm-firecracker
 ...
-KUBENYX-PHASE etcd-mem up=5.0
-KUBENYX-PHASE kubelet up=6.6
-KUBENYX-PHASE kube-apiserver up=7.4
-KUBENYX-CLUSTER-READY uptime=7.77s
+KUBENYX-PHASE etcd-mem up=1.62
+KUBENYX-PHASE kubelet up=2.06
+KUBENYX-PHASE kube-apiserver up=2.37
+KUBENYX-PHASE kubenyx-addons up=2.65
+KUBENYX-CLUSTER-READY uptime=3.40s
 ```
 
 That marker means: node Ready, RBAC + addons applied, CoreDNS serving.
@@ -111,7 +113,7 @@ Variants (all share the tap/MAC/IP — **run one at a time**):
 | `nix run .#microvm-cloud-hypervisor` | KVM | ~equal boot speed |
 | `nix run .#microvm-qemu` | nothing | SLiRP user networking, works under pure emulation |
 
-## Quick start 2 — recreation in 66 ms
+## Quick start 2 — recreation in 28 ms
 
 Cold boot is the slow path. Snapshot a ready cluster once, then recreate
 it from memory whenever a test wants one (needs the tap from Quick
@@ -120,21 +122,21 @@ start 1, and KVM):
 ```console
 $ mkdir work && cd work    # short path — API sockets live in CWD
 
-# One-time: boot to cluster-ready, snapshot, tear down (~12s total)
+# One-time: boot to cluster-ready, snapshot, tear down (~9s total)
 $ nix run github:rytswd/kubenyx#kubenyx-snap -- take \
     --runner "$(nix build github:rytswd/kubenyx#microvm-firecracker --print-out-paths)/bin/microvm-run" \
     --out /dev/shm/kubenyx-snap
 
-# From now on: a live cluster in ~66ms, as many times as you like
+# From now on: a live cluster in ~28ms, as many times as you like
 $ nix run github:rytswd/kubenyx#kubenyx-snap -- resume --snapshot /dev/shm/kubenyx-snap
-spawn_to_sock_ms=4.4 load_ms=26.5 load_to_api_ms=8.9 total_ms=35.4 pid=12345 ...
+spawn_to_sock_ms=2.1 load_ms=11.9 load_to_api_ms=14.1 total_ms=26.0 pid=12345 ...
 cluster:    https://10.100.0.2:6443
 kubeconfig: curl -s 10.100.0.2:10124 > kubenyx.kubeconfig && kubectl --kubeconfig kubenyx.kubeconfig get nodes
 stop:       kill 12345
 
 # Benchmark the loop yourself
 $ nix run github:rytswd/kubenyx#kubenyx-snap -- cycle --snapshot /dev/shm/kubenyx-snap -n 5
-cycles=5 median_total_ms=65.6 min=25.2 max=71.5
+cycles=5 median_total_ms=28.4 min=26.0 max=31.5
 ```
 
 Already have a VM running (`nix run .#microvm-firecracker` in another
@@ -147,17 +149,17 @@ $ nix run github:rytswd/kubenyx#kubenyx-snap -- take --sock kubenyx.sock --out /
 
 **Whole meshes recreate too**: with a `microvm-cluster` (or the 7-node
 `microvm-cluster7`) running, snapshot all nodes with a consistent cut
-and recreate the entire cluster in ~100 ms — every node Ready,
+and recreate the entire cluster in ~45 ms — every node Ready,
 cross-node connections intact:
 
 ```console
 $ nix run .#kubenyx-snap -- mesh-take --run-dir /tmp/kubenyx-cluster --out /dev/shm/mesh-snap
 $ nix run .#kubenyx-snap -- mesh-cycle --snapshot /dev/shm/mesh-snap -n 5
-mesh_cycles=5 nodes=3 median_total_ms=92.8 min=58.0 max=102.4
+mesh_cycles=5 nodes=3 median_total_ms=45.0 min=34.2 max=53.2
 ```
 
-(3 nodes: 92.8 ms median; 7 nodes: 102.7 ms — recreation is ~flat in
-node count.)
+(Recreation is ~flat in node count — the 7-node `microvm-cluster7`
+recreates in the same tens-of-ms band; see `bench/RESULTS.md`.)
 
 `resume` leaves the VM running and prints its pid; kill that pid to free
 the tap. One restored clone at a time (the tap identity is baked into
@@ -387,6 +389,11 @@ vde sockets and vm-state off it with no per-run namespace).
 | `server-add` | Declarative 1→3 control-plane growth via etcd learners; shrink refused | 156 s |
 | `server-reboot` | Full VM reboot of a quorum member; state survives | 98 s |
 | `ca-custody` | Durable CA gate refuses, then boots shipped | 30 s |
+| `external-cni` | BYO-dataplane mode: kubenyx writes nothing, the test's conflist wins | 47 s |
+| `local-storage` | Declared local PVs + default StorageClass; data survives pod recreate | 95 s |
+| `ipv6` / `ipv6-multi` | All-v6 single-stack, single + cross-node over `ip -6` routes | 44 s / 54 s |
+| `lib-tests` | 29 eval-level CIDR/hostPort cases — no VM | ~1 s |
+| `prebake` / `prebake-bench` | Build-time containerd stores; ≥90% import-cost contract | 45 s / 66 s |
 | `bench-vs-k3s` | Head-to-head ratio in identical airgapped VMs | 50 s |
 
 Plus `nixosModules.default`, `templates.default` (`nix flake init -t`),
