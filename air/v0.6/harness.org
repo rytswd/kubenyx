@@ -1,5 +1,5 @@
 #+title: Embedding Kubenyx Clusters in NixOS Test Harnesses
-#+state: ready
+#+state: complete
 #+FILETAGS: :core:testing:
 
 * Summary
@@ -193,3 +193,12 @@ work, not attempted here.
 - 2026-07-11: Drafted to ready from the embedding exercise's
   boilerplate inventory (members duplication, address-order footgun,
   credential-ship copies, readiness chains, external-CNI stanza).
+- 2026-07-11: Complete. lib/harness.nix exported (flake =lib.harness=
+  + plain import); =harness= dogfood check green first run (39s solo,
+  41s batched; testScript 28.4s) with zero hand-written kubenyx
+  config beyond one seed image. Guard rails eval-proven: multi-server
+  waitReady refusal, owned-key rejection in =defaults=, pyVar
+  mapping, plain-import path. Default system toplevel drvPath
+  byte-identical (additive only). Snapshot-fixture and prebake
+  honesty sections stand as written — nothing driver-native was
+  attempted, per the recorded prerequisites.

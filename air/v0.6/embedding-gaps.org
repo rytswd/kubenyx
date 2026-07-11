@@ -1,5 +1,5 @@
 #+title: Embedding Gaps — Module Fixes Surfaced by External Harnesses
-#+state: ready
+#+state: complete
 #+FILETAGS: :core:testing:
 
 * Summary
@@ -132,3 +132,15 @@ per-machine modules; the assertion in #3 is the contract instead).
 * History
 - 2026-07-11: Drafted to ready from the generalized embedding
   feedback; dispositions decided (four land, etcd-mem stats deferred).
+- 2026-07-11: Complete. #1-#4 landed byte-identical for defaults
+  (toplevel drvPath compared unchanged against the pre-v0.6 rev after
+  all four; active paths eval-proven: v4/v6 flag render incl. the
+  24/64 mask, both assertions fire, store-path string accepted,
+  bare string refused, extraServerBlocks renders brace-balanced after
+  the primary block). #5 landed as the one deliberate default delta:
+  coredns.service differs by exactly the ConditionPathExists line plus
+  the new coredns.path unit; dns.enable=false closures byte-identical;
+  in-VM proof in ca-custody (durable node logs "skipped, unmet
+  condition" pre-bundle, CoreDNS starts post-ship via the path unit)
+  and ipv6-multi (agent-side pod resolves through the agent's host
+  CoreDNS after the credential ship). #6 stays deferred.

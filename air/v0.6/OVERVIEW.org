@@ -20,3 +20,12 @@ work around lands here in generalized form.
 * History
 - 2026-07-11: Milestone opened; both documents drafted to ready from
   the embedding exercise's boilerplate/gap inventory.
+- 2026-07-11: Milestone complete: lib.harness landed with the
+  =harness= dogfood check (server+agent stood up exclusively through
+  the exported helper), four of five embedding gaps closed
+  byte-identically for defaults (the deliberate agent CoreDNS unit
+  delta is itemized in embedding-gaps.org), 19-leg matrix green.
+  Sweep also surfaced and fixed a latent quiet-host calibration flake
+  in the v0.5 server-add write-loop floor (pre-existing: the pre-v0.6
+  rev reproduced it). Deferred: etcd-mem stats/range revision
+  semantics.
