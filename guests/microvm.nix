@@ -52,6 +52,21 @@ let
       "https://127.0.0.1:${toString cfg.lb.port}"
     else
       "https://${klib.hostPort cfg.controlPlaneEndpoint 6443}";
+  # Same derivation as modules/pki.nix's multiServer: the CA-fetch unit
+  # below must flip together with the module's require-shipped-ca gate —
+  # a server that fetches but is not required to ship, or vice versa,
+  # would reopen the silent-self-mint hole (quorum-mesh.org §D2).
+  multiServer = lib.length serverAddrs > 1;
+  # The datastore unit name follows the backend (cp3 members run real
+  # etcd, quorum-mesh.org §D1). For etcd-mem configs every list naming
+  # this unit renders byte-identically to the old hardcoded text.
+  datastoreUnit =
+    {
+      "kine-sqlite" = "kine";
+      "etcd-mem" = "etcd-mem";
+      "etcd" = "etcd";
+    }
+    .${cfg.datastore.backend};
   # The complete per-node bundle kubenyx-pki packages under nodes/<name>/
   # (mirrors the `needed` list in kubenyx-pki agent mode).
   bundleFiles = [
@@ -278,17 +293,17 @@ lib.mkMerge [
     # ---- observability -------------------------------------------------------
     # Phase markers on the console: systemd stops mirroring unit status once
     # startup "finishes", so key units announce themselves explicitly.
-    # Semantics: notify units (etcd-mem, kube-apiserver, coredns) mark
+    # Semantics: notify units (the datastore, kube-apiserver, coredns) mark
     # genuine readiness (ExecStartPost runs after READY=1); kubelet
     # (Type=simple) and oneshots mark process start/completion. The list
-    # matches each role's fixed unit shape (etcd-mem backend) — adjust it
-    # if the profile ever changes backend.
+    # matches each role's fixed unit shape and names the datastore unit
+    # via the backend, so cp3's etcd members keep their phase marker.
     systemd.services =
       lib.genAttrs
         (
           if isServer then
             [
-              "etcd-mem"
+              datastoreUnit
               "kube-apiserver"
               "kubelet"
               "coredns"
@@ -430,7 +445,7 @@ lib.mkMerge [
                     {
                       echo "KUBENYX-DEGRADED: not ready at uptime ''${up}s"
                       systemctl list-units --failed --no-legend || true
-                      for u in kubenyx-pki etcd-mem kube-apiserver kubelet; do
+                      for u in kubenyx-pki ${datastoreUnit} kube-apiserver kubelet; do
                         echo "--- $u:"
                         journalctl -u "$u" --no-pager -n 4 -o cat || true
                       done
@@ -585,6 +600,61 @@ lib.mkMerge [
           ) agentNames
         )
       )
+      # ---- launcher CA handoff (server side, quorum-mesh.org §D2) ----------------
+      # The server half of the launcher-minted CA channel: land the custody
+      # bundle BEFORE kubenyx-pki runs, so self-mint no-ops (present-file
+      # gated) and every server shares one trust root. Clone of the agent
+      # fetch loop below with one deliberate difference: the agent exits 0
+      # on timeout (its path unit recovers if material arrives later), but
+      # a server that missed the CA must fail LOUDLY — kubenyx-pki runs
+      # --require-shipped-ca in this posture, and three self-minted CAs
+      # mean etcd peer TLS rejects every raft connection: no quorum, and it
+      # looks like a hang instead of an error.
+      // lib.optionalAttrs (isServer && multiServer) {
+        kubenyx-ca-fetch = {
+          description = "Fetch the launcher-minted CA bundle from the host";
+          wantedBy = [ "kubenyx.target" ];
+          before = [ "kubenyx-pki.service" ];
+          after = [ "local-fs.target" ];
+          path = with pkgs; [
+            curl
+            gnutar
+            coreutils
+          ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            TimeoutStartSec = 180;
+          };
+          script = ''
+            pki=/var/lib/kubenyx/pki
+            mkdir -p "$pki"
+            # 0700 like kubenyx-pki's own handling; the tar carries 0600
+            # file modes, so extraction lands the keys private without a
+            # chmod pass.
+            chmod 0700 "$pki"
+            # Idempotent: tmpfs makes every boot fresh, but restarts happen.
+            # (if-form, not `&& exit 0`: the script runs under set -e.)
+            if [ -s "$pki/ca.key" ]; then exit 0; fi
+            # 10.100.0.1 is the host bridge gateway — the launcher's own
+            # address on every KVM mesh variant (the kubeconfig handoff's
+            # IPAddressAllow pins the same constant above).
+            url=http://10.100.0.1:10123
+            deadline=$(( $(cut -d. -f1 /proc/uptime) + 90 ))
+            while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
+              if curl -sf --connect-timeout 2 --max-time 5 "$url" -o /tmp/ca-bundle.tar; then
+                tar x -f /tmp/ca-bundle.tar -C "$pki"
+                rm -f /tmp/ca-bundle.tar
+                echo "KUBENYX-PHASE ca-fetch up=$(cut -d' ' -f1 /proc/uptime)" > /dev/console
+                exit 0
+              fi
+              sleep 0.25
+            done
+            echo "KUBENYX-DEGRADED: CA bundle fetch from $url timed out (90s); kubenyx-pki refuses to self-mint" > /dev/console
+            exit 1
+          '';
+        };
+      }
       # ---- agent credential handoff (agent side) ---------------------------------
       # Bounded fetch-with-retry before kubenyx-pki.service: agents boot in
       # parallel with the server, so the bundle may not exist yet (the server
@@ -700,13 +770,17 @@ lib.mkMerge [
             "containerd"
           ]
           ++ lib.optionals isServer [
-            "etcd-mem"
+            datastoreUnit
             "kube-apiserver"
             "kube-controller-manager"
             "kube-scheduler"
             "kubenyx-addons"
           ]
           ++ lib.optional (!isServer) "kubenyx-pki-fetch"
+          # The CA fetch must beat kubenyx-pki, which already sheds
+          # basic.target — leaving the fetch gated on basic would serialize
+          # the whole cp3 control plane behind it.
+          ++ lib.optional (isServer && multiServer) "kubenyx-ca-fetch"
           # Prebake variants only (prebake.org): the store mount gates
           # containerd, so it must shed basic.target too. Conditional to
           # avoid a stub unit on the default path (byte-identity).

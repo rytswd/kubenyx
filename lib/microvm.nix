@@ -11,13 +11,13 @@
 #   }
 #   => { members, bootOrder, nodes, runners, launcher, shutdown }
 #
-# `servers` is declared in the signature but pinned to 1 for now:
-# etcd-mem is single-member by design (modules/datastore.nix asserts it)
-# and the volatile mesh self-mints its CA on the server — a multi-server
-# microVM mesh needs the real-etcd quorum posture plus a host-side CA
-# custody ship. The module itself already runs multi-server on NixOS
-# hosts (tests/multi-server.nix); the microVM quorum preset is tracked
-# work, not a missing assert.
+# `servers > 1` builds a real etcd quorum (air/v0.7/quorum-mesh.org):
+# the launcher mints one CA per run and serves it over the bridge before
+# any VM boots (§D2), servers switch to backend = "etcd" (§D1), and
+# agents ride kubenyx-lb instead of a declared endpoint (§D6).
+# `servers == 1` keeps the single node name "server" so the cp1 presets'
+# node names, taps, MACs, addresses — and therefore their drvs and
+# launcher scripts — stay byte-identical (§D5, hard requirement).
 #
 # Unlike lib/default.nix and lib/harness.nix this file is flake-coupled:
 # the caller must supply `nixosSystem` and the base module list (the
@@ -68,48 +68,60 @@ rec {
   # One nodes attrset drives everything: per-node runners, taps, MACs,
   # addresses, membership, pod-CIDR carving, and the per-agent credential
   # handoff ports (10125 + sorted-agent position, derived independently
-  # by server and agents from this same attrset).
-  #   server: kubenyx-tap0, 02:...:01, 10.100.0.2
-  #   agentN: kubenyx-tapN, 02:...:N+1, 10.100.0.(2+N)
+  # by server and agents from this same attrset). The index drives tap,
+  # MAC and address, so the mesh stays collision-free at any size:
+  #   serverN: index N-1, agents pack after at index servers..s+a-1
+  #   node:    kubenyx-tap<index>, 02:...:<index+1>, 10.100.0.(2+index)
   mkMembers =
     {
       servers ? 1,
       agents,
     }:
-    assert lib.assertMsg (servers == 1) ''
-      kubenyx.lib.microvm: multi-server microVM meshes are not wired yet —
-      etcd-mem is single-member and the volatile mesh self-mints its CA on
-      the server, so a quorum needs the real-etcd posture + host-side CA
-      ship. The module supports multi-server on NixOS hosts today
-      (tests/multi-server.nix).'';
-    {
-      server = {
-        index = 0;
-        address = "10.100.0.2";
-        role = "server";
-      };
-    }
-    // lib.listToAttrs (
-      map (
+    assert lib.assertMsg (servers >= 1) "kubenyx.lib.microvm: a mesh needs at least one server";
+    assert lib.assertMsg (2 + servers + agents <= 254) ''
+      kubenyx.lib.microvm: ${toString servers} servers + ${toString agents} agents
+      do not fit the 10.100.0.0/24 host bridge (guest addresses start at .2).'';
+    let
+      # servers == 1 keeps the single name "server": cp1w2/cp1w6 node
+      # names, taps, MACs and addresses — and therefore their drvs — stay
+      # byte-identical (quorum-mesh.org §D5, hard requirement).
+      serverFor =
+        i:
+        lib.nameValuePair (if servers == 1 then "server" else "server${toString i}") {
+          index = i - 1;
+          address = "10.100.0.${toString (1 + i)}";
+          role = "server";
+        };
+      agentFor =
         i:
         lib.nameValuePair "agent${toString i}" {
-          index = i;
-          address = "10.100.0.${toString (2 + i)}";
+          index = servers + i - 1;
+          address = "10.100.0.${toString (1 + servers + i)}";
           role = "agent";
-        }
-      ) (lib.range 1 agents)
-    );
+        };
+    in
+    lib.listToAttrs (map serverFor (lib.range 1 servers) ++ map agentFor (lib.range 1 agents));
 
-  # Boot order: server first (agents' credential fetch retries anyway,
-  # but the server owns the whole readiness chain), then agents in
-  # parallel. Teardown reverses this.
+  # Boot order: servers first (agents' credential fetch retries anyway,
+  # but the servers own the whole readiness chain), then agents. Launch
+  # stays fully parallel — the order only names teardown's reverse.
   bootOrderFor =
-    members: [ "server" ] ++ lib.attrNames (lib.filterAttrs (_: n: n.role == "agent") members);
+    members:
+    lib.attrNames (lib.filterAttrs (_: n: n.role == "server") members)
+    ++ lib.attrNames (lib.filterAttrs (_: n: n.role == "agent") members);
 
   mkNode =
-    members: name:
+    {
+      members,
+      joinProbeSec ? 3,
+    }:
+    name:
     let
       n = members.${name};
+      # Derived from the membership itself (not a caller flag) so mkNode
+      # stays a pure function of its inputs — the same gate the modules
+      # compute from kubenyx.nodes (modules/pki.nix, modules/datastore.nix).
+      multiServer = lib.count (m: m.role == "server") (lib.attrValues members) > 1;
       mac = "02:00:00:00:00:${lib.fixedWidthString 2 "0" (lib.toLower (lib.toHexString (n.index + 1)))}";
     in
     mkMicrovm "firecracker" {
@@ -135,9 +147,26 @@ rec {
       kubenyx = {
         nodes = members;
       }
-      // lib.optionalAttrs (n.role == "agent") {
-        role = "agent";
-        controlPlaneEndpoint = members.server.address;
+      // lib.optionalAttrs (n.role == "agent") (
+        {
+          role = "agent";
+        }
+        # Multi-server agents declare NO endpoint, so lb.enable's default
+        # turns kubenyx-lb on and every agent kubeconfig dials
+        # https://127.0.0.1:6444 — the tests/multi-server.nix posture
+        # (quorum-mesh.org §D6). Single-server agents keep the declared
+        # endpoint, byte-identical to before.
+        // lib.optionalAttrs (!multiServer) {
+          controlPlaneEndpoint = members.server.address;
+        }
+      )
+      # A quorum needs real raft: the guest profile's etcd-mem default is
+      # single-member by design, so multi-server servers flip to the etcd
+      # backend (volatile stays on — tmpfs data dir, quorum-mesh.org §D1)
+      # and carry the launcher-chosen join-probe window (§D3).
+      // lib.optionalAttrs (multiServer && n.role == "server") {
+        datastore.backend = "etcd";
+        datastore.etcd.joinProbeSec = joinProbeSec;
       };
     };
 
@@ -161,15 +190,30 @@ rec {
       pkgs,
       agents,
       servers ? 1,
+      # 3s is the D3 measured candidate (a live quorum on the host bridge
+      # answers `endpoint health` in <1s, dead peers refuse instantly);
+      # the 15-vs-3 cold-wall A/B is still pending, and the value is only
+      # rendered for servers > 1 — single-server drvs never see it.
+      joinProbeSec ? 3,
       name ? "kubenyx-cluster",
       runDir ? "/tmp/${name}",
     }:
     let
+      multiServer = servers > 1;
       members = mkMembers { inherit servers agents; };
       bootOrder = bootOrderFor members;
-      nodes = lib.genAttrs bootOrder (mkNode members);
+      nodes = lib.genAttrs bootOrder (mkNode {
+        inherit members joinProbeSec;
+      });
       runners = lib.mapAttrs (_: node: node.config.microvm.declaredRunner) nodes;
       tapFor = n: "kubenyx-tap${toString members.${n}.index}";
+      # Every server serves its own address-pinned admin kubeconfig on
+      # :10124 (quorum-mesh.org §D7): print one curl per server — on
+      # server loss, re-curl a survivor. In boot order, so servers == 1
+      # renders the exact single line it always did.
+      serverAddresses = map (n: members.${n}.address) (
+        lib.filter (n: members.${n}.role == "server") bootOrder
+      );
       hostTools = lib.makeBinPath (
         with pkgs;
         [
@@ -179,6 +223,66 @@ rec {
           gnugrep
           procps
           curl
+        ]
+      );
+      # Driver-side kubenyx-pki, the same derivation the guests run as
+      # internal.tools (mirrors tests/multi-server.nix). Referenced only
+      # from multi-server-gated launcher lines, so single-server launcher
+      # closures never pull it in.
+      kubenyxPki = lib.getExe' (pkgs.callPackage ../pkgs/kubenyx-tools.nix { }) "kubenyx-pki";
+      # Absolute path like kubenyxPki (NOT hostTools: that would change the
+      # single-server launchers' PATH line and break their byte-identity).
+      iptablesBin = lib.getExe' pkgs.iptables "iptables";
+      # Launcher CA channel (quorum-mesh.org §D2), rendered only for
+      # servers > 1 so the cp1 launcher text stays byte-identical. Mint
+      # one CA into the run dir and serve it as a tar on the bridge
+      # BEFORE any VM launches — three self-minted CAs would make etcd
+      # peer TLS reject every raft connection (no quorum, looks like a
+      # hang). The serve step must follow the bridge setup above: it
+      # binds the bridge's own 10.100.0.1. --count makes it exit after
+      # every server has actually landed the bundle.
+      caServe = lib.optionalString multiServer (
+        lib.concatStringsSep "\n" [
+          # The CA fetch is the mesh's only guest→host flow (kubeconfig and
+          # clockstep go host→guest, the agent bundle rides guest→guest), so
+          # a default-deny host firewall refuses it silently: 90 s of guest
+          # retries, then a loud ca-fetch abort — while curl from the host
+          # itself works, because loopback-delivered traffic never crosses
+          # the refuse chain. Same sudo trust as the tap/bridge setup;
+          # delete-then-insert keeps re-runs from stacking duplicates, and
+          # the -down script removes the rule with the run.
+          ''sudo ${iptablesBin} -D INPUT -i "$BR" -p tcp --dport 10123 -j ACCEPT 2>/dev/null || true''
+          ''sudo ${iptablesBin} -I INPUT 1 -i "$BR" -p tcp --dport 10123 -j ACCEPT''
+          ''echo "${name}: minting the per-run CA bundle"''
+          ''${kubenyxPki} mint-ca --out "$RUN/ca-bundle"''
+          ''${kubenyxPki} serve --dir "$RUN/ca-bundle" --listen 10.100.0.1:10123 --count ${toString servers} > "$RUN/ca-serve.log" 2>&1 &''
+          "ca_pid=$!"
+          ""
+          ""
+        ]
+      );
+      # The bundle and its serve process die with the run — per-run trust
+      # material, never operator custody (§D2). Rendered into cleanup()'s
+      # 2-space body indentation, trailing entry re-indents pkill.
+      caTeardown = lib.optionalString multiServer (
+        lib.concatStringsSep "\n  " [
+          ''kill "$ca_pid" 2>/dev/null || true''
+          ''rm -rf "$RUN/ca-bundle"''
+          ''sudo ${iptablesBin} -D INPUT -i "$BR" -p tcp --dport 10123 -j ACCEPT 2>/dev/null || true''
+          ""
+        ]
+      );
+      # The -down script is the normal exit path (the launcher's trap only
+      # covers INT/TERM, and its `wait` returns exactly when -down kills the
+      # VMs), so the per-run trust surface dies here: the CA-port accept,
+      # the bundle with its private keys, and — after a degraded run where
+      # fewer than N servers fetched — the still-listening serve process.
+      caShutdown = lib.optionalString multiServer (
+        lib.concatStringsSep "\n" [
+          "sudo ${iptablesBin} -D INPUT -i kubenyx-br0 -p tcp --dport 10123 -j ACCEPT 2>/dev/null || true"
+          ''pkill -f "kubenyx-pki serve --dir $RUN/ca-bundle" 2>/dev/null || true''
+          ''rm -rf "$RUN/ca-bundle"''
+          ""
         ]
       );
 
@@ -212,11 +316,11 @@ rec {
         mkdir -p "$RUN"
 
         cleanup() {
-          pkill -x firecracker 2>/dev/null || true
+          ${caTeardown}pkill -x firecracker 2>/dev/null || true
         }
         trap cleanup INT TERM
 
-        start_ns=$(date +%s%N)
+        ${caServe}start_ns=$(date +%s%N)
 
         launch() {
           node=$1
@@ -251,7 +355,9 @@ rec {
         wall_ms=$(( ( $(date +%s%N) - start_ns ) / 1000000 ))
         if [ "$ready" -eq ${toString (lib.length bootOrder)} ]; then
           echo "KUBENYX-MESH-READY nodes=$ready wall=''${wall_ms}ms"
-          echo "KUBENYX-KUBECONFIG curl -s ${members.server.address}:10124 > kubenyx.kubeconfig"
+          ${lib.concatMapStringsSep "\n  " (
+            a: ''echo "KUBENYX-KUBECONFIG curl -s ${a}:10124 > kubenyx.kubeconfig"''
+          ) serverAddresses}
         else
           echo "KUBENYX-MESH-DEGRADED: $ready/${toString (lib.length bootOrder)} nodes ready after 180s — consoles in $RUN/<node>/console.log" >&2
         fi
@@ -302,7 +408,7 @@ rec {
           echo "${name}-down: firecracker still running — pkill -x firecracker if it is wedged" >&2
           exit 1
         fi
-        echo "${name}-down: all nodes down"
+        ${caShutdown}echo "${name}-down: all nodes down"
       '';
     in
     {

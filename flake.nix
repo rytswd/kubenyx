@@ -52,6 +52,25 @@
         agents = 6;
         runDir = "/tmp/kubenyx-cluster7";
       };
+      # cp3 quorum presets (air/v0.7/quorum-mesh.org): 3 control planes
+      # forming a REAL etcd quorum in the volatile posture, alone and with
+      # 2 workers. mkCluster's joinProbeSec default (3s, the §D3 measured
+      # candidate) applies; own run dirs so snapshots of every mesh size
+      # coexist.
+      cp3Cluster = microvmLib.mkCluster {
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        name = "cp3";
+        servers = 3;
+        agents = 0;
+        runDir = "/tmp/kubenyx-cp3";
+      };
+      cp3w2Cluster = microvmLib.mkCluster {
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        name = "cp3w2";
+        servers = 3;
+        agents = 2;
+        runDir = "/tmp/kubenyx-cp3w2";
+      };
       # The implicit one-node membership every single-node variant declares.
       mkSingleNodeMembership = address: {
         kubenyx.nodes.kubenyx = {
@@ -183,6 +202,13 @@
             cp1w2-down = cluster3.shutdown;
             cp1w6 = cluster7.launcher;
             cp1w6-down = cluster7.shutdown;
+            # cp3 quorum meshes (quorum-mesh.org): launcher + teardown only —
+            # no per-node nixosConfigurations registration; the launcher
+            # embeds the runners it needs.
+            cp3 = cp3Cluster.launcher;
+            cp3-down = cp3Cluster.shutdown;
+            cp3w2 = cp3w2Cluster.launcher;
+            cp3w2-down = cp3w2Cluster.shutdown;
             # Deprecated aliases (pre-rename names); same derivations, the
             # binaries inside carry the new names.
             microvm-cluster = cp1w2;
@@ -367,6 +393,22 @@
               cp1w6-down = {
                 type = "app";
                 program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.cp1w6-down}/bin/cp1w6-down";
+              };
+              cp3 = {
+                type = "app";
+                program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.cp3}/bin/cp3";
+              };
+              cp3-down = {
+                type = "app";
+                program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.cp3-down}/bin/cp3-down";
+              };
+              cp3w2 = {
+                type = "app";
+                program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.cp3w2}/bin/cp3w2";
+              };
+              cp3w2-down = {
+                type = "app";
+                program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.cp3w2-down}/bin/cp3w2-down";
               };
             }
           )
