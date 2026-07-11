@@ -22,7 +22,7 @@ is just state to snapshot. Clones step their clocks and reseed their
 CRNG automatically, so every restore is safe to treat as a fresh
 cluster.
 
-**🌐 Multi-node is one command.** `nix run .#microvm-cluster` boots a
+**🌐 Multi-node is one command.** `nix run .#cp1w2` boots a
 3-node cluster (server + 2 agents) to all-Ready in **~3.8 s** —
 membership, credentials, pod routing all derived from one declared
 attrset, no join tokens, no discovery. And meshes recreate too:
@@ -52,8 +52,9 @@ shim, and the snapshot tool.
 - For the microVM paths: **`/dev/kvm`** — on EC2 that means a `*.metal`
   instance type (regular Nitro instances have no nested virt). Check
   with `ls /dev/kvm` before anything else.
-- Without KVM everything still works under emulation (the `microvm-qemu`
-  variant and the NixOS test matrix) — just ~6.5× slower.
+- Without KVM everything still works under emulation (`cp1` falls back
+  to qemu automatically, and the NixOS test matrix never needs KVM) —
+  just ~6.5× slower.
 
 ## 🚀 Getting Started
 
@@ -64,7 +65,7 @@ $ sudo ip tuntap add kubenyx-tap0 mode tap && \
   sudo ip addr add 10.100.0.1/24 dev kubenyx-tap0 && \
   sudo ip link set kubenyx-tap0 up          # host tap, once per boot
 
-$ nix run github:rytswd/kubenyx#microvm-firecracker > console.log 2>&1 &
+$ nix run github:rytswd/kubenyx > console.log 2>&1 &
 $ curl -s 10.100.0.2:10124 > kubenyx.kubeconfig    # after ~3.4s
 $ kubectl --kubeconfig kubenyx.kubeconfig get nodes
 NAME      STATUS   ROLES    AGE   VERSION
@@ -77,8 +78,8 @@ lives in the sections below.
 ## 📖 How to Use
 
 The microVM variants below are the disposable fast path (the mesh is
-all-firecracker; cloud-hypervisor/qemu exist as single-node
-alternatives). The same module also runs on **any NixOS host** — that
+all-firecracker; single-node picks its hypervisor at run time, see
+*Hypervisors* below). The same module also runs on **any NixOS host** — that
 is where the durable features live (HA quorum, CA custody, hitless
 scale-out; see *In your own NixOS configuration*) — and embeds in
 **NixOS VM tests** via `lib.harness` (standard test-driver VMs, not
@@ -88,15 +89,20 @@ Every topology supports both start modes — pick your cell:
 
 | | Cold start | Snapshot recreation |
 |---|---|---|
-| **Single node** | `nix run .#microvm-firecracker` — **~3.4 s** | `kubenyx-snap resume` — **~28 ms** |
-| **Multi-node mesh** | `nix run .#microvm-cluster` — **~3.8 s** | `kubenyx-snap mesh-resume` — **~45 ms** |
+| **Single node** | `nix run .#cp1` — **~3.4 s** | `kubenyx-snap resume` — **~28 ms** |
+| **Multi-node mesh** | `nix run .#cp1w2` — **~3.8 s** | `kubenyx-snap mesh-resume` — **~45 ms** |
+
+Target names spell the composition: `cp<N>w<M>` = *N* control-plane
+nodes + *M* workers (`cp1` alone = single node, also the bare
+`nix run github:rytswd/kubenyx` default). Every target has a `-down`
+twin for teardown.
 
 <details>
 <summary><b>Single node — cold start</b> — boot in ~3.4 s: console, host-side kubectl, shutdown</summary>
 
 ### Boot
 
-If you ran the mesh launcher (`nix run .#microvm-cluster`, below) on
+If you ran the mesh launcher (`nix run .#cp1w2`, below) on
 this host boot, skip the tap commands from Getting Started: the
 launcher already created `kubenyx-tap0` enslaved to the `kubenyx-br0`
 bridge, and the bridge holds `10.100.0.1/24` — adding the address to
@@ -104,7 +110,7 @@ the tap as well would put the same address on two interfaces. The
 single-node variant works unchanged behind the bridge.
 
 ```console
-$ nix run github:rytswd/kubenyx#microvm-firecracker
+$ nix run github:rytswd/kubenyx
 ...
 KUBENYX-PHASE etcd-mem up=1.62
 KUBENYX-PHASE kubelet up=2.06
@@ -122,7 +128,7 @@ redraw) and `kubectl` works immediately in the guest.
 `exit` just re-logs you in (autologin), and there is no detach escape —
 park this terminal and do everything from a second one (host-side
 kubectl below), or background the VM from the start:
-`nix run .#microvm-firecracker > console.log 2>&1 &`.
+`nix run .#cp1 > console.log 2>&1 &`.
 Do NOT Ctrl-Z the console — that suspends the VMM and freezes the
 guest's vCPUs, not just the terminal.
 
@@ -148,22 +154,26 @@ cluster is the same trust as the tap itself.
 directory — the control socket is relative):
 
 ```console
-$ nix run .#microvm-firecracker-shutdown
+$ nix run .#cp1-down
 ```
 
 Bounded graceful attempt, then SIGTERM, then SIGKILL — firecracker
 guests have no i8042, so Ctrl-Alt-Del alone would hang forever; the
 ladder guarantees a fast exit either way.
 
-### Variants
+### Hypervisors
 
-All share the tap/MAC/IP — **run one at a time**:
+`cp1` picks the hypervisor at run time: **firecracker** when `/dev/kvm`
+is usable, otherwise a loud fallback to **qemu** — the only variant
+that runs without KVM. Override with `KUBENYX_HV`:
 
-| Command | Needs | Notes |
+| `KUBENYX_HV=` | Needs | Notes |
 |---|---|---|
-| `nix run .#microvm-firecracker` | KVM | fastest; snapshot/restore capable |
-| `nix run .#microvm-cloud-hypervisor` | KVM | ~equal boot speed |
-| `nix run .#microvm-qemu` | nothing | SLiRP user networking, works under pure emulation |
+| `firecracker` (default) | KVM | fastest; snapshot/restore capable |
+| `qemu` | nothing | SLiRP user networking, works under pure emulation (~6.5× slower) |
+| `cloud-hypervisor` | KVM | ~equal boot speed; kept as an A/B reference |
+
+All variants share the tap/MAC/IP — **run one at a time**.
 
 Everything is volatile by design: tmpfs root over a read-only store
 image, in-memory datastore, PKI regenerated in ~6 ms per boot. Kill the
@@ -198,7 +208,7 @@ $ nix run github:rytswd/kubenyx#kubenyx-snap -- cycle --snapshot /dev/shm/kubeny
 cycles=5 median_total_ms=28.4 min=26.0 max=31.5
 ```
 
-Already have a VM running (`nix run .#microvm-firecracker` in another
+Already have a VM running (`nix run .#cp1` in another
 terminal)? Snapshot it in place — pause → snapshot → resume, the guest
 never notices (~1.3 s, run from the VM's directory):
 
@@ -226,8 +236,8 @@ the 3.5 GB memory image, and tmpfs makes that free.
 <summary><b>Multi-node mesh — cold start</b> — 3 or 7 nodes all-Ready in ~3.8 s, one command</summary>
 
 ```console
-$ nix run github:rytswd/kubenyx#microvm-cluster
-microvm-cluster: configuring host bridge kubenyx-br0 + taps (sudo)
+$ nix run github:rytswd/kubenyx#cp1w2
+cp1w2: configuring host bridge kubenyx-br0 + taps (sudo)
 [server] ...
 [agent1] ...
 [agent2] ...
@@ -238,9 +248,27 @@ KUBENYX-KUBECONFIG curl -s 10.100.0.2:10124 > kubenyx.kubeconfig
 One command: per-node taps on a host bridge, server first, agents in
 parallel, per-node consoles merged with name prefixes. Membership,
 addresses, credential handoff ports — everything derives from one
-declared attrset. The 7-node twin is `nix run .#microvm-cluster7`
+declared attrset. The 7-node twin is `nix run .#cp1w6`
 (own run dir, so snapshots of both sizes coexist). Teardown:
-`nix run .#microvm-cluster-shutdown` (agents drain first, server last).
+`nix run .#cp1w2-down` (agents drain first, server last).
+
+Any other size is two lines in your own flake — the presets above are
+just calls into `lib.microvm.mkCluster`:
+
+```nix
+kubenyx.lib.microvm.mkCluster {
+  pkgs = nixpkgs.legacyPackages.x86_64-linux;
+  agents = 9;                     # 1 control plane + 9 workers
+  name = "cp1w9";                 # launcher binary + console prefix
+  runDir = "/tmp/kubenyx-cp1w9";  # per-size run dir; snapshots coexist
+}
+# => { members, bootOrder, nodes, runners, launcher, shutdown }
+```
+
+`launcher`/`shutdown` are the same bridge-and-boot / escalation-ladder
+scripts the presets ship. (Multi-server meshes are pinned off for now:
+the volatile fast path is single-control-plane by design — see the
+quorum posture under *In your own NixOS configuration* for real HA.)
 
 </details>
 
@@ -470,10 +498,12 @@ when a dependency is the bottleneck, replace it with 300 lines of Rust.
 
 | App | What it does |
 |---|---|
-| `.#microvm-firecracker` / `-cloud-hypervisor` / `-qemu` | Single-node disposable cluster (~3.4 s to ready; qemu = KVM-less fallback) |
-| `.#microvm-firecracker-shutdown` (+ `-cloud-hypervisor-`, `-qemu-` twins) | Guest shutdown with escalation ladder; run from the VM's directory |
-| `.#microvm-cluster` / `.#microvm-cluster-shutdown` | 3-node mesh (server + 2 agents), bridge + taps via sudo, ~3.8 s to all-Ready / reverse teardown |
-| `.#microvm-cluster7` / `.#microvm-cluster7-shutdown` | 7-node twin (server + 6 agents), run dir `/tmp/kubenyx-cluster7`, ~4.2 s |
+| `.#cp1` (= bare `nix run github:rytswd/kubenyx`) | Single-node disposable cluster (~3.4 s to ready); hypervisor via `KUBENYX_HV`, auto-falls back to qemu without KVM |
+| `.#cp1-down` | Guest shutdown with escalation ladder; run from the VM's directory |
+| `.#cp1w2` / `.#cp1w2-down` | 3-node mesh (1 control plane + 2 workers), bridge + taps via sudo, ~3.8 s to all-Ready / reverse teardown |
+| `.#cp1w6` / `.#cp1w6-down` | 7-node twin (1 control plane + 6 workers), run dir `/tmp/kubenyx-cluster7`, ~4.2 s |
+| `.#microvm-<hypervisor>[-shutdown]` | Direct per-hypervisor entry points (`firecracker`, `cloud-hypervisor`, `qemu`) — what `cp1` dispatches to |
+| `.#microvm-cluster*` | Deprecated aliases of the `cp1w2`/`cp1w6` targets |
 | `.#native-bench` | Control-plane timings as bare processes, no VM |
 
 ### Packages beyond the app-backing ones
