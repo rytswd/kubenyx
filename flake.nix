@@ -498,9 +498,14 @@
             program = nixpkgs.lib.getExe (pkgs.callPackage ./pkgs/native-bench.nix { kine = pkgs.kine; });
           };
         }
-        # Graceful guest shutdown (Ctrl-Alt-Del over the VMM API socket,
-        # then wait for exit). The socket path is relative — run these
-        # from the same directory the VM was started in.
+        # Guest shutdown with an escalation ladder. The stock microvm.nix
+        # script sends Ctrl-Alt-Del over the API socket and waits for the
+        # VMM to exit — forever, on firecracker guests: there is no i8042
+        # ("i8042 probe failed with error -22" at every boot), so the
+        # keystroke lands nowhere (the mesh teardown encoded this first).
+        # Bounded graceful attempt, then SIGTERM, then SIGKILL — every
+        # guest here is disposable by design. Run from the VM's directory
+        # (the control socket is relative).
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") (
           nixpkgs.lib.genAttrs
             [
@@ -519,12 +524,35 @@
                 "microvm-cloud-hypervisor-shutdown"
                 "microvm-qemu-shutdown"
               ]
-              (name: {
-                type = "app";
-                program = "${
-                  self.packages.${pkgs.stdenv.hostPlatform.system}.${nixpkgs.lib.removeSuffix "-shutdown" name}
-                }/bin/microvm-shutdown";
-              })
+              (
+                name:
+                let
+                  runner = self.packages.${pkgs.stdenv.hostPlatform.system}.${
+                    nixpkgs.lib.removeSuffix "-shutdown" name
+                  };
+                in
+                {
+                  type = "app";
+                  program = nixpkgs.lib.getExe (
+                    pkgs.writeShellScriptBin name ''
+                      # The single-node guests are all named microvm@kubenyx
+                      # (exec -a by the runner); anchor tightly so mesh nodes
+                      # (microvm@server, microvm@agentN) are never touched.
+                      alive() { ${pkgs.procps}/bin/pgrep -f '^microvm@kubenyx ' >/dev/null 2>&1; }
+                      alive || { echo "${name}: nothing running"; exit 0; }
+                      ${pkgs.coreutils}/bin/timeout 8 ${runner}/bin/microvm-shutdown 2>/dev/null || true
+                      alive || { echo "${name}: down (graceful)"; exit 0; }
+                      ${pkgs.procps}/bin/pkill -TERM -f '^microvm@kubenyx ' 2>/dev/null || true
+                      for _ in $(${pkgs.coreutils}/bin/seq 1 25); do
+                        alive || { echo "${name}: down (SIGTERM)"; exit 0; }
+                        ${pkgs.coreutils}/bin/sleep 0.2
+                      done
+                      ${pkgs.procps}/bin/pkill -KILL -f '^microvm@kubenyx ' 2>/dev/null || true
+                      echo "${name}: down (SIGKILL)"
+                    ''
+                  );
+                }
+              )
           # Mesh launcher / teardown (air/v0.2/multinode-microvm.org §2):
           # `nix run .#microvm-cluster` boots server + agents, merges the
           # per-node consoles with name prefixes, and prints the kubeconfig
