@@ -75,6 +75,13 @@ NAME      STATUS   ROLES    AGE   VERSION
 kubenyx   Ready    <none>   30s   v1.36.2
 ```
 
+The serial console is the VM's stdio: `exit` just re-logs you in
+(autologin), and there is no detach escape — park this terminal and do
+everything from a second one (host-side kubectl below), or background
+the VM from the start: `nix run .#microvm-firecracker > console.log 2>&1 &`.
+Do NOT Ctrl-Z the console — that suspends the VMM and freezes the
+guest's vCPUs, not just the terminal.
+
 Exit the VM with `poweroff` in the guest shell, or from another
 terminal (same directory — the control socket is relative):
 
