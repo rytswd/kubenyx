@@ -76,6 +76,14 @@ lives in the sections below.
 
 ## 📖 How to Use
 
+The microVM variants below are the disposable fast path (the mesh is
+all-firecracker; cloud-hypervisor/qemu exist as single-node
+alternatives). The same module also runs on **any NixOS host** — that
+is where the durable features live (HA quorum, CA custody, hitless
+scale-out; see *In your own NixOS configuration*) — and embeds in
+**NixOS VM tests** via `lib.harness` (standard test-driver VMs, not
+microVMs).
+
 Every topology supports both start modes — pick your cell:
 
 | | Cold start | Snapshot recreation |
