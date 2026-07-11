@@ -1,0 +1,134 @@
+#+title: Embedding Gaps — Module Fixes Surfaced by External Harnesses
+#+state: ready
+#+FILETAGS: :core:testing:
+
+* Summary
+
+Five small module gaps surfaced when an external test harness embedded
+kubenyx clusters at full scale. Four land here — each byte-identical
+for configurations that don't use it, except where the defect itself
+was default behavior (the agent CoreDNS crash loop, whose unit delta
+is deliberate and documented below). One is deferred with rationale.
+
+| # | Gap | Disposition |
+|---+-----+-------------|
+| 1 | =dns.extraCorefile= cannot add zone-scoped server blocks | land: =dns.extraServerBlocks= |
+| 2 | =addons.manifests= rejects rendered-file *strings* (files inside derivations) | land: store-path strings accepted |
+| 3 | =storage.localVolumes= on an agent-role node silently applies nothing | land: assertion |
+| 4 | no first-class way to re-enable kcm podCIDR allocation for external CNIs | land: =controlPlane.kcm.allocateNodeCidrs= |
+| 5 | agent-role CoreDNS crash-loops until the credential dir arrives | land: start gating on the rendered kubeconfig |
+| 6 | etcd-mem: apiserver storage stats queries log "Too large resource version" continuously | defer (see below) |
+
+* Motivation
+
+Kubenyx's own matrix exercises its options the way kubenyx's tests
+were written. An external harness exercises them the way *strangers*
+write configuration, and that surfaced sharp edges:
+
+1. *DNS extra server blocks.* =dns.extraCorefile= splices lines inside
+   the primary =.:53= block. Adding a zone-scoped block (e.g. a
+   =hosts=-plugin zone for harness VM names — the hosts plugin is
+   once-per-block, so it cannot ride inside the primary block) forces
+   a close-brace/re-open trick through =extraCorefile=, and the
+   spliced block must remember to repeat =bind <address>= or CoreDNS
+   binds the zone on every interface. The trick also leaves CoreDNS
+   logging dozens of benign =plugin/loop: no next plugin found= errors
+   per boot. Structure wanted, hack removed.
+2. *Rendered files as strings.* Build-time template pipelines
+   (helm-template and friends) hand back *files inside derivations* —
+   =${drv}/manifest.yaml=, a string with context. =addons.manifests=
+   accepts attrsets, eval-time paths and whole derivations, so each
+   such file needed a one-line =runCommand= copy wrapper: N wrapper
+   derivations of pure friction per consumer. Worse, a store-path
+   string silently *type-checks* today (the JSON type admits strings)
+   and renders as a quoted JSON scalar — garbage the applier then
+   tries to apply.
+3. *Agent-role local volumes.* The addons applier runs on servers
+   only. =storage.localVolumes= declared on an agent contributed its
+   manifests to a unit that never exists: silently, nothing. Nobody
+   can forward them (separate machines evaluate separately), so the
+   honest fix is refusal with directions.
+4. *podCIDR allocation.* Kubenyx hardcodes
+   =--allocate-node-cidrs=false= — correct for the bridge CNI, where
+   Nix owns the subnets and the allocator's order-instability would
+   write *wrong* =node.spec.podCIDR= values. But external CNIs running
+   Kubernetes-mode IPAM *consume* =node.spec.podCIDR=; embedding one
+   today only works via the =kcm.extraFlags= last-flag-wins accident.
+   Accidents make poor contracts.
+5. *Agent CoreDNS noise.* On agent-role nodes CoreDNS starts at boot,
+   before the operator has shipped the credential directory, and
+   crash-loops until =coredns.kubeconfig= exists (=Restart=always=
+   recovers after the ship, so it *works* — loudly). Dozens of failed
+   starts in every agent boot log is debugging chaff.
+
+* Design
+
+** 1. =dns.extraServerBlocks= (lines, default ="")
+Appended verbatim *after* the primary =.:53= block. Each block is a
+complete CoreDNS server block and should repeat =bind
+<dns.address>= (documented on the option; CoreDNS binds per-block).
+=extraCorefile= keeps its exact semantics inside the primary block.
+Empty default concatenates nothing: rendered Corefile byte-identical.
+
+** 2. =addons.manifests= store-path strings
+=renderManifest= gains a string branch: a string value must be a store
+path (rendered file inside a derivation) and is linked as-is; any
+other string is an eval error with a pointed message (a bare JSON
+scalar was never a valid manifest, so nothing legitimate breaks).
+Attrset/path/derivation behavior unchanged, byte-for-byte.
+
+** 3. =storage.localVolumes= role assertion
+Declaring it on an agent-role node is now an eval-time assertion
+failure explaining both escape hatches: declare on a server (PVs pin
+to the *declaring* node), or ship agent-node-affine PV manifests
+through a server's =addons.manifests=.
+
+** 4. =controlPlane.kcm.allocateNodeCidrs= (bool, default false)
+false renders the exact flag string as today. true flips the flag and
+appends =--cluster-cidr= plus a family-correct =--node-cidr-mask-size=
+(/24 of a v4 cluster CIDR, /64 of a v6 prefix — the same carve klib
+uses, so allocated and Nix-declared subnets share geometry even though
+the allocator's index order is its own). Asserted =network.cni ==
+"external"=: with the bridge CNI the allocator remains a footgun, and
+the assertion says why. =kcm.extraFlags= still wins last on conflicts.
+
+** 5. Agent CoreDNS start gating
+=coredns.service= gains =ConditionPathExists= on the rendered
+=coredns.kubeconfig=; agent-role nodes add a path unit that starts
+CoreDNS the moment the kubeconfig appears (the PKI renderer writes it
+when credentials arrive — first ship and every re-ship). Servers
+order after the PKI unit already, so the condition is satisfied on
+first evaluation there. *This deliberately changes the default unit
+text on every DNS-enabled node* — the defect was default behavior;
+the sweep covers it. Boot logs on agents now show one clean start
+instead of a crash-loop tail.
+
+** 6. Deferred: etcd-mem stats/range revision semantics
+The apiserver's storage stats path logs =Too large resource version=
+continuously against etcd-mem (~130 lines over a few minutes,
+cosmetic — counts/sizes still converge). The right fix is inside the
+shim's stats/range handling of future revisions, likely tied to
+compaction bookkeeping — a Rust investigation with its own validation
+matrix, not a small lands-alongside change. Tracked here so the noise
+is a known quantity; nothing in the matrix asserts on it.
+
+Also deferred: forwarding agent-declared PV manifests into a server's
+applier (cross-machine config flow — architecturally out of scope for
+per-machine modules; the assertion in #3 is the contract instead).
+
+* Test Plan
+
+- Byte-identity: default-config system closures evaluated before/after
+  each change; only #5 may differ, and only in the CoreDNS unit + the
+  new path unit. A =dns.enable = false= closure must stay identical
+  through #5 as well.
+- =lib-tests= stays green (klib untouched); affected VM legs re-run:
+  DNS behavior rides every leg, storage assertion is eval-level,
+  allocateNodeCidrs=false is flag-identity, the true-path is consumer
+  turf (external CNI + allocator) — its geometry claim is klib's,
+  already unit-tested.
+- Full matrix sweep as the milestone gate.
+
+* History
+- 2026-07-11: Drafted to ready from the generalized embedding
+  feedback; dispositions decided (four land, etcd-mem stats deferred).

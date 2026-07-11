@@ -1,0 +1,195 @@
+#+title: Embedding Kubenyx Clusters in NixOS Test Harnesses
+#+state: ready
+#+FILETAGS: :core:testing:
+
+* Summary
+
+An exported library helper — reachable both as flake =lib.harness= and
+as a plain =import <kubenyx>/lib/harness.nix= (no flakes required) —
+that turns one members attrset into everything a NixOS VM test needs
+to host a kubenyx cluster: the per-node NixOS modules (roles,
+addresses including v6, external-CNI toggle) and the driver-side
+Python snippets (credential ship over the operator channel, readiness
+gates, a kubectl wrapper). A new =harness= check dogfoods it: a
+server+agent cluster stood up *exclusively* through the helper, then
+runs a pod.
+
+The doc also records the snapshot-fixture pattern honestly: what
+recreation-speed machinery works today (host-side =kubenyx-snap=) and
+what a driver-native version would additionally need.
+
+* Motivation
+
+A full-scale external embedding exercise — porting a large consumer
+test suite from a bundled-distro substrate onto kubenyx inside its
+existing =testers.runNixOSTest= harness — worked on the first try, but
+only after hand-writing ~150 lines of boilerplate that kubenyx's own
+tests had already written four times over:
+
+- a members attrset duplicated into every node's =kubenyx.nodes=, with
+  addresses copied from the driver's assignment order (kubenyx's own
+  tests carry a warning comment about the driver's *alphabetical*
+  address assignment — a footgun the fixture author must rediscover);
+- the same address resolution done properly: reading
+  =nodes.<name>.networking.primaryIPv6Address= inside a module
+  function instead of hardcoding, bracket handling left to klib;
+- the agent credential ship as driver Python (tar over the test
+  driver, never a shared 9p dir — the guest kernel caches the negative
+  dentry and never sees the server's write), copied verbatim between
+  files;
+- the readiness chain: apiserver unit → admin kubeconfig → per-agent
+  kubeconfig rendered → seed unit settled → node registered/Ready →
+  default ServiceAccount admittable;
+- the external-CNI stanza pair (=network.cni = "external"= +
+  =kubeProxy.enable= off when the CNI replaces the service plane).
+
+Every future consumer would re-write the same lines. The generalized
+form belongs in kubenyx as an exported helper, and kubenyx's own test
+matrix should consume it where it fits (the dogfood check proves the
+exported surface alone is sufficient).
+
+** Goals
+- One call, one members attrset → ready-to-use =nodes= for
+  =testers.runNixOSTest= (or any module host), v4 or v6.
+- Driver snippets generated from the same members set, so node names
+  and Python variables can never drift apart.
+- Usable without flakes: plain =import= of a file path, matching how
+  external consumers pin kubenyx by path or narHash.
+- The dogfood check uses ONLY the exported surface — if the helper is
+  insufficient, the check (not a consumer) breaks first.
+
+** Non-Goals
+- Multi-server bring-up in the generated =waitReady= (the operator CA
+  custody ceremony is deliberate and documented in
+  tests/multi-server.nix; the helper still *declares* multi-server
+  memberships fine, and refuses loudly if asked to generate a
+  single-server bring-up for one).
+- Non-cluster peripheral nodes (edge routers, external clients):
+  consumers merge their own nodes next to the generated set.
+- Replacing kubenyx's existing per-leg tests with the helper
+  everywhere; migration can happen opportunistically.
+
+* Design
+
+** =lib/harness.nix= — exported surface
+
+#+begin_src nix
+harness.mkCluster {
+  members = {                    # the single source of truth
+    server = { index = 0; role = "server"; };            # address optional
+    agent  = { index = 1; };                             # role defaults "agent"
+    other  = { index = 2; address = "fd00:1::7"; };      # explicit wins
+  };
+  clusterCidr  ? null;           # family selector; null keeps module defaults (v4)
+  serviceCidr  ? null;
+  externalCni  ? false;          # network.cni = "external"
+  cniReplacesServicePlane ? false;  # additionally kubeProxy.enable = false
+  defaults     ? { };            # kubenyx.* overlay applied to every member
+  extraModules ? [ ];            # NixOS modules applied to every member
+}
+#+end_src
+
+returns:
+
+| Attr | What |
+|------+------|
+| =nodes= | attrset of NixOS modules, one per member — feed straight to the test's =nodes= (merge peripheral nodes alongside) |
+| =driverDefs= | Python function definitions: =kubenyx_kubectl=, =kubenyx_wait_apiserver=, =kubenyx_ship_agent_credentials=, =kubenyx_wait_seeded=, =kubenyx_wait_node=, =kubenyx_wait_workloads_admittable= |
+| =waitReady= | self-contained snippet (defs included): full single-server bring-up for the declared members, ordered ship-then-gate |
+| =serverVar= / =pyVar= | the primary server's Python variable / the name→variable mapping (driver turns =-= into =_=) |
+
+Key behaviors, each one a lesson the embedding exercise paid for:
+
+- *Address resolution*: explicit =address= wins; otherwise the
+  generated module reads the driver's assigned
+  =primaryIPAddress=/=primaryIPv6Address= (family keyed off
+  =clusterCidr=) from the =nodes= module argument. Outside the driver
+  the =nodes= argument defaults empty and explicit addresses are
+  required (kubenyx's own multi-node assertion catches omissions).
+- *Structural keys are owned by arguments*: =defaults= carrying
+  =nodes=, =role=, CIDRs, or the CNI toggles is an eval-time error
+  pointing at the right argument — module-system conflict spew is not
+  an acceptable UX for the first consumer contact.
+- *Test-oriented soft defaults* (all =mkDefault=, consumer always
+  wins): airgapped DNS (=dns.upstream = []=), a v6 DNS bind address
+  when the cluster family is v6 (the module default is v4
+  link-local, unreachable from v6-only pods), driver-profile
+  virtualisation sizing — set only when the qemu-vm options exist, so
+  the same modules still eval outside the driver.
+- *=waitReady= is externally honest*: with =externalCni= it gates on
+  node *registration*, not Ready — Ready belongs to the consumer's CNI
+  rollout, which kubenyx cannot see. The seed gate tolerates both
+  seeding modes (boot-time unit absent under prebaked stores).
+- =nodeName= is pinned to the member attr name, so hostname conventions
+  of the surrounding harness cannot desync membership.
+
+** Dogfood check: =tests/harness.nix=
+
+A minimal consumer: two members (server + agent), *zero* hand-written
+kubenyx config beyond one =defaults.node.seedImages= entry for the
+workload image. =nodes= comes from the helper, bring-up is
+=${cluster.waitReady}= verbatim, the pod-run assertion uses the
+helper's kubectl wrapper. If the helper drops something a consumer
+needs for basic bring-up, this check fails before any consumer does.
+
+** The snapshot-fixture pattern, honestly
+
+The recreation numbers (33 ms via =kubenyx-snap cycle=, see
+air/v0.2/snapshot-restore.org and bench/RESULTS.md) make "restore a
+cluster-ready snapshot per test" the obvious fixture endgame. Status:
+
+*What works today (host-side, outside any test driver):*
+=kubenyx-snap take= boots the firecracker runner to cluster-ready and
+writes =snap.vmstate= + =snap.mem=; =resume= brings a fresh VMM to a
+serving apiserver in ~75 ms (measured 33 ms recreation on the tuned
+path); =cycle= benchmarks the loop. Constraints, all real: snapshots
+are VMM-version-locked; the host tap name is baked in (one live clone
+at a time without per-clone NAT); wall clock must be stepped after
+restore (=kubenyx-clockstep= — monotonic time and leases ride through,
+REALTIME does not); AMX/CET hosts need the =clearcpuid=…= +
+=noxsaves= guest params.
+
+*What a driver-native version needs (not built):*
+1. The NixOS test driver owns the VM lifecycle and its control channel
+   (backdoor shell over a serial chardev). A restore must either
+   happen in-process (QEMU =loadvm= keeps the chardev; firecracker
+   artifacts do not apply) or re-establish the channel after spawning
+   a fresh VMM — today the driver has no notion of either.
+2. Snapshot identity: keyed on the node closure *and* the VMM version,
+   rebuilt on drift — otherwise the fixture silently tests stale
+   configuration. This is the same identity discipline the prebaked
+   store uses, moved up a level.
+3. The snapshot point must sit *after* generic bring-up and *before*
+   per-check mutation, and every check must tolerate resumed state
+   (aged watches, lease timestamps) — bring-up gates written as "wait
+   for condition" survive this; "assert event observed" style does not.
+4. Concurrent checks each need an isolated clone: per-clone host NAT /
+   address remap (staged in air/v0.2/snapshot-restore.org as future
+   work) is a prerequisite, not a nicety.
+
+*Related finding on fixture acceleration* (from the embedding
+exercise's optimization pass, recorded so nobody re-learns it):
+build-time prebaked stores (=node.prebakeImages=) lose on multi-GB
+image sets — the =native= snapshotter's parent copies multiply RAM
+under a tmpfs-backed store and can ENOSPC outright; the measured win
+on such sets came from *concurrent* boot-time imports instead
+(containerd's content store takes parallel ingests; the gate falls to
+roughly the largest single decompress). A prebaked store that stays
+viable at that scale needs an overlayfs- or erofs-consumable bake so
+container rootfs snapshots stop copying parents; staged as future
+work, not attempted here.
+
+* Test Plan
+
+- New =harness= check in the flake matrix (the dogfood).
+- Existing legs unaffected by construction (the helper is additive);
+  full sweep still run as the milestone gate.
+- Eval-time: helper argument validation errors are exercised by
+  evaluation of the dogfood + the refusal paths are documented inline
+  (multi-server =waitReady= throws with a pointer to the custody
+  ceremony).
+
+* History
+- 2026-07-11: Drafted to ready from the embedding exercise's
+  boilerplate inventory (members duplication, address-order footgun,
+  credential-ship copies, readiness chains, external-CNI stanza).
