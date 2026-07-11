@@ -133,6 +133,14 @@ in
         "kubenyx-pki.service"
       ];
       requires = [ "kubenyx-dns-iface.service" ];
+      # Agents have no coredns.kubeconfig until the operator ships the
+      # credential dir — without the condition CoreDNS crash-loops from
+      # boot to ship (Restart=always recovered, loudly: dozens of failed
+      # starts in every agent boot log). The condition skips those starts
+      # cleanly; the path unit below fires the real one the moment the
+      # renderer writes the kubeconfig. Servers order after kubenyx-pki
+      # already, so their condition is satisfied on first evaluation.
+      unitConfig.ConditionPathExists = "${kc}/coredns.kubeconfig";
       # Deliberately NOT ordered before kubelet: node registration doesn't
       # need DNS, and CoreDNS's own readiness waits on the addons RBAC —
       # ordering kubelet after it would serialize the whole boot behind
@@ -146,6 +154,22 @@ in
         RestartSec = 2;
         SuccessExitStatus = "143"; # notify-wrapper exit on orderly stop
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
+      };
+    };
+
+    # Starter for every role: a skipped (condition-failed) unit is never
+    # retried by systemd on its own, so watch for the kubeconfig the PKI
+    # renderer writes and start CoreDNS then. Agents need it for the
+    # credential ship; servers need it for the operator-CA bootstrap flow
+    # (pre-bundle boots skip CoreDNS, and the recovery restart lists must
+    # not have to remember it). Level-triggered by design: CoreDNS runs
+    # whenever its credential exists. Mirrors the kubenyx-pki path unit
+    # one directory up the chain.
+    systemd.paths.coredns = {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = {
+        PathExists = "${kc}/coredns.kubeconfig";
+        Unit = "coredns.service";
       };
     };
   };
