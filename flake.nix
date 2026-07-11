@@ -592,6 +592,9 @@
                 touch $out
               '';
           single-node = runTest ./tests/single-node.nix;
+          # lib.harness dogfood (air/v0.6/harness.org): server + agent
+          # stood up exclusively through the exported helper.
+          harness = runTest ./tests/harness.nix;
           # IPv6 single-stack acceptance legs (ipv6.org §3-4).
           ipv6 = runTest ./tests/ipv6.nix;
           ipv6-multi = runTest ./tests/ipv6-multi.nix;

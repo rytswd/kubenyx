@@ -269,6 +269,42 @@ modes). See
 [`tests/multi-node.nix`](tests/multi-node.nix) for the working
 end-to-end flow.
 
+### Embedding a cluster in your own NixOS VM tests
+
+`lib.harness.mkCluster` turns one members attrset into the node modules
+*and* the driver Python a `runNixOSTest` needs — addresses resolved from
+the driver's own assignment (v4 or v6), the credential ship, every
+readiness gate, and a kubectl wrapper:
+
+```nix
+let
+  cluster = kubenyx.lib.harness.mkCluster {
+    members = {
+      server = { index = 0; role = "server"; };
+      agent  = { index = 1; };            # role defaults to "agent"
+    };
+    defaults = { datastore.backend = "etcd"; node.seedImages = [ myImage ]; };
+    # externalCni = true;                 # your CNI owns the dataplane
+    # cniReplacesServicePlane = true;     # ...and the service plane
+  };
+in {
+  nodes = cluster.nodes;                  # merge peripheral VMs alongside
+  testScript = ''
+    start_all()
+    ${cluster.waitReady}
+    kubenyx_kubectl(server, "get nodes")
+  '';
+}
+```
+
+Works without flakes too: `import <kubenyx>/lib/harness.nix { inherit lib; }`
+(the generated modules already import the kubenyx module tree by path —
+don't import it a second time on the same node). The
+[`harness`](tests/harness.nix) check is exactly this consumer, kept
+minimal on purpose. Generated `waitReady` covers single-server clusters;
+multi-server bring-up needs the CA custody ceremony from
+[`tests/multi-server.nix`](tests/multi-server.nix).
+
 ## Tests and benchmarks
 
 ```console
@@ -343,6 +379,7 @@ vde sockets and vm-state off it with no per-run namespace).
 | Check | Proves | Wall (KVM) |
 |---|---|---|
 | `single-node` / `single-node-etcd` | Happy path on kine / real etcd | 37 s / 153 s |
+| `harness` | `lib.harness` dogfood: server+agent stood up exclusively through the exported helper | 39 s |
 | `multi-node` / `multi-node-mem` | Server + agent on etcd / on etcd-mem | 38 s / 22 s |
 | `multi-server` | 3-server etcd quorum + LB agent + CA custody | 50 s |
 | `failover` | Server crash + etcd kill -9; API rides through the LB | 59 s |

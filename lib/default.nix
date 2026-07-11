@@ -152,6 +152,12 @@ rec {
     else
       intToIp (ipToInt (cidrBase cidr) + n);
 
+  # Test-harness embedding helpers (air/v0.6/harness.org): members
+  # attrset -> node modules + driver snippets. Mutually lazy with this
+  # file (harness.nix imports it for the CIDR helpers) — neither forces
+  # the other's attrs, so the cycle stays inert.
+  harness = import ./harness.nix { inherit lib; };
+
   # Pod CIDR owned by the node with the given index (architecture.org D6):
   # deterministic, derived from declared membership, never allocated at
   # runtime. v4: node N owns the Nth /nodeMask of the cluster CIDR (the
