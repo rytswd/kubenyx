@@ -76,8 +76,15 @@ lives in the sections below.
 
 ## 📖 How to Use
 
+Every topology supports both start modes — pick your cell:
+
+| | Cold start | Snapshot recreation |
+|---|---|---|
+| **Single node** | `nix run .#microvm-firecracker` — **~3.4 s** | `kubenyx-snap resume` — **~28 ms** |
+| **Multi-node mesh** | `nix run .#microvm-cluster` — **~3.8 s** | `kubenyx-snap mesh-resume` — **~45 ms** |
+
 <details>
-<summary><b>Single-node clusters</b> — boot, console, host-side kubectl, shutdown</summary>
+<summary><b>Single node — cold start</b> — boot in ~3.4 s: console, host-side kubectl, shutdown</summary>
 
 ### Boot
 
@@ -157,7 +164,7 @@ VM, run it again, get a fresh honest cluster.
 </details>
 
 <details>
-<summary><b>Recreation</b> — a fresh cluster in 28 ms, as many times as you like</summary>
+<summary><b>Single node — snapshot recreation</b> — a fresh cluster in ~28 ms, as many times as you like</summary>
 
 Cold boot is the slow path. Snapshot a ready cluster once, then
 recreate it from memory whenever a test wants one (needs the tap and
@@ -208,9 +215,7 @@ the 3.5 GB memory image, and tmpfs makes that free.
 </details>
 
 <details>
-<summary><b>Multi-node meshes</b> — 3 or 7 nodes in one command, recreated in ~45 ms</summary>
-
-### Launch
+<summary><b>Multi-node mesh — cold start</b> — 3 or 7 nodes all-Ready in ~3.8 s, one command</summary>
 
 ```console
 $ nix run github:rytswd/kubenyx#microvm-cluster
@@ -229,11 +234,15 @@ declared attrset. The 7-node twin is `nix run .#microvm-cluster7`
 (own run dir, so snapshots of both sizes coexist). Teardown:
 `nix run .#microvm-cluster-shutdown` (agents drain first, server last).
 
-### Whole-mesh recreation
+</details>
 
-Snapshot all nodes with a consistent cut — every node is paused before
-any is snapshotted, so monotonic clocks freeze together and cross-node
-TCP survives the restore:
+<details>
+<summary><b>Multi-node mesh — snapshot recreation</b> — the whole cluster back in ~45 ms</summary>
+
+With a mesh running (previous section), snapshot all nodes with a
+consistent cut — every node is paused before any is snapshotted, so
+monotonic clocks freeze together and cross-node TCP survives the
+restore:
 
 ```console
 $ nix run .#kubenyx-snap -- mesh-take --run-dir /tmp/kubenyx-cluster --out /dev/shm/mesh-snap
