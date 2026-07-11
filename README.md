@@ -77,7 +77,7 @@ lives in the sections below.
 ## 📖 How to Use
 
 <details>
-<summary><b>🖥 Single-node clusters</b> — boot, console, host-side kubectl, shutdown</summary>
+<summary><b>Single-node clusters</b> — boot, console, host-side kubectl, shutdown</summary>
 
 ### Boot
 
@@ -157,7 +157,7 @@ VM, run it again, get a fresh honest cluster.
 </details>
 
 <details>
-<summary><b>⚡ Recreation</b> — a fresh cluster in 28 ms, as many times as you like</summary>
+<summary><b>Recreation</b> — a fresh cluster in 28 ms, as many times as you like</summary>
 
 Cold boot is the slow path. Snapshot a ready cluster once, then
 recreate it from memory whenever a test wants one (needs the tap and
@@ -208,7 +208,7 @@ the 3.5 GB memory image, and tmpfs makes that free.
 </details>
 
 <details>
-<summary><b>🌐 Multi-node meshes</b> — 3 or 7 nodes in one command, recreated in ~45 ms</summary>
+<summary><b>Multi-node meshes</b> — 3 or 7 nodes in one command, recreated in ~45 ms</summary>
 
 ### Launch
 
@@ -249,7 +249,7 @@ count — the 7-node mesh recreates in the same tens-of-ms band
 </details>
 
 <details>
-<summary><b>🏗 In your own NixOS configuration</b> — flake template, options, declared multi-node</summary>
+<summary><b>In your own NixOS configuration</b> — flake template, options, declared multi-node</summary>
 
 ### Single node
 
@@ -363,7 +363,7 @@ Beyond that, declared membership scales in both directions:
 </details>
 
 <details>
-<summary><b>🧪 Embedding in NixOS VM tests</b> — <code>lib.harness.mkCluster</code></summary>
+<summary><b>Embedding in NixOS VM tests</b> — <code>lib.harness.mkCluster</code></summary>
 
 `lib.harness.mkCluster` turns one members attrset into the node modules
 *and* the driver Python a `runNixOSTest` needs — addresses resolved from
