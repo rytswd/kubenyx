@@ -22,26 +22,34 @@ let
   upstream =
     if dns.upstream == null then cfg.internal.hostResolvConf else lib.concatStringsSep " " dns.upstream;
 
-  corefile = pkgs.writeText "Corefile" ''
-    .:53 {
-        bind ${dns.address}
-        errors
-        ready ${readyEndpoint}
-        kubernetes ${cfg.network.clusterDomain} in-addr.arpa ip6.arpa {
-            kubeconfig ${kc}/coredns.kubeconfig
-            pods insecure
-            fallthrough in-addr.arpa ip6.arpa
-        }
-        ${lib.optionalString (dns.upstream != [ ]) ''
-          forward . ${upstream} {
-              max_concurrent 1000
+  # extraServerBlocks concatenates AFTER the primary block (empty default
+  # adds zero bytes — Corefile identical). Zone-scoped blocks cannot ride
+  # inside `.:53` (several plugins are once-per-block, e.g. hosts), and
+  # splicing them through extraCorefile needs a close-brace hack that
+  # also leaves CoreDNS logging benign plugin/loop errors every boot.
+  corefile = pkgs.writeText "Corefile" (
+    ''
+      .:53 {
+          bind ${dns.address}
+          errors
+          ready ${readyEndpoint}
+          kubernetes ${cfg.network.clusterDomain} in-addr.arpa ip6.arpa {
+              kubeconfig ${kc}/coredns.kubeconfig
+              pods insecure
+              fallthrough in-addr.arpa ip6.arpa
           }
-        ''}
-        cache 30
-        loop
-        ${dns.extraCorefile}
-    }
-  '';
+          ${lib.optionalString (dns.upstream != [ ]) ''
+            forward . ${upstream} {
+                max_concurrent 1000
+            }
+          ''}
+          cache 30
+          loop
+          ${dns.extraCorefile}
+      }
+    ''
+    + dns.extraServerBlocks
+  );
 in
 {
   options.kubenyx.dns = {
@@ -72,6 +80,28 @@ in
       type = lib.types.lines;
       default = "";
       description = "Extra directives appended to the server block.";
+    };
+    extraServerBlocks = lib.mkOption {
+      type = lib.types.lines;
+      default = "";
+      example = lib.literalExpression ''
+        '''
+          test-vms {
+              bind 169.254.20.10
+              hosts {
+                  192.168.1.2 server
+              }
+          }
+        '''
+      '';
+      description = ''
+        Complete extra CoreDNS server blocks appended after the primary
+        `.:53` block — for zone-scoped configuration that cannot live
+        inside it (e.g. a second `hosts` zone; several plugins are
+        once-per-block). CoreDNS binds per block: repeat
+        `bind ''${dns.address}` in each block unless wildcard binding
+        that zone is really intended.
+      '';
     };
   };
 

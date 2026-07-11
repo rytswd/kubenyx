@@ -14,6 +14,7 @@ let
   kc = cfg.internal.kubeconfigDir;
   k8s = cfg.packages.kubernetes;
   wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
+  klib = import ../lib { inherit lib; };
 
   usingEtcd = cfg.datastore.backend == "etcd";
   # systemd unit providing the datastore for this backend; a Requires= on a
@@ -98,7 +99,20 @@ let
     # conflist and static routes). KCM's allocator is not order-stable,
     # so letting it run writes a *wrong* node.spec.podCIDR — worse than
     # none. Divergence from the original doc recorded in networking.org.
-    "--allocate-node-cidrs=false"
+    # The opt-in exists for external CNIs running Kubernetes-mode IPAM
+    # (they *consume* node.spec.podCIDR) — asserted to external mode
+    # below; false renders the exact flag string as before.
+    "--allocate-node-cidrs=${lib.boolToString cp.kcm.allocateNodeCidrs}"
+  ]
+  # Family-correct carve, same geometry as klib.nodePodCidr (the Nth /24
+  # of a v4 cluster CIDR, the Nth /64 of a v6 prefix) — allocated and
+  # Nix-declared subnets share shape even though the allocator picks its
+  # own order. kcm.extraFlags still wins last on any conflict.
+  ++ lib.optionals cp.kcm.allocateNodeCidrs [
+    "--cluster-cidr=${cfg.network.clusterCidr}"
+    "--node-cidr-mask-size=${toString (if klib.isV6 cfg.network.clusterCidr then 64 else 24)}"
+  ]
+  ++ [
     "--service-cluster-ip-range=${cfg.network.serviceCidr}"
     "--controllers=*${lib.concatMapStrings (c: ",-${c}") cp.kcm.disabledControllers}"
     "--bind-address=127.0.0.1"
@@ -164,6 +178,19 @@ in
       };
     };
     kcm = {
+      allocateNodeCidrs = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Let kcm allocate node.spec.podCIDR (plus a --cluster-cidr and a
+          family-correct --node-cidr-mask-size: /24 of a v4 cluster CIDR,
+          /64 of a v6 prefix — the same carve kubenyx's own subnetting
+          uses). Only valid with network.cni = "external", for CNIs whose
+          Kubernetes-mode IPAM consumes podCIDR; with the bridge CNI the
+          allocator's order-instability would contradict the Nix-declared
+          subnets the dataplane is built on.
+        '';
+      };
       useServiceAccountCredentials = lib.mkOption {
         type = lib.types.bool;
         default = !cfg.internal.testingProfile;
@@ -192,6 +219,13 @@ in
   };
 
   config = lib.mkIf (cfg.enable && cfg.role == "server") {
+    assertions = [
+      {
+        assertion = !cp.kcm.allocateNodeCidrs || cfg.network.cni == "external";
+        message = "kubenyx: controlPlane.kcm.allocateNodeCidrs requires network.cni = \"external\" — with the bridge CNI, Nix owns the pod subnets and kcm's order-unstable allocator would write node.spec.podCIDR values that contradict the configured dataplane";
+      }
+    ];
+
     systemd.services.kube-apiserver = {
       description = "Kubernetes API server";
       wantedBy = [ "kubenyx.target" ];

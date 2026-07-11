@@ -96,6 +96,23 @@ in
   };
 
   config = lib.mkIf (cfg.enable && enabled) {
+    # The addons applier is server-role-only: declared on an agent, these
+    # manifests would feed a unit that never exists — silently nothing.
+    # Cross-machine forwarding is not a thing per-machine modules can do,
+    # so refuse with directions instead.
+    assertions = [
+      {
+        assertion = cfg.role == "server";
+        message = ''
+          kubenyx: storage.localVolumes is declared on an agent-role node,
+          but the addons applier runs on servers only — these PVs would
+          never be applied. Declare localVolumes on a server (the PVs pin
+          to the *declaring* node via nodeAffinity), or ship
+          agent-node-affine PV manifests through a server's
+          addons.manifests.'';
+      }
+    ];
+
     # "storage-0class" sorts before "storage-pv-*" in the applier's
     # lexical file order, so the StorageClass lands first.
     kubenyx.addons.manifests = {
