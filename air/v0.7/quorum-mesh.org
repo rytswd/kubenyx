@@ -1,5 +1,5 @@
 #+title: cp3 — an Honest Quorum Mesh at microVM Speed
-#+state: in-progress
+#+state: complete
 #+FILETAGS: :core:
 
 * Summary
@@ -17,6 +17,40 @@ a fixed *15 s join-probe window* in our own etcd ExecStartPre, and a
 *1–2 s bootstrap-probe tail* inside etcd itself (10–27% of launches).
 Both are attackable. cp3 should land within a few hundred ms of cp1w2,
 p50 — and the doc tracks p95 honestly.
+
+** Measured outcome (campaign closed 2026-07-12)
+
+Landed: 31 s at phase 2 → *p50 6545 ms* MESH-READY over the final five
+consecutive pinned boots (7191/6545/6554/6541/6338 ms) — *1.72×* the
+cp1w2 mesh (3.8 s; cp1 reference 3.4 s), with a real 3-member quorum
+and the launcher-minted volatile CA. cp3w2 live-validated at 9370/9562
+ms nodes=5 (uncontrolled singles; the delta over cp3 is the workers
+gating on kubenyx-lb's first healthy backend, not the quorum), with a
+failover smoke: server1 killed, reads back +298 ms, first write
++369 ms, LB evict +2741/+2737 ms (the 500 ms × 3 policy envelope
+exactly), lease transitions 0. =checks.quorum-volatile= is the 20th
+matrix leg (34 s). Full log: =bench/RESULTS.md= 2026-07-12 entry.
+
+Two findings the research above did not predict:
+
+1. *The real wall was client-go backoff, not anything etcd*: two exact
+   backoff quantizations inside kubelet — the node-registration retry
+   ladder (2.4/2.6/3.0/3.8/5.4/8.6 s attempts straddling apiserver-up)
+   and a 2.5 s node-informer re-list backoff AFTER successful
+   registration — accounted for the ~19 s addons-to-READY spread. An
+   ExecStartPre =kubenyx-ready --wait= on the exact informer request
+   (kubelet + a coredns twin) erased both ladders; READY spread across
+   the three servers tightened to 0.05 s.
+2. *The D4 tail was a host artifact*: 0/8 in-guest bootstraps showed
+   the 1–2 s BootstrapTimeout tail. The D3 fast-exit synchronizes
+   founders within ~130 ms, so peer probes hit connection-refused —
+   etcd's fast path; the host-bench tail came from staggered starts.
+   D4 closed with NO etcd patch (revisit only if a future topology
+   staggers founders >1 s; the why-not lives in the probe comments).
+
+D8 (cp3 snapshot/mesh-recreation) was deliberately NOT a work-plan
+item and remains OPEN — a gated fast-follow with its own bench
+contract; nothing below covers it.
 
 * Measured ground truth (host bench, etcd 3.6.12, tmpfs + loopback)
 
@@ -211,10 +245,13 @@ and a bigger memory/tmpfs footprint.
 * Status
 
 - [X] Research fan-out + adversarial verification (2026-07-11)
-- [ ] Module changes
-- [ ] kubenyx-pki serve
-- [ ] lib/microvm.nix generalization
-- [ ] cp3/cp3w2 presets
-- [ ] Bench + D4 decision
-- [ ] Check leg
-- [ ] README
+- [X] Module changes
+- [X] kubenyx-pki serve
+- [X] lib/microvm.nix generalization
+- [X] cp3/cp3w2 presets
+- [X] Bench + D4 decision (closed: no etcd patch — in-guest tail 0/8)
+- [X] Check leg (=checks.quorum-volatile=, 20th leg)
+- [X] README (matrix row, quorum-mesh details block, D9 paragraph)
+
+All seven work-plan items done ⇒ =#+state: complete=. D8 snapshots
+were never on the work plan and stay open (see Measured outcome).

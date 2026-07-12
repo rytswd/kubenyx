@@ -458,6 +458,11 @@
           multi-node = runTest ./tests/multi-node.nix;
           multi-node-mem = runTest ./tests/multi-node-mem.nix;
           multi-server = runTest ./tests/multi-server.nix;
+          # The cp3 posture as a check (air/v0.7/quorum-mesh.org item 6):
+          # volatile 3-member quorum, launcher-shape CA pre-seed, D3
+          # fast-exit. The firecracker launcher itself stays host-tested
+          # via the bench.
+          quorum-volatile = runTest ./tests/quorum-volatile.nix;
           failover = runTest ./tests/failover.nix;
           server-reboot = runTest ./tests/server-reboot.nix;
           agent-add = runTest ./tests/agent-add.nix;

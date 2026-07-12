@@ -7,6 +7,68 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-12 — cp3: honest 3-CP quorum mesh, 31 s → 6.5 s
+
+air/v0.7/quorum-mesh.org closed. `nix run .#cp3` boots a 3-control-plane
+firecracker mesh with a REAL 3-member etcd quorum (volatile, tmpfs,
+launcher-minted per-run CA). Phase 2 landed it working at **29.9–31.2 s**
+MESH-READY; phase 3 instrumented first (a mesh-only journal-dump oneshot,
+placed after kubenyx-report so observation sits outside the measured
+window), then attacked in evidence order.
+
+Final five consecutive boots under the contention contract (governor +
+idleness gate + pinning, per the 2026-07-09 perf-floor entry — shared
+384-core box, pinned numbers only comparable to pinned numbers):
+**7191 / 6545 / 6554 / 6541 / 6338 ms** MESH-READY, p50 **6545 ms** —
+**1.72×** the cp1w2 mesh (3.8 s) for a real quorum; cp1 reference 3.4 s.
+
+**Where the 31 s actually lived** — not in the quorum (~120 ms formation;
+leader elected 0.19 s after etcd exec on hb10/el100):
+
+| Cost | Mechanism | Fix |
+|---|---|---|
+| ~13 s (default-15 meshes; 3 s on the cp3 preset) | etcd join-probe window fully burned on every fresh boot — nobody serves yet, so every server waits out the whole window | **D3 fast-exit**: peers TCP-classified before the health RPC (curl rc 7 = active refusal = fresh peer; rc 28 = silence = hold the window, skip the doomed 2 s etcdctl dial). Five 0.5 s-spaced all-refused sweeps ⇒ "everyone is fresh", bootstrap declared/new immediately; the streak span still exceeds the RestartSec=2 crash-refuse window and the member-set fingerprint guard bounds the partition blast radius |
+| ~19 s addons-to-READY (coredns spread 11.9/19.0/22.6 s) | TWO client-go backoff quantizations inside kubelet — the node-registration retry ladder (2.4/2.6/3.0/3.8/5.4/8.6 s attempts straddling apiserver-up) and a 2.5 s node-informer re-list backoff AFTER successful registration. Everything else eliminated with evidence: addons applied first try 9/9, no lease contention, no coredns crash-loop, ca-fetch 0.35 s not 2 s | mesh-server kubelet gains an ExecStartPre `kubenyx-ready --wait` on the EXACT node-informer request — kubelet starts ~40 ms after its own apiserver serves, both ladders vanish, READY spread across servers tightens to 0.05 s. (Landmine: `%3D` in ExecStartPre is a systemd specifier and SILENTLY drops the gate — raw `=` only.) Same twin gate on coredns: convergence 9.4–10.8 s → ~6.0 s |
+
+**D4 verdict — no etcd patch.** The host bench had shown a 1–2 s
+BootstrapTimeout tail in 10–27% of launches (etcd's member probe
+TCP-connects to a bound-but-not-serving peer listener and hangs the full
+1 s default). In-guest: **0/8 bootstraps showed the tail** — the D3
+fast-exit synchronizes founders within ~130 ms, so peer probes hit
+connection-refused, which is etcd's fast path. The host tail was an
+artifact of staggered starts; the patch would have been maintenance
+liability for a phantom. A future topology staggering founders >1 s
+revisits this (the why-not lives in the probe comments).
+
+**cp3w2 (+2 workers via kubenyx-lb) and failover, live-validated:**
+
+| What | Measured |
+|---|---|
+| cp3w2 MESH-READY nodes=5 | 9370 ms / 9562 ms (two boots; uncontrolled singles — no contract pinning, indicative only, NOT comparable to the pinned cp3 p50) |
+| the extra ~2.9 s over cp3 | the agent leg: worker kubelets gate on kubenyx-lb's first healthy backend (~8.5 s); the server quorum leg matched cp3's envelope (CLUSTER-READY spread 7.55–7.56 s) |
+| kill server1 (`pkill -f '^microvm@server1'`) | reads via server2 back at **+298 ms**, first successful write at **+369 ms**, cross-read via server3 OK |
+| kubenyx-lb evicts the dead backend | +2741 / +2737 ms on the two workers — the policy envelope exactly (500 ms probes × 3 failures); cross-clock measurement, but guests are clockstepped at boot so ms-accurate in practice |
+| leader leases | scheduler on server2, kcm on server3, transitions **0** — leaders were never on server1, so the re-election leg is vacuously satisfied; a leader-on-the-killed-server run remains unexercised |
+| workers | Ready at +5/+15/+30 s and stayed Ready; kcm flipped server1 NotReady only after the ~40 s node-monitor grace (expected k8s behavior, don't misread the Ready lines) |
+| teardown | exit 0 twice — including once with server1 already dead (ladder skips the dead VMM cleanly); zero firecracker / pki-serve survivors, iptables 10123 rule + CA bundle reaped |
+
+Second boot after the failover run: fresh write OK, the failover-era
+configmap absent — fresh trust root + state, no leftover dependence.
+Evict/kubeconfig evidence was extracted through the SURVIVING quorum via
+a node-pinned forensics pod (hostPath /nix/store + journalctl against
+the guest journal) — itself a post-failover scheduler→kubelet→lb→apiserver
+datapath proof.
+
+Also landed: `checks.quorum-volatile` (20th leg, 34 s) — the cp3 posture
+in the NixOS driver with the driver playing the launcher (mint-ca +
+custody pre-seed), proving the require-shipped-ca gate refuses BEFORE
+the ship, quorum on tmpfs with no /var/lib/etcd, the D3 fast-exit
+firing (2/3 servers in the green run; the third legitimately held the
+window and took the rejoin path), 3/3 Ready, and a cross-server
+write/read. Gate held throughout: single-node and cp1w2 drvs
+byte-identical after every change, re-verified from git+file:// at
+close-out.
+
 ## 2026-07-09 — Recreation micro-pass: TCP_NODELAY kills a ~40 ms Nagle stall, 66 → ~32 ms
 
 The parked kubenyx-snap fixed-cost pass (perf-floor.org item 3),

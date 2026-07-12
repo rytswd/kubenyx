@@ -91,6 +91,7 @@ Every topology supports both start modes — pick your cell:
 |---|---|---|
 | **Single node** | `nix run .#cp1` — **~3.4 s** | `kubenyx-snap resume` — **~28 ms** |
 | **Multi-node mesh** | `nix run .#cp1w2` — **~3.8 s** | `kubenyx-snap mesh-resume` — **~45 ms** |
+| **Multi-CP quorum** | `nix run .#cp3` — **~6.5 s** | not yet — deferred ([air/v0.7 D8](air/v0.7/quorum-mesh.org)) |
 
 Target names spell the composition: `cp<N>w<M>` = *N* control-plane
 nodes + *M* workers (`cp1` alone = single node, also the bare
@@ -266,9 +267,9 @@ kubenyx.lib.microvm.mkCluster {
 ```
 
 `launcher`/`shutdown` are the same bridge-and-boot / escalation-ladder
-scripts the presets ship. (Multi-server meshes are pinned off for now:
-the volatile fast path is single-control-plane by design — see the
-quorum posture under *In your own NixOS configuration* for real HA.)
+scripts the presets ship (single-control-plane; for a volatile
+multi-control-plane mesh see *Multi-CP quorum mesh* below, and for
+durable HA the quorum posture under *In your own NixOS configuration*).
 
 </details>
 
@@ -290,6 +291,63 @@ After every restore, `kubectl get nodes` shows all nodes Ready with the
 original kubelet connections intact. Recreation is ~flat in node
 count — the 7-node mesh recreates in the same tens-of-ms band
 (see [`bench/RESULTS.md`](bench/RESULTS.md)).
+
+</details>
+
+<details>
+<summary><b>Multi-CP quorum mesh</b> — 3 control planes, a real etcd quorum, all-Ready in ~6.5 s</summary>
+
+```console
+$ nix run github:rytswd/kubenyx#cp3
+cp3: configuring host bridge kubenyx-br0 + taps (sudo)
+[server1] ...
+[server2] ...
+[server3] ...
+KUBENYX-MESH-READY nodes=3 wall=6545ms
+```
+
+Three control-plane microVMs forming a genuine 3-member etcd quorum —
+still the disposable volatile posture (tmpfs state, per-boot PKI), p50
+**~6.5 s** to all-Ready over 5 pinned boots, 1.72× the single-CP
+`cp1w2` mesh. `nix run .#cp3w2` adds two workers riding
+`kubenyx-lb`: agents dial `https://127.0.0.1:6444` with client-side
+failover across all three apiservers, 5 nodes all-Ready in ~9.4 s (the
+extra wall is the workers gating on the LB's first healthy backend, not
+the quorum). Teardown: `.#cp3-down` / `.#cp3w2-down`.
+
+**The CA handoff.** A quorum needs one trust root, and three volatile
+servers would each mint their own — etcd peer TLS would then reject
+every raft connection and no quorum would ever form. So the launcher
+mints a per-run CA (~8 ms) and serves the bundle once per server over
+the host bridge before any VM launches; a `kubenyx-ca-fetch` oneshot in
+each server lands the custody files before the PKI unit runs, and a
+failed fetch is a loud boot error — never a silent self-mint that
+splits the mesh into three trust roots. The bundle dies with the run;
+it never becomes operator custody.
+
+**Kubeconfig per server.** Every server serves its own admin kubeconfig
+on `:10124` — curl any of `10.100.0.2/.3/.4`; on server loss, re-curl a
+survivor.
+
+**Failover, measured**: kill a server VM outright and the surviving
+quorum serves reads within ~0.3 s and writes within ~0.4 s; the
+workers' `kubenyx-lb` evicts the dead backend after ~2.7 s (500 ms
+probes × 3 failures) and running pods never notice.
+
+**What cp3 is and is not.** All cp3 members hang off one host bridge on
+one physical host: the quorum protects against *VM/process* failure,
+never host failure — host loss kills all three tmpfs members exactly
+like it kills etcd-mem. What cp3 buys over cp1: apiserver/etcd process
+failover, rolling control-plane restarts, and testing HA behaviors
+(leader elections, LB failover) against a real quorum. What it costs:
+the measured quorum tax (~120 ms formation p50 — the feared 1–2 s
+bootstrap tail turned out to be a host-bench artifact, see
+`bench/RESULTS.md`), `backend=etcd` instead of etcd-mem, and a bigger
+memory/tmpfs footprint.
+
+Snapshot recreation for cp3 is deferred
+([air/v0.7/quorum-mesh.org](air/v0.7/quorum-mesh.org) D8) — cold start
+is the only cp3 path today.
 
 </details>
 
@@ -478,7 +536,7 @@ Two harness gotchas worth knowing (found the hard way, recorded in
 | `guests/`, `flake.nix` | MicroVM guest profile + firecracker/cloud-hypervisor/qemu variants + mesh generators |
 | `lib/` | CIDR math (v4/v6), `harness.nix` (test embedding) |
 | `rust/` | The boot-path tools: `kubenyx-pki`, `kubenyx-ready`, `etcd-mem`, `kubenyx-snap`, `kubenyx-clockstep`, `kubenyx-lb` |
-| `tests/` | The 19-leg NixOS VM test matrix + the k3s benchmark |
+| `tests/` | The 20-leg NixOS VM test matrix + the k3s benchmark |
 | `bench/RESULTS.md` | Every measurement, newest first, including the honest corrections |
 | `air/` | Design docs (planning-first workflow): architecture, per-subsystem specs, session plans |
 | `templates/` | `nix flake init -t` starting point |
@@ -502,6 +560,8 @@ when a dependency is the bottleneck, replace it with 300 lines of Rust.
 | `.#cp1-down` | Guest shutdown with escalation ladder; run from the VM's directory |
 | `.#cp1w2` / `.#cp1w2-down` | 3-node mesh (1 control plane + 2 workers), bridge + taps via sudo, ~3.8 s to all-Ready / reverse teardown |
 | `.#cp1w6` / `.#cp1w6-down` | 7-node twin (1 control plane + 6 workers), run dir `/tmp/kubenyx-cluster7`, ~4.2 s |
+| `.#cp3` / `.#cp3-down` | 3-control-plane quorum mesh (real 3-member etcd, launcher-minted per-run CA), ~6.5 s to all-Ready |
+| `.#cp3w2` / `.#cp3w2-down` | Quorum mesh + 2 workers on `kubenyx-lb` (client-side apiserver failover), ~9.4 s |
 | `.#microvm-<hypervisor>[-shutdown]` | Direct per-hypervisor entry points (`firecracker`, `cloud-hypervisor`, `qemu`) — what `cp1` dispatches to |
 | `.#microvm-cluster*` | Deprecated aliases of the `cp1w2`/`cp1w6` targets |
 | `.#native-bench` | Control-plane timings as bare processes, no VM |
@@ -519,7 +579,7 @@ when a dependency is the bottleneck, replace it with 300 lines of Rust.
 </details>
 
 <details>
-<summary><b>Checks matrix</b> — 19 legs, all green</summary>
+<summary><b>Checks matrix</b> — 20 legs, all green</summary>
 
 `nix build .#checks.x86_64-linux.<name>.driver -o d && d/bin/nixos-test-driver`
 — give each **concurrent** run its own `XDG_RUNTIME_DIR` (the driver keys
@@ -531,6 +591,7 @@ vde sockets and vm-state off it with no per-run namespace).
 | `harness` | `lib.harness` dogfood: server+agent stood up exclusively through the exported helper | 39 s |
 | `multi-node` / `multi-node-mem` | Server + agent on etcd / on etcd-mem | 38 s / 22 s |
 | `multi-server` | 3-server etcd quorum + LB agent + CA custody | 50 s |
+| `quorum-volatile` | The cp3 posture: pre-seeded CA custody, quorum on tmpfs, join-probe fast-exit, cross-server write/read; require-shipped-ca refuses before the ship | 34 s |
 | `failover` | Server crash + etcd kill -9; API rides through the LB | 59 s |
 | `agent-add` | Hitless compute scale-out (zero restarts anywhere) | 95 s |
 | `server-add` | Declarative 1→3 control-plane growth via etcd learners; shrink refused | 156 s |
