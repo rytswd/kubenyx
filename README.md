@@ -91,7 +91,7 @@ Every topology supports both start modes — pick your cell:
 |---|---|---|
 | **Single node** | `nix run .#cp1` — **~3.4 s** | `kubenyx-snap resume` — **~28 ms** |
 | **Multi-node mesh** | `nix run .#cp1w2` — **~3.8 s** | `kubenyx-snap mesh-resume` — **~45 ms** |
-| **Multi-CP quorum** | `nix run .#cp3` — **~6.5 s** | not yet — deferred ([air/v0.7 D8](air/v0.7/quorum-mesh.org)) |
+| **Multi-CP quorum** | `nix run .#cp3` — **~6.5 s** | `kubenyx-snap mesh-resume` — **~48 ms** |
 
 Target names spell the composition: `cp<N>w<M>` = *N* control-plane
 nodes + *M* workers (`cp1` alone = single node, also the bare
@@ -345,9 +345,19 @@ bootstrap tail turned out to be a host-bench artifact, see
 `bench/RESULTS.md`), `backend=etcd` instead of etcd-mem, and a bigger
 memory/tmpfs footprint.
 
-Snapshot recreation for cp3 is deferred
-([air/v0.7/quorum-mesh.org](air/v0.7/quorum-mesh.org) D8) — cold start
-is the only cp3 path today.
+**Snapshot recreation** works on the quorum too: the same
+`kubenyx-snap mesh-take` / `mesh-cycle` verbs bring all three control
+planes back in **~48 ms** (5-cycle median), and on multi-server meshes
+each round prints two probes — the first apiserver TLS answer (~18 ms)
+and the first *committed* etcd write (~97 ms; a 401 can fake TLS, only
+a quorum can commit). Raft never notices the freeze: the term stays
+pinned across cycles, aged resumes (81 s / 630 s) show zero node flaps,
+and a deliberately 2 s-skewed resume costs exactly one pre-vote
+election with writes back at ~0.45 s. Volatile-only, enforced:
+`mesh-take` refuses a durable-posture mesh loudly — firecracker
+snapshots exclude disk contents, so only cp3's tmpfs state (riding
+inside `snap.mem`) resumes consistently. Numbers and gates:
+[`bench/RESULTS.md`](bench/RESULTS.md).
 
 </details>
 
@@ -627,7 +637,7 @@ and the per-variant `nixosConfigurations`.
 | `cycle` | resume's flags + `-n N` | 5 | Recreation benchmark: resume → verify → kill, ×N |
 | `mesh-take` | `--run-dir DIR` | `/tmp/kubenyx-cluster` | Pause ALL nodes, snapshot in parallel, free the taps |
 | | `--out DIR` | `mesh-snapshot` | Per-node subdirs + manifest |
-| | `--node name=ip` (repeat) | auto-discovered | Only needed off-convention (`server`=.2, `agentN`=.2+N) |
+| | `--node name=ip` (repeat) | auto-discovered | Only needed off-convention (launcher manifest, else `server`/`server1`=.2, `serverN`=.1+N, agents after the servers) |
 | `mesh-resume` | `--snapshot DIR` | `mesh-snapshot` | Concurrent restore of every node from the manifest |
 | `mesh-cycle` | mesh-resume's flags + `-n N` | 5 | Mesh recreation benchmark |
 

@@ -721,9 +721,11 @@ dependencies = [
 name = "kubenyx-snap"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "kubenyx-tls",
  "libc",
  "rustls",
+ "rustls-pemfile",
 ]
 
 [[package]]

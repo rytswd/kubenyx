@@ -15,6 +15,12 @@
 //! reports milliseconds to the first apiserver TLS response. `cycle` is the
 //! recreation benchmark: N consecutive resume→verify→kill rounds.
 //!
+//! The mesh verbs handle multi-server quorums too (quorum-mesh.org §D8):
+//! mesh-take refuses non-volatile multi-server meshes (posture proven by
+//! the launcher's run-dir manifest), and mesh-resume/mesh-cycle report the
+//! first committed quorum WRITE next to the TLS-answer time — a 401 proves
+//! serving, not raft.
+//!
 //! Gotchas encoded from the validation session: API socket paths must stay
 //! under SUN_LEN=108 (always pass a relative path and spawn from a short
 //! CWD if needed); the restore VMM's --enable-pci must match the snapshot;
@@ -227,6 +233,166 @@ fn send_time_pokes(addr: &str, count: u32, interval: Duration) {
             std::thread::sleep(interval);
         }
     }
+}
+
+// ---- quorum-write probe (multi-server mesh only) ---------------------------
+//
+// A TLS answer proves ONE apiserver is serving — a 401 passes — but says
+// nothing about raft. The honest "mesh usable" number for a real quorum is
+// the first WRITE the apiserver commits, which requires a live etcd
+// majority (quorum-mesh.org §D8). Mechanism: fetch the admin kubeconfig
+// the server already serves on :10124 (kubenyx-pki's own fixed template,
+// system:masters client cert inline), then PATCH a per-attempt-unique
+// annotation onto the default namespace over rustls with that cert. The
+// value changes every attempt so the apiserver can never short-circuit an
+// unchanged update without touching etcd. Server identity IS verified
+// here (unlike the liveness probe): the kubeconfig hands us the run's CA,
+// so NoVerify would be an unforced dishonesty.
+
+/// One-shot HTTP/1.0 GET, close-delimited — the guest's kubeconfig handoff
+/// serves exactly this shape. Returns the body on a 200.
+fn http_get_body(addr: &str, timeout: Duration) -> Option<String> {
+    let sockaddr: std::net::SocketAddr = addr.parse().ok()?;
+    let mut s = TcpStream::connect_timeout(&sockaddr, Duration::from_millis(300)).ok()?;
+    s.set_read_timeout(Some(timeout)).ok();
+    s.set_write_timeout(Some(timeout)).ok();
+    s.set_nodelay(true).ok();
+    s.write_all(format!("GET / HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes())
+        .ok()?;
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).ok()?;
+    let text = String::from_utf8_lossy(&raw);
+    let (headers, body) = text.split_once("\r\n\r\n")?;
+    headers
+        .split_whitespace()
+        .nth(1)
+        .filter(|c| c.starts_with('2'))?;
+    Some(body.to_string())
+}
+
+/// `key: value` lookup in kubenyx-pki's fixed kubeconfig template — our own
+/// writer (rust/kubenyx-pki write_kubeconfig), so line-prefix matching is
+/// exact, not a YAML parser cosplay.
+fn kubeconfig_value(kc: &str, key: &str) -> Option<String> {
+    let pat = format!("{key}: ");
+    kc.lines().find_map(|l| {
+        l.trim_start()
+            .strip_prefix(&pat)
+            .map(|v| v.trim().to_string())
+    })
+}
+
+/// Client config + endpoint from the served kubeconfig: verifying roots
+/// from certificate-authority-data, client auth from the admin cert.
+fn quorum_client(kc: &str) -> (Arc<rustls::ClientConfig>, String, String) {
+    use base64::Engine as _;
+    let field =
+        |k: &str| kubeconfig_value(kc, k).unwrap_or_else(|| die(&format!("kubeconfig has no {k}")));
+    let pem = |k: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(field(k))
+            .unwrap_or_else(|e| die(&format!("kubeconfig {k}: bad base64: {e}")))
+    };
+    let mut roots = rustls::RootCertStore::empty();
+    for c in rustls_pemfile::certs(&mut pem("certificate-authority-data").as_slice()) {
+        let c = c.unwrap_or_else(|e| die(&format!("kubeconfig CA: {e}")));
+        roots
+            .add(c)
+            .unwrap_or_else(|e| die(&format!("kubeconfig CA rejected: {e}")));
+    }
+    let certs: Vec<_> = rustls_pemfile::certs(&mut pem("client-certificate-data").as_slice())
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| die(&format!("kubeconfig client cert: {e}")));
+    let key = rustls_pemfile::private_key(&mut pem("client-key-data").as_slice())
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| die("kubeconfig has no client key"));
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("tls versions")
+    .with_root_certificates(roots)
+    .with_client_auth_cert(certs, key)
+    .unwrap_or_else(|e| die(&format!("client auth config: {e}")));
+    // server: https://<node-address>:6443 — the handoff rewrote loopback to
+    // the declared address, which is in the apiserver cert SANs.
+    let url = field("server");
+    let hostport = url
+        .strip_prefix("https://")
+        .unwrap_or_else(|| die(&format!("kubeconfig server URL not https: {url}")));
+    let host = hostport.split(':').next().unwrap_or(hostport).to_string();
+    (Arc::new(config), host, hostport.to_string())
+}
+
+fn quorum_write_once(config: &Arc<rustls::ClientConfig>, addr: &str, host: &str) -> bool {
+    let sockaddr: std::net::SocketAddr = match addr.parse() {
+        Ok(a) => a,
+        Err(_) => die(&format!("bad quorum probe address {addr}")),
+    };
+    let Ok(stream) = TcpStream::connect_timeout(&sockaddr, Duration::from_millis(300)) else {
+        return false;
+    };
+    // Read window longer than the liveness probe's: the response arrives
+    // only after the raft commit, not after the route match.
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(1))).ok();
+    stream.set_nodelay(true).ok();
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .unwrap_or_else(|_| die("bad quorum probe host"));
+    let Ok(conn) = rustls::ClientConnection::new(config.clone(), name) else {
+        return false;
+    };
+    let mut tls = rustls::StreamOwned::new(conn, stream);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let body =
+        format!(r#"{{"metadata":{{"annotations":{{"kubenyx.io/snap-quorum-probe":"{stamp}"}}}}}}"#);
+    let req = format!(
+        "PATCH /api/v1/namespaces/default HTTP/1.1\r\nHost: {host}\r\n\
+         Content-Type: application/strategic-merge-patch+json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    if tls.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    // Only the status line matters; 2xx means the write committed.
+    let mut raw = Vec::with_capacity(64);
+    let mut chunk = [0u8; 64];
+    while !raw.windows(2).any(|w| w == b"\r\n") {
+        match tls.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+        }
+    }
+    raw.starts_with(b"HTTP/") && raw.get(9).is_some_and(|b| *b == b'2')
+}
+
+/// True once an authenticated write commits; the kubeconfig fetch is INSIDE
+/// the window because it is part of the honest wall from "restored" to
+/// "a client could write".
+fn wait_quorum_write(kubeconfig_addr: &str, deadline: Duration) -> bool {
+    let start = Instant::now();
+    let kc = loop {
+        if let Some(body) = http_get_body(kubeconfig_addr, Duration::from_secs(2)) {
+            break body;
+        }
+        if start.elapsed() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let (config, host, addr) = quorum_client(&kc);
+    while start.elapsed() < deadline {
+        if quorum_write_once(&config, &addr, &host) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    false
 }
 
 // ---- subcommands ------------------------------------------------------------
@@ -569,15 +735,53 @@ struct MeshNode {
     ip: String,
 }
 
-/// server=10.100.0.2, agentN=10.100.0.(2+N) — the microvm-cluster address
-/// convention. Anything else needs an explicit --node name=ip.
-fn conventional_ip(name: &str) -> Option<String> {
+/// "serverN" -> N, "agentN" -> N; mkMembers ranges start at 1, so a 0 or
+/// non-numeric suffix is not one of ours.
+fn number_suffix(name: &str, prefix: &str) -> Option<u32> {
+    name.strip_prefix(prefix)?
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n >= 1)
+}
+
+fn is_server_name(name: &str) -> bool {
+    name == "server" || number_suffix(name, "server").is_some()
+}
+
+/// Mesh addresses mirror lib/microvm.nix mkMembers exactly: the node index
+/// derives the address, 10.100.0.(2+index). servers == 1 keeps the single
+/// name "server" at index 0 (quorum-mesh.org §D5); servers > 1 names them
+/// server1..serverN at indexes 0..N-1, and agents pack AFTER the servers
+/// (agentN has index servers+N-1) — so an agent's address depends on the
+/// mesh's server count, which a lone agent name cannot carry. Callers pass
+/// the count they discovered (1 preserves the byte-stable single-server
+/// convention). Anything else needs an explicit --node name=ip.
+fn conventional_ip(name: &str, servers: u32) -> Option<String> {
     if name == "server" {
         return Some("10.100.0.2".into());
     }
-    name.strip_prefix("agent")
-        .and_then(|n| n.parse::<u32>().ok())
-        .map(|n| format!("10.100.0.{}", 2 + n))
+    if let Some(n) = number_suffix(name, "server") {
+        // serverN: index N-1 -> 10.100.0.(1+N)
+        return Some(format!("10.100.0.{}", 1 + n));
+    }
+    // agentN: index servers+N-1 -> 10.100.0.(1+servers+N)
+    number_suffix(name, "agent").map(|n| format!("10.100.0.{}", 1 + servers + n))
+}
+
+/// Sort key: servers before agents (the resume probe waits on nodes[0]'s
+/// apiserver), numeric within each role so server2 sorts before server10 —
+/// lexical name order would not. Unknown names sort last, by name.
+fn mesh_order_key(name: &str) -> (u8, u32) {
+    if name == "server" {
+        return (0, 0);
+    }
+    if let Some(n) = number_suffix(name, "server") {
+        return (0, n);
+    }
+    if let Some(n) = number_suffix(name, "agent") {
+        return (1, n);
+    }
+    (2, 0)
 }
 
 /// The cluster launcher's per-node runners bind `<node>.sock`; the plain
@@ -590,9 +794,99 @@ fn node_sock(run_dir: &Path, name: &str) -> PathBuf {
     run_dir.join(name).join("kubenyx.sock")
 }
 
-fn mesh_nodes(flags: &Flags, run_dir: Option<&Path>) -> Vec<MeshNode> {
-    // Explicit --node name=ip flags win; otherwise discover the node
-    // subdirs (mesh-take) and apply the address convention.
+// ---- launcher posture manifest (run dir, servers > 1 only) -----------------
+//
+// lib/microvm.nix writes $RUN/kubenyx-mesh.json at launch for multi-server
+// meshes: this tool talks to firecracker APIs and run dirs, never guest
+// config, so the launcher — which holds the eval — is the only honest
+// source for posture and membership. Single-server run dirs never carry
+// the manifest (writing it for every size would change the cp1w2/cp1w6
+// launcher text, which is drv-gated byte-identical, §D5) and keep the
+// address convention.
+
+const RUN_MANIFEST: &str = "kubenyx-mesh.json";
+
+struct RunManifest {
+    posture: String,
+    nodes: Vec<MeshNode>,
+}
+
+/// Scan for `"key":"value"` in our own launcher's fixed builtins.toJSON
+/// output — the values are Nix-declared names/addresses with no escapes
+/// possible, so a JSON dependency buys nothing over refusing loudly.
+fn json_str_field(obj: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\":\"");
+    let start = obj.find(&pat)? + pat.len();
+    let end = obj[start..].find('"')? + start;
+    Some(obj[start..end].to_string())
+}
+
+fn parse_run_manifest(json: &str) -> Result<RunManifest, String> {
+    let posture = json_str_field(json, "posture").ok_or("no posture field")?;
+    let arr = json.find("\"nodes\":[").ok_or("no nodes field")? + "\"nodes\":[".len();
+    let arr_end = json[arr..].find(']').ok_or("unterminated nodes array")? + arr;
+    let mut nodes = Vec::new();
+    for obj in json[arr..arr_end]
+        .split('{')
+        .filter(|s| !s.trim().is_empty())
+    {
+        nodes.push(MeshNode {
+            name: json_str_field(obj, "name").ok_or("node without name")?,
+            ip: json_str_field(obj, "ip").ok_or("node without ip")?,
+        });
+    }
+    if nodes.is_empty() {
+        return Err("empty nodes array".into());
+    }
+    Ok(RunManifest { posture, nodes })
+}
+
+fn read_run_manifest(run_dir: &Path) -> Option<RunManifest> {
+    let path = run_dir.join(RUN_MANIFEST);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    Some(
+        parse_run_manifest(&raw).unwrap_or_else(|e| die(&format!("parse {}: {e}", path.display()))),
+    )
+}
+
+/// Multi-server snapshots are volatile-only: firecracker snapshots exclude
+/// virtio disk contents, so resuming a DURABLE quorum against disks that
+/// kept moving corrupts etcd — while tmpfs state rides inside snap.mem and
+/// is exactly consistent (quorum-mesh.org §D8). The refusal is loud because
+/// the failure it prevents surfaces as silent data corruption much later.
+fn assert_volatile_mesh_take(
+    server_count: usize,
+    manifest: Option<&RunManifest>,
+) -> Result<(), String> {
+    if server_count <= 1 {
+        return Ok(());
+    }
+    match manifest {
+        None => Err(format!(
+            "multi-server mesh-take needs the launcher posture manifest \
+             ({RUN_MANIFEST} in the run dir) to prove the mesh is volatile — \
+             relaunch with a quorum-mesh launcher (lib/microvm.nix writes it \
+             for servers > 1)"
+        )),
+        Some(m) if m.posture != "volatile" => Err(format!(
+            "refusing mesh-take: launcher manifest says posture={} — \
+             firecracker snapshots exclude virtio disk contents, so resuming \
+             a durable quorum against mutated disks corrupts etcd; only \
+             volatile (tmpfs) meshes snapshot honestly",
+            m.posture
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+fn mesh_nodes(
+    flags: &Flags,
+    run_dir: Option<&Path>,
+    manifest: Option<&RunManifest>,
+) -> Vec<MeshNode> {
+    // Explicit --node name=ip flags win; then the launcher manifest (exact
+    // eval-time addresses, no convention guessing); otherwise discover the
+    // node subdirs (mesh-take) and apply the address convention.
     let mut explicit: Vec<MeshNode> = Vec::new();
     let mut i = 0;
     while i < flags.0.len() {
@@ -616,8 +910,11 @@ fn mesh_nodes(flags: &Flags, run_dir: Option<&Path>) -> Vec<MeshNode> {
     }
     let mut nodes = if !explicit.is_empty() {
         explicit
+    } else if let Some(m) = manifest {
+        m.nodes.clone()
     } else if let Some(dir) = run_dir {
-        let mut found: Vec<MeshNode> = std::fs::read_dir(dir)
+        // Names first: agent addresses need the mesh's server count.
+        let names: Vec<String> = std::fs::read_dir(dir)
             .unwrap_or_else(|e| die(&format!("read {}: {e}", dir.display())))
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -625,26 +922,31 @@ fn mesh_nodes(flags: &Flags, run_dir: Option<&Path>) -> Vec<MeshNode> {
                 let n = e.file_name().to_string_lossy().into_owned();
                 p.join(format!("{n}.sock")).exists() || p.join("kubenyx.sock").exists()
             })
-            .map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let ip = conventional_ip(&name).unwrap_or_else(|| {
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let servers = names.iter().filter(|n| is_server_name(n)).count().max(1) as u32;
+        names
+            .into_iter()
+            .map(|name| {
+                let ip = conventional_ip(&name, servers).unwrap_or_else(|| {
                     die(&format!(
                         "cannot infer address for node '{name}' — pass --node {name}=<ip>"
                     ))
                 });
                 MeshNode { name, ip }
             })
-            .collect();
-        found.sort_by(|a, b| a.name.cmp(&b.name));
-        found
+            .collect()
     } else {
         Vec::new()
     };
     if nodes.is_empty() {
         die("no mesh nodes found (no --node flags and no node workdirs with kubenyx.sock)");
     }
-    // Server first: it is the API endpoint the resume probe waits on.
-    nodes.sort_by_key(|n| n.name != "server");
+    nodes.sort_by(|a, b| {
+        mesh_order_key(&a.name)
+            .cmp(&mesh_order_key(&b.name))
+            .then_with(|| a.name.cmp(&b.name))
+    });
     nodes
 }
 
@@ -709,7 +1011,12 @@ fn cmd_mesh_take(flags: &Flags) {
             .unwrap_or_else(|| "/tmp/kubenyx-cluster".into()),
     );
     let out = PathBuf::from(flags.get("--out").unwrap_or_else(|| "mesh-snapshot".into()));
-    let nodes = mesh_nodes(flags, Some(&run_dir));
+    let run_manifest = read_run_manifest(&run_dir);
+    let nodes = mesh_nodes(flags, Some(&run_dir), run_manifest.as_ref());
+    let server_count = nodes.iter().filter(|n| is_server_name(&n.name)).count();
+    if let Err(e) = assert_volatile_mesh_take(server_count, run_manifest.as_ref()) {
+        die(&e);
+    }
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("mkdir {}: {e}", out.display())));
     let out = out
         .canonicalize()
@@ -775,6 +1082,11 @@ struct MeshResume {
     children: Vec<(String, Child)>,
     all_loaded_ms: f64,
     api_ms: f64,
+    /// First committed authenticated write, same origin as api_ms so the
+    /// two are directly comparable. None on single-server meshes: their
+    /// resume output is parsed by existing scripts and a one-member
+    /// "quorum" write proves nothing a TLS answer doesn't.
+    quorum_write_ms: Option<f64>,
 }
 
 fn mesh_resume_once(
@@ -848,7 +1160,8 @@ fn mesh_resume_once(
         })
         .collect();
 
-    // "Mesh usable" = the server apiserver answers; agents carry no API.
+    // "Mesh usable" (weak form) = the first server's apiserver answers TLS;
+    // agents carry no API. nodes[0] is server/server1 by mesh_order_key.
     let server_ip = &nodes[0].ip;
     let t_api = Instant::now();
     let Some(_) = wait_api(
@@ -859,6 +1172,23 @@ fn mesh_resume_once(
         die("server apiserver did not answer within 10s of mesh restore");
     };
     let api_ms = t_api.elapsed().as_secs_f64() * 1e3;
+
+    // "Mesh usable" (honest form, multi-server only): first committed
+    // write. Same t_api origin, so quorum_write_ms - api_ms is the raft
+    // tax on top of the TLS answer. Runs BEFORE the poke joins — like the
+    // TLS probe it overlaps the poke window; joining first would bill the
+    // pokes' sleep tail to the quorum number.
+    let servers = nodes.iter().filter(|n| is_server_name(&n.name)).count();
+    let quorum_write_ms = (servers > 1).then(|| {
+        if !wait_quorum_write(&format!("{server_ip}:10124"), Duration::from_secs(20)) {
+            die(
+                "no quorum write committed within 20s of mesh restore — the \
+                 apiserver answers TLS but raft has no majority; the mesh is \
+                 not honestly usable",
+            );
+        }
+        t_api.elapsed().as_secs_f64() * 1e3
+    });
     for h in poke_handles {
         let _ = h.join();
     }
@@ -867,6 +1197,7 @@ fn mesh_resume_once(
         children,
         all_loaded_ms,
         api_ms,
+        quorum_write_ms,
     }
 }
 
@@ -884,20 +1215,34 @@ fn mesh_resume_flags(flags: &Flags) -> (PathBuf, Vec<MeshNode>, String, bool) {
     (snapshot, nodes, firecracker, enable_pci)
 }
 
+/// Extra probe fields, appended AFTER the existing ones so scripts parsing
+/// the single-server mesh line see byte-identical prefixes; tls_ms restates
+/// api_ms under the quorum-mesh.org §D8 name so both probe numbers read as
+/// the pair they are.
+fn probe_fields(r: &MeshResume) -> String {
+    r.quorum_write_ms
+        .map(|q| format!(" tls_ms={:.1} quorum_write_ms={q:.1}", r.api_ms))
+        .unwrap_or_default()
+}
+
 fn cmd_mesh_resume(flags: &Flags) {
     let (snapshot, nodes, firecracker, enable_pci) = mesh_resume_flags(flags);
     let config = tls_probe_config();
     let r = mesh_resume_once(&nodes, &snapshot, &firecracker, enable_pci, &config);
     println!(
-        "nodes={} all_loaded_ms={:.1} api_ms={:.1} total_ms={:.1}",
+        "nodes={} all_loaded_ms={:.1} api_ms={:.1} total_ms={:.1}{}",
         r.children.len(),
         r.all_loaded_ms,
         r.api_ms,
         r.all_loaded_ms + r.api_ms,
+        probe_fields(&r),
     );
     let server_ip = &nodes[0].ip;
     eprintln!("cluster:    https://{server_ip}:6443");
-    eprintln!("kubeconfig: curl -s {server_ip}:10124 > kubenyx.kubeconfig && kubectl --kubeconfig kubenyx.kubeconfig get nodes");
+    // One line per server (§D7): on server loss, re-curl a survivor.
+    for n in nodes.iter().filter(|n| is_server_name(&n.name)) {
+        eprintln!("kubeconfig: curl -s {}:10124 > kubenyx.kubeconfig && kubectl --kubeconfig kubenyx.kubeconfig get nodes", n.ip);
+    }
     let pids: Vec<String> = r.children.iter().map(|(_, c)| c.id().to_string()).collect();
     eprintln!("stop:       kill {}", pids.join(" "));
     for (_, child) in r.children {
@@ -915,16 +1260,21 @@ fn cmd_mesh_cycle(flags: &Flags) {
     let config = tls_probe_config();
 
     let mut totals: Vec<f64> = Vec::with_capacity(n as usize);
+    let mut quorums: Vec<f64> = Vec::new();
     for round in 1..=n {
         let mut r = mesh_resume_once(&nodes, &snapshot, &firecracker, enable_pci, &config);
         let total_ms = r.all_loaded_ms + r.api_ms;
         println!(
-            "round={round} nodes={} all_loaded_ms={:.1} api_ms={:.1} total_ms={total_ms:.1}",
+            "round={round} nodes={} all_loaded_ms={:.1} api_ms={:.1} total_ms={total_ms:.1}{}",
             r.children.len(),
             r.all_loaded_ms,
             r.api_ms,
+            probe_fields(&r),
         );
         totals.push(total_ms);
+        if let Some(q) = r.quorum_write_ms {
+            quorums.push(q);
+        }
         for (name, child) in r.children.iter_mut() {
             let pid = child.id() as i32;
             kill_wait(child);
@@ -935,8 +1285,16 @@ fn cmd_mesh_cycle(flags: &Flags) {
     }
     totals.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median = totals[totals.len() / 2];
+    // Same append-only rule as the round lines: the summary grows a quorum
+    // median only when every round measured one.
+    let quorum_summary = if quorums.len() == totals.len() {
+        quorums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        format!(" median_quorum_write_ms={:.1}", quorums[quorums.len() / 2])
+    } else {
+        String::new()
+    };
     println!(
-        "mesh_cycles={n} nodes={} median_total_ms={median:.1} min={:.1} max={:.1}",
+        "mesh_cycles={n} nodes={} median_total_ms={median:.1} min={:.1} max={:.1}{quorum_summary}",
         nodes.len(),
         totals.first().unwrap(),
         totals.last().unwrap()
@@ -958,5 +1316,135 @@ fn main() {
         "mesh-resume" => cmd_mesh_resume(&flags),
         "mesh-cycle" => cmd_mesh_cycle(&flags),
         other => die(&format!("unknown subcommand {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The single-server convention is parsed by nothing but relied on by
+    // everything: cp1w2/cp1w6 run dirs must keep resolving byte-identically.
+    #[test]
+    fn single_server_convention_is_byte_stable() {
+        assert_eq!(conventional_ip("server", 1).as_deref(), Some("10.100.0.2"));
+        assert_eq!(conventional_ip("agent1", 1).as_deref(), Some("10.100.0.3"));
+        assert_eq!(conventional_ip("agent6", 1).as_deref(), Some("10.100.0.8"));
+    }
+
+    // Mirror of lib/microvm.nix mkMembers: serverN at index N-1, agents
+    // packed after the servers — cp3 (.2/.3/.4) and cp3w2 (agents .5/.6).
+    #[test]
+    fn server_n_addressing_mirrors_mk_members() {
+        assert_eq!(conventional_ip("server1", 3).as_deref(), Some("10.100.0.2"));
+        assert_eq!(conventional_ip("server2", 3).as_deref(), Some("10.100.0.3"));
+        assert_eq!(conventional_ip("server3", 3).as_deref(), Some("10.100.0.4"));
+        assert_eq!(conventional_ip("agent1", 3).as_deref(), Some("10.100.0.5"));
+        assert_eq!(conventional_ip("agent2", 3).as_deref(), Some("10.100.0.6"));
+    }
+
+    #[test]
+    fn junk_names_do_not_resolve() {
+        // mkMembers ranges start at 1 and pad nothing.
+        for name in ["server0", "agent0", "serverx", "agent", "gateway", ""] {
+            assert_eq!(conventional_ip(name, 3), None, "{name} resolved");
+        }
+        assert!(!is_server_name("agent1"));
+        assert!(!is_server_name("server0"));
+        assert!(is_server_name("server"));
+        assert!(is_server_name("server12"));
+    }
+
+    #[test]
+    fn ordering_is_servers_first_then_numeric() {
+        let mut names = vec![
+            "agent2", "server2", "agent10", "server10", "server1", "agent1",
+        ];
+        names.sort_by(|a, b| {
+            mesh_order_key(a)
+                .cmp(&mesh_order_key(b))
+                .then_with(|| a.cmp(b))
+        });
+        assert_eq!(
+            names,
+            ["server1", "server2", "server10", "agent1", "agent2", "agent10"]
+        );
+        // The lone single-server name still leads its agents.
+        let mut single = vec!["agent1", "server"];
+        single.sort_by_key(|n| mesh_order_key(n));
+        assert_eq!(single, ["server", "agent1"]);
+    }
+
+    // Exactly the shape builtins.toJSON emits from the launcher (keys
+    // sorted, no whitespace).
+    const MANIFEST: &str = concat!(
+        r#"{"nodes":[{"ip":"10.100.0.2","name":"server1","role":"server"},"#,
+        r#"{"ip":"10.100.0.3","name":"server2","role":"server"},"#,
+        r#"{"ip":"10.100.0.5","name":"agent1","role":"agent"}],"#,
+        r#""posture":"volatile"}"#
+    );
+
+    #[test]
+    fn run_manifest_parses_launcher_json() {
+        let m = parse_run_manifest(MANIFEST).expect("parse");
+        assert_eq!(m.posture, "volatile");
+        let pairs: Vec<(String, String)> = m
+            .nodes
+            .iter()
+            .map(|n| (n.name.clone(), n.ip.clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("server1".into(), "10.100.0.2".into()),
+                ("server2".into(), "10.100.0.3".into()),
+                ("agent1".into(), "10.100.0.5".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_manifest_rejects_garbage() {
+        assert!(parse_run_manifest("{}").is_err());
+        assert!(parse_run_manifest(r#"{"nodes":[],"posture":"volatile"}"#).is_err());
+        assert!(parse_run_manifest(r#"{"nodes":[{"ip":"10.100.0.2"}],"posture":"v"}"#).is_err());
+    }
+
+    #[test]
+    fn mesh_take_posture_gate() {
+        let volatile = parse_run_manifest(MANIFEST).unwrap();
+        let durable = RunManifest {
+            posture: "durable".into(),
+            nodes: volatile.nodes.clone(),
+        };
+        // Multi-server: manifest required, and it must say volatile.
+        assert!(assert_volatile_mesh_take(2, Some(&volatile)).is_ok());
+        assert!(assert_volatile_mesh_take(2, None).is_err());
+        assert!(assert_volatile_mesh_take(3, Some(&durable)).is_err());
+        // Single-server keeps today's behavior: no manifest, no gate.
+        assert!(assert_volatile_mesh_take(1, None).is_ok());
+        assert!(assert_volatile_mesh_take(0, None).is_ok());
+    }
+
+    #[test]
+    fn kubeconfig_fields_from_pki_template() {
+        // Trimmed shape of rust/kubenyx-pki write_kubeconfig's template.
+        let kc = "apiVersion: v1\nclusters:\n- name: kubenyx\n  cluster:\n    \
+                  certificate-authority-data: Q0E=\n    server: https://10.100.0.2:6443\n\
+                  users:\n- name: kubenyx-admin\n  user:\n    \
+                  client-certificate-data: Q0VSVA==\n    client-key-data: S0VZ\n";
+        assert_eq!(
+            kubeconfig_value(kc, "server").as_deref(),
+            Some("https://10.100.0.2:6443")
+        );
+        assert_eq!(
+            kubeconfig_value(kc, "certificate-authority-data").as_deref(),
+            Some("Q0E=")
+        );
+        assert_eq!(
+            kubeconfig_value(kc, "client-key-data").as_deref(),
+            Some("S0VZ")
+        );
+        assert_eq!(kubeconfig_value(kc, "token"), None);
     }
 }

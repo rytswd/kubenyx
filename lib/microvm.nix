@@ -272,6 +272,41 @@ rec {
           ""
         ]
       );
+      # Posture manifest for kubenyx-snap mesh-take (quorum-mesh.org §D8):
+      # the snapshot tool sees run dirs and firecracker APIs, never guest
+      # config, so the launcher — which holds the eval — records members
+      # and posture at launch. mesh-take refuses a multi-server snapshot
+      # without a volatile manifest: firecracker snapshots exclude virtio
+      # disk contents, so resuming a durable quorum against mutated disks
+      # corrupts etcd. Durability mirrors modules/pki.nix durablePosture
+      # (profile balanced + non-volatile datastore), checked on EVERY node
+      # — any disk that keeps moving poisons the mesh cut. Rendered only
+      # for servers > 1: writing it for all sizes would change the
+      # cp1w2/cp1w6 launcher text and break their drv byte-identity (§D5);
+      # single-server discovery stays on the address convention.
+      meshManifest = builtins.toJSON {
+        posture =
+          if
+            lib.any (
+              n: nodes.${n}.config.kubenyx.profile == "balanced" && !nodes.${n}.config.kubenyx.datastore.volatile
+            ) bootOrder
+          then
+            "durable"
+          else
+            "volatile";
+        nodes = map (n: {
+          name = n;
+          ip = members.${n}.address;
+          role = members.${n}.role;
+        }) bootOrder;
+      };
+      meshManifestWrite = lib.optionalString multiServer (
+        lib.concatStringsSep "\n" [
+          ''printf '%s\n' ${lib.escapeShellArg meshManifest} > "$RUN/kubenyx-mesh.json"''
+          ""
+          ""
+        ]
+      );
       # The -down script is the normal exit path (the launcher's trap only
       # covers INT/TERM, and its `wait` returns exactly when -down kills the
       # VMs), so the per-run trust surface dies here: the CA-port accept,
@@ -315,7 +350,7 @@ rec {
         rm -rf "$RUN"
         mkdir -p "$RUN"
 
-        cleanup() {
+        ${meshManifestWrite}cleanup() {
           ${caTeardown}pkill -x firecracker 2>/dev/null || true
         }
         trap cleanup INT TERM

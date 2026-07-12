@@ -49,8 +49,9 @@ Two findings the research above did not predict:
    staggers founders >1 s; the why-not lives in the probe comments).
 
 D8 (cp3 snapshot/mesh-recreation) was deliberately NOT a work-plan
-item and remains OPEN — a gated fast-follow with its own bench
-contract; nothing below covers it.
+item; it closed 2026-07-12 as the gated fast-follow it was declared to
+be — recreation median 47.8 ms with the quorum-write probe as the
+honesty bar (see D8 for the gate numbers).
 
 * Measured ground truth (host bench, etcd 3.6.12, tmpfs + loopback)
 
@@ -194,25 +195,37 @@ kubeconfig on =:10124=; the story is "curl any server; on server
 loss, re-curl a survivor". Host-side kubenyx-lb (=127.0.0.1:6444=,
 SANs already include it) is a convenience follow-up, not honesty.
 
-** D8. Snapshots: cold start guaranteed, recreation as gated fast-follow
-Mechanism is sound: etcd elections tick on a Go monotonic ticker and
-leases compare =time.Now()= monotonic — both freeze with the VM and
-the mesh cut is ~4 ms, ~25× under el100. Wall-clock pokes don't touch
-raft. But the claim ships only when the bench exists:
-- add a *quorum-write probe* to the mesh verbs (TLS-answer ms AND
-  first-quorum-write ms; expected envelope ~45 ms + ≤150 ms);
-- fix =kubenyx-snap= single-server assumptions (=conventional_ip()=
-  for serverN, probe endpoint selection);
-- assert *volatile-only* for cp3 snapshots: firecracker snapshots
-  exclude virtio disk contents — a durable quorum resume against a
-  mutated disk corrupts; tmpfs-in-guest-RAM rides inside =snap.mem=
-  exactly like etcd-mem did;
-- gate tests: no term bump across 5 cycles; aged-resume (>60 s,
-  >10 min) node-flap check (hazard exists on cp1 meshes today too —
-  never tested); one deliberately skewed resume (expect exactly one
-  bounded pre-vote election, ~1–1.3 s) as the documented envelope.
-Budget statement: cp3 ≈ 11 GB snapshot on tmpfs (cp3w2 ≈ 18 GB) plus
-equal live-guest RAM — ~21/35 GB peak during mesh-cycle.
+** D8. Snapshots: recreation gated, measured, DONE (2026-07-12)
+Mechanism was sound and is now proven live: etcd elections tick on a
+Go monotonic ticker and leases compare =time.Now()= monotonic — both
+freeze with the VM (mesh cut measured 2.8 ms across 3 servers, ~35×
+under el100). Every gated item landed:
+- the *quorum-write probe* exists as the honesty bar this section
+  demanded: multi-server =mesh-resume=/=mesh-cycle= report =tls_ms=
+  AND =quorum_write_ms= — a verifying rustls client built from the
+  =:10124= kubeconfig's CA PATCHes a per-attempt-unique annotation
+  (a 401 can no longer pass as "resumed"). Measured 5-cycle medians:
+  total *47.8 ms*, tls 17.9 ms, quorum write *97.1 ms* — inside the
+  predicted ~45 ms + ≤150 ms envelope;
+- =kubenyx-snap= single-server assumptions fixed: =conventional_ip()=
+  mirrors =mkMembers= (server byte-stable, serverN, agent shift),
+  servers-first ordering makes the probe endpoint server/server1;
+- *volatile-only* is enforced, not asserted in prose: the launcher
+  writes a run manifest (members + posture) and multi-server
+  =mesh-take= refuses loudly on durable posture or missing manifest,
+  before any firecracker call;
+- gates PASS: term pinned at 2 across 5 cycles (15 live reads via
+  each server's =/v3/maintenance/status=, zero elections); aged
+  resumes at 81 s and 630 s — zero Ready flaps, zero taint churn,
+  leases renew post-clockstep (the 40 s node-monitor-grace race went
+  untripped, empirically not structurally); skewed resume (leader
+  held 2.0 s behind the pair, 2 runs) — exactly ONE pre-vote election
+  (term 2→3, no bump on rejoin), leader ≤377 ms, first committed
+  write *451 ms* — far under the 1–1.3 s guess because cp3 runs
+  hb10/el100, not default timers.
+Budget statement held: 11 GB cp3 snapshot on /dev/shm as predicted
+(cp3w2 ≈ 18 GB estimate stands untested). Full log + method notes:
+=bench/RESULTS.md= 2026-07-12 recreation entry.
 
 ** D9. Honesty paragraph for the README (verbatim intent)
 All cp3 members hang off one host bridge on one physical host: the
@@ -254,4 +267,5 @@ and a bigger memory/tmpfs footprint.
 - [X] README (matrix row, quorum-mesh details block, D9 paragraph)
 
 All seven work-plan items done ⇒ =#+state: complete=. D8 snapshots
-were never on the work plan and stay open (see Measured outcome).
+were never on the work plan; the gated fast-follow closed 2026-07-12
+(recreation median 47.8 ms, quorum-write probe landed — see D8).

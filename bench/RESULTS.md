@@ -7,6 +7,85 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-12 — cp3 recreation: the quorum back in ~48 ms, quorum-write-probed
+
+air/v0.7 D8 — the gated fast-follow — closed. `kubenyx-snap` grew real
+multi-server support (conventional addressing now mirrors the
+launcher's `mkMembers` exactly: `server`→.2 stays byte-stable,
+`serverN`→.1+N, agents shift after the servers; mesh ordering is
+servers-first so the probe endpoint is always server/server1) and the
+honesty bar D8 demanded: a **quorum-write probe**. The old resume probe
+counted ANY TLS answer — a 401 passes, which proves a listening socket,
+not a quorum. Multi-server `mesh-resume`/`mesh-cycle` now also fetch
+the admin kubeconfig from `:10124`, build a *verifying* rustls client
+from its CA + system:masters cert (no NoVerify), and PATCH a
+per-attempt-unique annotation onto the default namespace — the
+apiserver cannot answer that without a committed etcd write. Both
+numbers print per round; single-server output stays byte-identical.
+
+All gates ran live against `nix run .#cp3` (MESH-READY 6340 ms this
+session; `mesh-take` cut 2.8 ms across 3 servers, snapshot written in
+2.5 s, **11 GB** on /dev/shm — the predicted cp3 budget; 1.5 T total /
+39 G used observed before the take, back to 39 G after teardown):
+
+| Cycle | total ms | tls ms | quorum write ms |
+|---|---|---|---|
+| 1 | 49.0 | 17.9 | 82.6 |
+| 2 | 45.3 | 13.7 | 81.0 |
+| 3 | 49.5 | 17.3 | 97.1 |
+| 4 | 47.8 | 19.2 | 97.4 |
+| 5 | 41.4 | 22.0 | 102.6 |
+| median | **47.8** | **17.9** | **97.1** |
+
+The predicted envelope (~45 ms + ≤150 ms to the first committed write)
+holds.
+
+**Gate 1 — no term bump across 5 cycles: PASS.** Raft term read after
+every cycle via etcd's grpc-gateway `/v3/maintenance/status` on every
+server's `:2379` (the admin kubeconfig's system:masters cert works
+there — one launcher CA signs both planes): term pinned at **2** on all
+15 reads, leader never moved, zero elections. Method note: this ran as
+5× `mesh-resume` + kill rather than the `mesh-cycle` verb — the term
+must be read while each round's mesh is live and cycle has no
+between-round hook; the measured code path is byte-identical to
+cycle's rounds.
+
+**Gate 2 — aged resume, no node flaps: PASS.** Snapshots aged 81 s and
+630 s, then 60 s of 1 s-cadence observation plus an event/lease audit
+after each resume: zero Ready→NotReady flaps, zero taint churn, zero
+NotReady/unreachable events, `lastTransitionTime` untouched, leases
+renewing at clockstep-corrected wall time (resume totals 35.1 / 53.5 ms,
+quorum writes 84.5 / 90.8 ms). The ~40 s node-monitor-grace hazard —
+latent on the cp1 meshes too, never tested until now — never trips:
+kubelet lease renewal wins the race. That's race-shaped, not
+eliminated; a heavily contended host could still lose it.
+
+**Gate 3 — deliberately skewed resume: PASS.** The raft leader
+(server3) resumed 2.0 s behind the other two via raw firecracker
+`/snapshot/load` calls (the tool has no skew flag and deliberately
+didn't grow one). Two runs, both: exactly **one** election (term 2→3),
+and NO second bump when the old leader rejoined at ~2.03 s — etcd 3.6
+pre-vote held. Leader elected ≤377 ms after the surviving pair resumed
+(poll-quantized: true completion lies in (29, 377] ms), first committed
+write at **451 ms** — far under the doc's 1–1.3 s guess, because cp3
+runs hb10/el100 timers, not defaults.
+
+Volatile-only is now *enforced*, not documented: the cp3 launcher
+writes a run manifest (members + posture) and multi-server `mesh-take`
+refuses loudly on durable posture OR a missing manifest, before any
+firecracker API call — firecracker snapshots exclude virtio disk
+contents, so a durable quorum resumed against a mutated disk corrupts;
+cp3's tmpfs state rides inside `snap.mem` exactly like etcd-mem did.
+
+Bench conditions: shared 384-core box; recreation medians are
+same-snapshot, same-session medians in the same band as the 2026-07-09
+mesh numbers (~45 ms) — cross-entry deltas of a few ms are inside box
+noise. Drv gate held: a worktree carrying only the lib/microvm.nix
+change builds cp1w2 to the identical store path; the rust change
+necessarily moves the embedded kubenyx-tools in guests (true of ANY
+kubenyx-snap change), launcher text diff confirmed to be only the
+embedded runner paths.
+
 ## 2026-07-12 — cp3: honest 3-CP quorum mesh, 31 s → 6.5 s
 
 air/v0.7/quorum-mesh.org closed. `nix run .#cp3` boots a 3-control-plane
