@@ -384,6 +384,13 @@ lib.mkMerge [
         # Wall-clock self-diagnosis when late, as before: 15s of silence or
         # an exhausted URL list ends the attempt, so the outer loop's dump /
         # give-up checks run at least every ~30s.
+        # Mesh pacing: on cp3 the phase-3 bench billed 0.3-0.6s of pure
+        # observation gap (node Ready in the kubelet journal to marker) to
+        # the 50ms poll grid — a visible slice of a ~6.5s wall, so meshes
+        # poll at 50/s (20ms grid) with the entry count scaled to keep the
+        # ~30s exhaustion cadence. Single-server text is UNCHANGED (the
+        # cp1w2 drv is a byte-identity gate) and its 3.4s wall never showed
+        # the gap above noise.
         kubenyx-report = {
           description = "Report cluster readiness to the console";
           wantedBy = [ "multi-user.target" ];
@@ -409,10 +416,10 @@ lib.mkMerge [
                   # 15s of silence (server stall — recycle the session).
                   local pid line rc i
                   local -a urls=()
-                  for ((i = 0; i < 600; i++)); do
+                  for ((i = 0; i < ${if multiServer then "1500" else "600"}; i++)); do
                     urls+=("https://127.0.0.1:6443/api/v1/nodes/$node?pretty=false")
                   done
-                  exec 9< <(curl -s --rate 20/s --max-time 15 \
+                  exec 9< <(curl -s --rate ${if multiServer then "50/s" else "20/s"} --max-time 15 \
                     --cacert "$pki/ca.crt" --cert "$pki/admin.crt" --key "$pki/admin.key" \
                     "''${urls[@]}" 2>/dev/null)
                   pid=$!
@@ -482,10 +489,10 @@ lib.mkMerge [
                 probe() {
                   local pid line rc i
                   local -a urls=()
-                  for ((i = 0; i < 600; i++)); do
+                  for ((i = 0; i < ${if multiServer then "1500" else "600"}; i++)); do
                     urls+=("${agentApiBase}/api/v1/nodes/$node?pretty=false")
                   done
-                  exec 9< <(curl -s --rate 20/s --max-time 15 \
+                  exec 9< <(curl -s --rate ${if multiServer then "50/s" else "20/s"} --max-time 15 \
                     --cacert "$pki/ca.crt" --cert "$pki/kubelet.crt" --key "$pki/kubelet.key" \
                     "''${urls[@]}" 2>/dev/null)
                   pid=$!
@@ -652,6 +659,45 @@ lib.mkMerge [
             done
             echo "KUBENYX-DEGRADED: CA bundle fetch from $url timed out (90s); kubenyx-pki refuses to self-mint" > /dev/console
             exit 1
+          '';
+        };
+      }
+      # ---- mesh boot forensics (quorum-mesh.org work plan item 5) ---------------
+      # The consoles are the only artifact the launcher keeps, but the
+      # KUBENYX-PHASE markers alone cannot attribute the cp3 wall: the
+      # gaps live INSIDE units (etcd's bootstrap-probe tail, coredns's
+      # informer sync, kcm/scheduler lease acquisition) and only the
+      # journal carries those lines. Mirror the interesting units to the
+      # console once the boot is over — After=kubenyx-report keeps the
+      # dump strictly OUTSIDE the measured window, so observing the boot
+      # cannot slow the boot. Mesh-only: single-server variants are
+      # benched to the millisecond and their closure/unit list must not
+      # move (the cp1w2 drv is the regression gate).
+      // lib.optionalAttrs multiServer {
+        kubenyx-journal-dump = {
+          description = "Mirror per-unit journals to the console for mesh boot attribution";
+          wantedBy = [ "multi-user.target" ];
+          after = [ "kubenyx-report.service" ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+          };
+          script = ''
+            # short-monotonic timestamps line up with the /proc/uptime
+            # numbers in the KUBENYX-PHASE markers — one clock for the
+            # whole timeline. Units missing on this role print nothing.
+            {
+              echo "KUBENYX-JOURNAL-DUMP begin up=$(cut -d' ' -f1 /proc/uptime)"
+              for u in kubenyx-ca-fetch kubenyx-pki ${datastoreUnit} \
+                kube-apiserver kube-controller-manager kube-scheduler \
+                kubenyx-addons kubenyx-cni-install kubenyx-seed-images \
+                kubenyx-prebaked-store containerd kubelet kube-proxy \
+                kubenyx-dns-iface coredns kubenyx-lb kubenyx-report; do
+                echo "KUBENYX-JOURNAL-UNIT $u"
+                journalctl -o short-monotonic --no-pager -u "$u" 2>/dev/null || true
+              done
+              echo "KUBENYX-JOURNAL-DUMP end"
+            } > /dev/console
           '';
         };
       }

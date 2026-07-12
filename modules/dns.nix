@@ -22,6 +22,11 @@ let
   upstream =
     if dns.upstream == null then cfg.internal.hostResolvConf else lib.concatStringsSep " " dns.upstream;
 
+  serverCount = lib.length (lib.attrNames (lib.filterAttrs (_: n: n.role == "server") cfg.nodes));
+  # Mesh servers only (single-server unit text is a drv gate, and agents
+  # dial kubenyx-lb, not a local apiserver).
+  meshServer = cfg.role == "server" && serverCount > 1;
+
   # extraServerBlocks concatenates AFTER the primary block (empty default
   # adds zero bytes — Corefile identical). Zone-scoped blocks cannot ride
   # inside `.:53` (several plugins are once-per-block, e.g. hosts), and
@@ -149,6 +154,31 @@ in
         Type = "notify";
         NotifyAccess = "all";
         TimeoutStartSec = 60;
+        # Mesh servers: hold CoreDNS until the local apiserver admits its
+        # own first informer request (list services, the kubenyx:coredns
+        # ClusterRole the addons apply). Started unordered on a cold mesh,
+        # CoreDNS's kubernetes plugin hits the same client-go reflector
+        # re-list backoff the kubelet gate above kills — measured 9.5-12s
+        # coredns readiness on a 6.3s-READY boot — while the notify
+        # wrapper's 10ms /ready polls flood the journal (~100 lines/s) for
+        # the whole window. Zero wall effect (CoreDNS is off the READY
+        # path, 8/9 bench boots); this is convergence-time + noise
+        # hygiene. Same exact-request pattern as kcm/kubelet; raw '=' in
+        # the query — '%' is a systemd specifier in unit text.
+        ExecStartPre = lib.mkIf meshServer (
+          lib.concatStringsSep " " [
+            wrap
+            "--wait"
+            "--url"
+            "https://127.0.0.1:6443/api/v1/services?limit=1"
+            "--cacert"
+            "${cfg.internal.pkiDir}/ca.crt"
+            "--cert"
+            "${cfg.internal.pkiDir}/coredns.crt"
+            "--key"
+            "${cfg.internal.pkiDir}/coredns.key"
+          ]
+        );
         ExecStart = "${wrap} --url http://${readyEndpoint}/ready -- ${lib.getExe' cfg.packages.coredns "coredns"} -conf ${corefile}";
         Restart = "always";
         RestartSec = 2;

@@ -136,6 +136,31 @@ let
   # NEVER fall through to bootstrap: on join-wait expiry the unit fails
   # loudly (DEGRADED marker) and systemd retries — a wedged join is
   # recoverable, a second cluster is not.
+  #
+  # D3 fast-exit (quorum-mesh.org): burning the whole window is only
+  # necessary when the probe cannot TELL fresh from mid-boot. It often
+  # can: when every other declared server ACTIVELY refuses the TCP
+  # connect (curl exit 7, an RST/unreachable answered instantly — vs 28,
+  # silence until the timeout), nobody has a listener, and on the bridge
+  # a booted-but-fresh peer refuses exactly like that while its own etcd
+  # is still queued behind pki. All-refused sustained across three
+  # consecutive sweeps (the streak rationale sits with the loop below)
+  # concludes "all peers are also fresh" and bootstraps immediately.
+  # Anything softer keeps the full
+  # window: answers-but-unhealthy or a connect that hangs may be a
+  # mid-boot member WITH state, and joining late beats splitting early.
+  # Blast-radius honesty: a genuinely-running-but-unreachable quorum
+  # whose partition REFUSES (members' hosts up, etcd ports closed by a
+  # REJECT rule or crashed processes) now reaches declared/new sooner
+  # than the timeout fall-through did. That is the same decision, only
+  # earlier — this path runs solely on an EMPTY data dir, and the
+  # member-set guard above already contains it: the fingerprint pins
+  # this bootstrap to the same declared set the real cluster was born
+  # from, so the deterministic cluster ID (the fresh-founder-race note
+  # below) converges the two sides on heal instead of splitting, a
+  # minority founder commits nothing alone in the meantime, and any
+  # replay against a CHANGED set is refused loudly before this probe
+  # ever runs.
   etcdJoinProbe = pkgs.writeShellScript "kubenyx-etcd-join-probe" ''
     set -eu
     env_file='${clusterEnvFile}'
@@ -163,15 +188,71 @@ let
     done
     others='${lib.concatStringsSep " " otherClientEps}'
     healthy_ep=""
+    # Fast-exit needs 5 CONSECUTIVE all-refused sweeps, half a second
+    # apart: a single refused observation can be a LIVE peer's listener
+    # gap masquerading as fresh — the bind race on a normal etcd start,
+    # or the RestartSec=2 refuse window while systemd revives a crashed
+    # member. Five 0.5s-spaced sweeps still span that whole >2s window,
+    # and any non-refused answer from any peer resets the streak; a
+    # genuinely fresh mesh keeps refusing indefinitely, so the streak
+    # costs ~2s against the up-to-joinProbeSec it saves. 5x0.5s rather
+    # than 3x1s (same span, finer grain): on a synchronized cold mesh
+    # the peers' etcd binds land ~2.1s after this probe starts, and the
+    # coarse grid lost the race 1/9 server-boots — its LAST sweep
+    # slipped past a peer's bound-but-not-yet-serving listener, reset
+    # the streak, and blocked in the health RPC until the peers elected
+    # (+1.4s on that member). The fine grid completes the streak ~0.1s
+    # sooner and, more to the point, its final sweep lands well before
+    # the earliest observed peer-bind.
+    refused_streak=0
     probe_deadline=$(( $(date +%s) + ${toString ds.etcd.joinProbeSec} ))
     while [ "$(date +%s)" -lt "$probe_deadline" ]; do
+      all_refused=1
       for ep in $others; do
+        # TCP-classify before the health RPC: curl exit 7 is an ACTIVE
+        # refusal (RST/unreachable, answered instantly — verified: 7 on
+        # a closed port, 28 on silence/timeout), so there is no listener
+        # to health-check and the etcdctl dial-timeout would only burn
+        # probe budget.
+        rc=0
+        curl -so /dev/null --connect-timeout 1 --max-time 2 "$ep/health" || rc=$?
+        if [ "$rc" = 7 ]; then
+          continue
+        fi
+        all_refused=0
+        # Silence (28) resets the streak — a partitioned member WITH
+        # state can look exactly like this, so the window must hold —
+        # but it must NOT dial etcdctl: TCP got no answer, so a 2s gRPC
+        # dial into the same black hole is deterministic dead time.
+        # Unbounded, a silent sweep cost 1s curl + 2s etcdctl per peer
+        # (~6s for two), overshooting the whole probe window: measured
+        # 2/5 cold boots where sweeps raced ahead of the peers' network
+        # bring-up, etcd exec at 8.7s instead of 4.4s and +4.5s on the
+        # mesh wall. With the skip a silent sweep is bounded at 1s/peer.
+        # The one state that answers TCP but hangs HTTP — a bound
+        # listener mid-bootstrap — also exits 28 (connect ok, --max-time
+        # expiry) and also cannot pass a health RPC yet; the next sweep
+        # re-probes it 0.5s later, well inside the window.
+        if [ "$rc" = 28 ]; then
+          echo "kubenyx-etcd-join-probe: $ep silent (no TCP answer within 1s); holding the probe window" >&2
+          continue
+        fi
         if ${etcdCtl} --endpoints="$ep" ${ctlCreds} --dial-timeout=2s --command-timeout=3s endpoint health >/dev/null 2>&1; then
           healthy_ep=$ep
           break 2
         fi
       done
-      sleep 1
+      if [ "$all_refused" = 1 ]; then
+        refused_streak=$(( refused_streak + 1 ))
+        if [ "$refused_streak" -ge 5 ]; then
+          echo "kubenyx-etcd-join-probe: every declared server actively refused across $refused_streak sweeps (all peers are also fresh); bootstrapping the declared initial-cluster without waiting out the probe window" >&2
+          write_env "$declared" new
+          exit 0
+        fi
+      else
+        refused_streak=0
+      fi
+      sleep 0.5
     done
     if [ -z "$healthy_ep" ]; then
       echo "kubenyx-etcd-join-probe: no declared server answered; bootstrapping the declared initial-cluster" >&2
@@ -303,6 +384,20 @@ let
           selfPeerUrl
           "--initial-advertise-peer-urls"
           selfPeerUrl
+          # D1 timers (quorum-mesh.org): first raft-committed write 483ms
+          # -> 143ms on the host bench, and the in-guest election wait
+          # after storage bootstrap measured 0.26-1.19s on default
+          # 100ms/1000ms — pure wall on every cold boot. el100 (not el50):
+          # one >50ms vCPU scheduling stall under contention is a spurious
+          # election, so 100ms is the safe floor the doc decided on. The
+          # bridge RTT is ~0.1ms; a 10ms heartbeat is still 100x slack.
+          # Multi-server only by construction: this script is exec'd only
+          # on the multiServer branch (single-server flag list is a
+          # byte-identity gate).
+          "--heartbeat-interval"
+          "10"
+          "--election-timeout"
+          "100"
         ]
         ++ etcdPeerTlsArgs
       )
@@ -512,13 +607,15 @@ in
         default = 15;
         description = ''
           Seconds a fresh multi-server member's join probe waits for an
-          existing quorum before deciding first-bootstrap. On an all-fresh
-          cold boot nobody answers, so EVERY server burns the full window
-          before etcd even launches — ~125x the measured quorum-formation
-          cost and the single biggest cp3 cold-boot line item
-          (air/v0.7/quorum-mesh.org §D3). The 15s default preserves today's
-          behavior; on a local bridge where live quorums answer in <1s and
-          dead peers refuse instantly, ~3s is a measured candidate.
+          existing quorum before deciding first-bootstrap. The window is
+          the safety margin against joining late vs splitting early
+          (air/v0.7/quorum-mesh.org §D3); the 15s default preserves the
+          original behavior. On an all-fresh cold boot the probe usually
+          shortcuts it: when every declared peer actively REFUSES for
+          three consecutive sweeps (nobody has state, all are fresh), it
+          bootstraps immediately instead of burning the window — only
+          peers that answer unhealthily or time out (possibly mid-boot
+          WITH state) hold the probe to the full window.
         '';
       };
       extraFlags = lib.mkOption {
@@ -645,10 +742,13 @@ in
           # the collocated apiserver's etcd client rides through.
           stopIfChanged = lib.mkIf multiServer false;
           # The guard/probe/launcher scripts need coreutils/awk/grep beyond
-          # systemd's default path; gated so the single-server unit text
-          # stays byte-identical to v0.1.
+          # systemd's default path — plus curl, whose connect-error exit
+          # codes are what lets the join probe tell an active refusal from
+          # silence (etcdctl reports only pass/fail); gated so the
+          # single-server unit text stays byte-identical to v0.1.
           path = lib.mkIf multiServer [
             pkgs.coreutils
+            pkgs.curl
             pkgs.gawk
             pkgs.gnugrep
           ];

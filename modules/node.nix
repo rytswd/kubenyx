@@ -17,10 +17,18 @@ let
   # credential dir is flat at the PKI root.
   kubeletPkiDir = if cfg.role == "server" then "${pki}/nodes/${cfg.nodeName}" else pki;
 
-  thisNode = cfg.nodes.${cfg.nodeName} or {
-    address = null;
-    index = 0;
-  };
+  wrap = lib.getExe' cfg.internal.tools "kubenyx-ready";
+  serverCount = lib.length (lib.attrNames (lib.filterAttrs (_: n: n.role == "server") cfg.nodes));
+  # Mesh servers only: single-server kubelet unit text is a drv gate
+  # (cp1w2 byte-identity), and agents dial kubenyx-lb, which fails over —
+  # a local-apiserver gate would be wrong there anyway.
+  meshServer = cfg.role == "server" && serverCount > 1;
+
+  thisNode =
+    cfg.nodes.${cfg.nodeName} or {
+      address = null;
+      index = 0;
+    };
 
   pauseImage = pkgs.callPackage ../pkgs/pause-image.nix { kubernetes = cfg.packages.kubernetes; };
   pauseRef = "kubenyx.local/pause:1";
@@ -279,6 +287,39 @@ in
         coreutils
       ];
       serviceConfig = {
+        # Mesh servers: hold kubelet until the LOCAL apiserver admits
+        # kubelet's own node-informer request. Unordered, kubelet starts
+        # ~4s before the quorum apiserver serves, and client-go's backoff
+        # quantization then bills pure dead air twice: the registration
+        # ladder (attempts at 2.4/2.6/3.0/3.8/5.4/8.6s — apiserver up at
+        # 6.6s means up to ~2s idle before the next rung) and the node
+        # informer's re-list backoff (the node invisible to kubelet's own
+        # lister for ~2.5s AFTER successful registration). Measured 4.5s
+        # p95 on the cp3 bench (quorum-mesh.org phase 3). The gate polls
+        # THE EXACT REQUEST the informer issues — same resource, same
+        # fieldSelector, same client identity — every 10ms, so kubelet's
+        # first attempt lands after the authorizer can admit it and both
+        # backoff ladders never start. Same pattern and rationale as the
+        # kcm extension-apiserver-authentication gate (control-plane.nix).
+        # Single-server unit text unchanged (mkIf drops the attribute).
+        ExecStartPre = lib.mkIf meshServer (
+          lib.concatStringsSep " " [
+            wrap
+            "--wait"
+            "--url"
+            # Raw '=' inside the query value: Go splits each pair at the
+            # FIRST '=' so no encoding is needed — and %XX MUST be avoided
+            # in unit text, systemd eats '%' as a specifier ("Invalid slot",
+            # which silently drops ExecStartPre and deadlocks the boot).
+            "https://127.0.0.1:6443/api/v1/nodes?fieldSelector=metadata.name=${cfg.nodeName}"
+            "--cacert"
+            "${pki}/ca.crt"
+            "--cert"
+            "${kubeletPkiDir}/kubelet.crt"
+            "--key"
+            "${kubeletPkiDir}/kubelet.key"
+          ]
+        );
         ExecStart = lib.concatStringsSep " " (
           map lib.escapeShellArg (
             [
