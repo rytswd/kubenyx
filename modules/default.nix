@@ -45,6 +45,30 @@ let
 
   serverCount = lib.length (lib.attrNames (lib.filterAttrs (_: n: n.role == "server") cfg.nodes));
 
+  # systemd unit providing the datastore for the configured backend —
+  # mirrors control-plane.nix (unit basenames, no .service suffix here).
+  datastoreUnit =
+    {
+      "kine-sqlite" = "kine";
+      "etcd-mem" = "etcd-mem";
+      "etcd" = "etcd";
+    }
+    .${cfg.datastore.backend};
+
+  # Units that announce a boot phase, per role. The list must only name
+  # units this evaluation actually defines: genAttrs on an undefined unit
+  # would conjure an ExecStart-less service. Servers own the datastore,
+  # apiserver and addons applier; every role runs kubelet; coredns exists
+  # only in host DNS mode.
+  phaseMarkerUnits =
+    lib.optionals (cfg.role == "server") [
+      datastoreUnit
+      "kube-apiserver"
+      "kubenyx-addons"
+    ]
+    ++ [ "kubelet" ]
+    ++ lib.optional cfg.dns.enable "coredns";
+
   mkPkgOption =
     name: pkg:
     lib.mkOption {
@@ -132,6 +156,38 @@ in
       coredns = mkPkgOption "coredns" pkgs.coredns;
       kine = mkPkgOption "kine" pkgs.kine;
       etcd = mkPkgOption "etcd" pkgs.etcd_3_6;
+    };
+
+    phaseMarkers = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Emit a `KUBENYX-PHASE <unit> up=<seconds>` line to `device` as
+          each key kubenyx unit comes up (the datastore, kube-apiserver,
+          kubelet, coredns, kubenyx-addons — scoped to the units this
+          role actually runs). Boot-phase attribution for harnesses that
+          only observe the console: systemd stops mirroring unit status
+          once startup "finishes", so without the markers a profiler has
+          to reconstruct phases from journal timestamps after the fact
+          (air/v0.7). Semantics: notify units (the datastore,
+          kube-apiserver, coredns) mark genuine readiness — ExecStartPost
+          runs after READY=1 — while kubelet (Type=simple) and oneshots
+          mark process start/completion. The flake's own microVM guest
+          profile already emits these markers itself; enabling this there
+          duplicates the lines. Default off: the added ExecStartPost is
+          unit text, so the default must contribute nothing (drv gate).
+        '';
+      };
+      device = lib.mkOption {
+        type = lib.types.str;
+        default = "/dev/console";
+        description = ''
+          Where marker lines are written. The default suits serial-console
+          scraping (the common harness transport); point it at
+          `/dev/kmsg` to land markers in dmesg/journal instead.
+        '';
+      };
     };
 
     internal = {
@@ -282,6 +338,15 @@ in
       description = "Kubenyx Kubernetes cluster";
       wantedBy = [ "multi-user.target" ];
     };
+
+    # Phase markers (option above). Marker text matches the microVM guest
+    # profile byte-for-byte so one parser serves both sources. mkIf false
+    # contributes nothing — every default-path unit stays byte-identical.
+    systemd.services = lib.mkIf cfg.phaseMarkers.enable (
+      lib.genAttrs phaseMarkerUnits (name: {
+        serviceConfig.ExecStartPost = "${pkgs.runtimeShell} -c 'echo KUBENYX-PHASE ${name} up=$(cut -d\" \" -f1 /proc/uptime) > ${cfg.phaseMarkers.device}'";
+      })
+    );
 
     systemd.tmpfiles.rules = [
       "d /run/kubenyx 0755 root root -"
