@@ -29,6 +29,24 @@ testScript total 81.6 s — one bring-up plus two full rewinds; resets
 amortize against the ~28 s a full pristine bring-up costs in the plain
 harness check, exactly the D1 economics.
 
+**D1 follow-up — parallel verbs (2026-07-14, same host)**: savevm/loadvm
+now issue concurrently across nodes (each VM's monitor socket is
+independent; one worker thread per machine, shared logger behind a
+lock). The stop-all/cont-all barriers stay serial, so the consistent
+cut is unchanged. `checks.harness-snapshot` re-run green:
+
+| Operation | agent | server | parallel wall | serial-sum equiv |
+|---|---|---|---|---|
+| `savevm` (pristine cut) | 5.83 s | 7.78 s | **7.78 s** | ~13.6 s |
+| `loadvm` #1 | 8.98 s | 12.95 s | **12.96 s** | ~21.9 s |
+| `loadvm` #2 | 8.80 s | 13.27 s | **13.27 s** | ~22.1 s |
+
+testScript total 81.6 → 62.35 s. The wall is max(node), not sum(nodes),
+so this 2-node leg understates the gain: a 5-VM consumer cluster pays
+one slowest-node wall where serial paid five. Drv gate: the plain
+`harness` check drv stayed byte-identical; only `harness-snapshot`
+moved (intended).
+
 **D2 — per-mesh subnets**: `mkCluster { subnet = "10.101.0.0/24"; }`
 derives `kubenyx-br-4c6d` + `kx-4c6d-tN`; live two-mesh smoke ran cp1w2
 (default subnet, MESH-READY 4033 ms) concurrently with a 2-node mesh on

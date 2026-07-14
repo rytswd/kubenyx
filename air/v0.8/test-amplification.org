@@ -137,6 +137,24 @@ amortizes bring-up; it does not make resets free. Consumers whose
 subtests are cheaper than the restore should not use it, and the doc
 for the verb says so.
 
+*Parallel across nodes* (landed 2026-07-14, follow-up): each VM's
+monitor socket is independent, so the per-node =savevm=/=loadvm=
+walls now run concurrently — =ThreadPoolExecutor= in the driver
+defs, one worker per machine, each machine's
+=send_monitor_command= touched only by its own worker, the shared
+driver logger serialized behind a lock. The stop-all/cont-all
+barriers stay serial: they *are* the consistent cut, and only the
+per-node walls between them overlap, so the cut semantics are
+unchanged. Measured on the 2-node dogfood check (4 G VMs, KVM
+host): cut wall *7.78 s* = the slowest node (agent 5.83 / server
+7.78 s savevm) vs a ~13.6 s serial sum; restore walls *12.96 /
+13.27 s* (agent ~8.9, server ~13 s loadvm) vs ~21–22 s serial
+sums; testScript total 81.6 → 62.4 s. Two nodes understate the win
+by construction: the wall tracks max(node), not sum(nodes) — a
+5-VM consumer cluster pays one slowest-node wall where serial paid
+five, so the gain grows with cluster width while the parallel wall
+stays ~flat.
+
 Rejected alternatives:
 - *firecracker-artifact restore under the driver*: the driver has no
   notion of adopting an externally spawned VMM, and =kubenyx-snap=
@@ -229,12 +247,24 @@ Rejected alternative:
   NixOS-test consumers reporting audit results; building the harness
   first would be speculation with a large blast radius.
 - *CI cross-derivation snapshot artifacts* (mint once in CI, restore
-  in every downstream check): hermetically sound — the snapshot is a
-  function of the closure — but economically dead until someone
-  measures the transfer: a cp3 snapshot is 11 GB, cold boot is
-  6.5 s, and 11 GB has to move and land on /dev/shm faster than that
-  to earn its keep. No measurement, no build. DEFERRED pending a
-  transfer bench on real CI plumbing.
+  in every downstream check): REFRAMED 2026-07-14 — the transfer
+  measurement this entry originally demanded has been run, and the
+  economics are a GO, not the blocker. Pre-mutation snapshots are
+  mostly zero pages and compress ~13–14× under zstd; measured
+  transfer lands at ~0.5–0.9 s/GB *landed on /dev/shm*, so an 11 GB
+  cp3 snapshot moves as ~800 MB and lands well inside the budget the
+  6.5 s cold boot sets. The binding blocker is now *CPU identity
+  across heterogeneous build hosts*: D3's exact-match policy is
+  correct precisely because a snapshot silently assumes the minting
+  host's feature set (the XRSTORS #GP history), and a CI fleet is the
+  heterogeneous-host case by construction — an artifact minted on one
+  runner class refuses (correctly) on every other. STILL DEFERRED,
+  new reason: not transfer economics but D3 exact-match, and the
+  unlock is named — firecracker *CPU templates* (mask CPUID at the
+  VMM so the artifact's feature assumptions are pinned to the
+  template, not the minting host), the same unlock the cross-host
+  distribution entry above waits on. When templates land, both doors
+  open together; until then, mint-per-host stands.
 
 * Work plan
 
@@ -275,6 +305,15 @@ Rejected alternative:
       check =tests/harness-snapshot.nix= (2-node, savevm 5.4/7.3 s,
       loadvm 7.6–11.9 s at 4 G; rewind-twice proven); numbers in
       =bench/RESULTS.md= 2026-07-14
+- [X] Parallel snapshot verbs (D1 follow-up) — savevm/loadvm
+      concurrent across nodes, stop/cont barriers serial (cut
+      unchanged); leg re-run green: cut wall 7.78 s ≈ slowest node,
+      restores 12.96/13.27 s vs serial sums ~13.6/21–22 s,
+      testScript 81.6 → 62.4 s (2026-07-14)
+- [X] D4 CI-artifacts entry reframed on new evidence — transfer
+      economics measured GO (~13–14× zstd, ~0.5–0.9 s/GB landed);
+      binding blocker is now D3 CPU exact-match across heterogeneous
+      CI hosts; CPU templates named as the unlock (2026-07-14)
 - [X] lib/microvm.nix subnet parameter (D2) — drv gate recorded and
       verified (default subnet: cp1w2 + all preset scripts
       byte-identical; combined tree re-verified via nix-diff — only

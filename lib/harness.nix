@@ -259,7 +259,10 @@ rec {
       # backdoor shell SURVIVES loadvm (restore is in-process, no channel
       # re-establishment); measured 4-5 s savevm / 7.4 s loadvm for a 3 G
       # VM — a seconds-class verb, never to be conflated with the
-      # milliseconds-class microVM recreation path.
+      # milliseconds-class microVM recreation path. The per-node walls
+      # run CONCURRENTLY across nodes (independent monitor sockets), so
+      # a cut or restore costs ~the slowest node regardless of cluster
+      # width; the stop-all/cont-all barriers around them stay serial.
       #
       # Resumed-state tolerance rule for consumers: wait-for-condition
       # gates (the style waitReady generates) survive a restore; "assert
@@ -269,6 +272,14 @@ rec {
         # ── kubenyx.harness snapshot verbs (air/v0.8/test-amplification.org) ──
         import time as _kubenyx_time
         import contextlib as _kubenyx_contextlib
+        import threading as _kubenyx_threading
+        import concurrent.futures as _kubenyx_futures
+
+        # The driver's log machinery is shared across machines and not
+        # promised thread-safe; every log emitted from a worker thread
+        # goes through this lock. Monitor sockets need no lock — each
+        # machine's socket is touched only by that machine's own worker.
+        _kubenyx_log_lock = _kubenyx_threading.Lock()
 
         def _kubenyx_monitor(machine, cmd):
             out = machine.send_monitor_command(cmd)
@@ -285,10 +296,43 @@ rec {
                     )
             return out
 
+        def _kubenyx_monitor_parallel(ms, verb, tag):
+            """Issue `<verb> <tag>` on every machine concurrently: each
+            VM's monitor socket is independent, so the per-node savevm/
+            loadvm walls overlap and the multi-VM cut costs ~max(node)
+            instead of sum(nodes). The stop-all before and cont-all
+            after (in the callers) stay serial — they are the barriers
+            that make the cut consistent, and this helper never runs
+            outside them. Thread rule: a machine's send_monitor_command
+            is called only from that machine's own worker thread; the
+            shared logger is serialized via _kubenyx_log_lock."""
+            def one(m):
+                t0 = _kubenyx_time.monotonic()
+                _kubenyx_monitor(m, f"{verb} {tag}")
+                dt = _kubenyx_time.monotonic() - t0
+                with _kubenyx_log_lock:
+                    m.log(f"kubenyx: {verb} '{tag}' took {dt:.2f}s")
+
+            t0 = _kubenyx_time.monotonic()
+            with _kubenyx_futures.ThreadPoolExecutor(
+                max_workers=len(ms), thread_name_prefix=f"kubenyx-{verb}"
+            ) as pool:
+                # list() before result(): submit them all, then reap —
+                # result() re-raises the worker's _kubenyx_monitor
+                # exception in the driver thread, failing the test.
+                for f in [pool.submit(one, m) for m in ms]:
+                    f.result()
+            ms[0].log(
+                f"kubenyx: parallel {verb} '{tag}' across {len(ms)} node(s) "
+                f"took {_kubenyx_time.monotonic() - t0:.2f}s"
+            )
+
         def kubenyx_snapshot_all(tag="pristine", nodes=None):
-            """Consistent multi-VM cut: stop all, savevm each, cont all —
-            monotonic clocks freeze together, so guests never observe the
-            pause. Detaches the driver's 9p shares first: virtio-9p attach
+            """Consistent multi-VM cut: stop all, savevm ALL CONCURRENTLY
+            (each monitor socket is independent; cut wall ≈ slowest node,
+            not the sum), cont all — monotonic clocks freeze together, so
+            guests never observe the pause. Detaches the driver's 9p
+            shares first: virtio-9p attach
             installs a QEMU migration blocker and savevm is migration to
             disk; unmounting clunks the fids and lifts it. Policy: call
             AFTER generic bring-up (waitReady), BEFORE any mutation."""
@@ -303,32 +347,21 @@ rec {
                 )
             for m in ms:
                 m.send_monitor_command("stop")
-            for m in ms:
-                t0 = _kubenyx_time.monotonic()
-                _kubenyx_monitor(m, f"savevm {tag}")
-                m.log(
-                    f"kubenyx: savevm '{tag}' took "
-                    f"{_kubenyx_time.monotonic() - t0:.2f}s"
-                )
+            _kubenyx_monitor_parallel(ms, "savevm", tag)
             for m in ms:
                 m.send_monitor_command("cont")
 
         def kubenyx_restore_all(tag="pristine", nodes=None):
-            """Rewind every VM to `tag`: stop all, loadvm each, cont all,
-            then hwclock --hctosys in every guest over the surviving
+            """Rewind every VM to `tag`: stop all, loadvm ALL CONCURRENTLY
+            (restore wall ≈ slowest node, not the sum), cont all, then
+            hwclock --hctosys in every guest over the surviving
             backdoor shell (guest time froze at the snapshot; the emulated
             RTC kept tracking host time). Seconds-class: loadvm loads
             guest RAM eagerly."""
             ms = machines_qemu if nodes is None else nodes
             for m in ms:
                 m.send_monitor_command("stop")
-            for m in ms:
-                t0 = _kubenyx_time.monotonic()
-                _kubenyx_monitor(m, f"loadvm {tag}")
-                m.log(
-                    f"kubenyx: loadvm '{tag}' took "
-                    f"{_kubenyx_time.monotonic() - t0:.2f}s"
-                )
+            _kubenyx_monitor_parallel(ms, "loadvm", tag)
             for m in ms:
                 m.send_monitor_command("cont")
             for m in ms:
