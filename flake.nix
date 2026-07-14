@@ -451,6 +451,12 @@
           # lib.harness dogfood (air/v0.6/harness.org): server + agent
           # stood up exclusively through the exported helper.
           harness = runTest ./tests/harness.nix;
+          # D1 snapshot verbs (air/v0.8/test-amplification.org): the
+          # same 2-node shape with snapshotable = true — savevm cut
+          # after Ready, mutate, loadvm rewind twice; asserts the
+          # mutation is gone AND a fresh post-restore write lands (a
+          # WRITE, not a TLS answer). Seconds-class by design.
+          harness-snapshot = runTest ./tests/harness-snapshot.nix;
           # IPv6 single-stack acceptance legs (ipv6.org §3-4).
           ipv6 = runTest ./tests/ipv6.nix;
           ipv6-multi = runTest ./tests/ipv6-multi.nix;

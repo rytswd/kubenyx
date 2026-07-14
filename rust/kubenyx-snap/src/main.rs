@@ -26,6 +26,12 @@
 //! CWD if needed); the restore VMM's --enable-pci must match the snapshot;
 //! the snapshot must be taken with the snapshot-safe kernel params (AMX/CET
 //! masked) or the restored guest #GPs in XRSTORS on AMX hosts.
+//!
+//! Snapshots carry an identity triple in the snapshot-dir manifest (node
+//! closure, VMM store path, host CPU fingerprint — test-amplification.org
+//! §D3); resume/mesh-resume refuse a mismatching host or VMM before any
+//! process is spawned. --allow-identity-mismatch overrides, loudly. Old
+//! snapshots without identity fields warn and proceed.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
@@ -395,6 +401,274 @@ fn wait_quorum_write(kubeconfig_addr: &str, deadline: Duration) -> bool {
     false
 }
 
+// ---- snapshot identity (test-amplification.org §D3) -------------------------
+//
+// A snapshot is a serialized xsave area, TSC state, and CPUID-shaped kernel
+// structures, written by one exact VMM build. Restoring it under a different
+// CPU feature set has a measured history of guest kernel panics (XRSTORS #GP
+// in restore_fpregs_from_fpstate on AMX hosts, air/v0.2), and a different
+// firecracker build may misparse or refuse the vmstate. take/mesh-take record
+// an identity triple in the snapshot-dir manifest; resume/mesh-resume compare
+// what the live side can know (VMM binary, CPU fingerprint) BEFORE any VMM is
+// spawned and refuse loudly on mismatch. Exact string match on purpose:
+// computing true cross-CPU compatibility is the CPU-template problem (§D4),
+// and a half-right subset check fails exactly like no check — with a guest
+// panic instead of an error message.
+
+/// Feature bits that change the xstate/CPUID shape a snapshot freezes.
+/// Fixed order so the fingerprint is a stable string; presence/absence of
+/// each bit is the lock (the AMX/CET set is the one with a panic history).
+const CPU_FEATURE_WATCHLIST: &[&str] = &[
+    "avx", "avx2", "avx512f", "amx_tile", "amx_bf16", "amx_int8", "xsave", "xsavec", "xsaves",
+    "shstk", "ibt", "pku", "la57",
+];
+
+const IDENTITY_PREFIX: &str = "identity ";
+
+/// What a snapshot is locked to. Fields are Options because not every take
+/// mode can know every field (an attached take never sees the runner path),
+/// and the comparison must skip what either side honestly does not know —
+/// a fabricated "unknown" that string-compares would fake a lock.
+#[derive(Clone, Debug, PartialEq)]
+struct SnapIdentity {
+    /// Node closure: the runner/toplevel store path the guest was built
+    /// from. Recorded for the rebuild-on-drift harness above this tool;
+    /// resume has no closure input of its own to compare against.
+    closure: Option<String>,
+    /// The VMM binary that wrote snap.vmstate (resolved via /proc, so it is
+    /// the real store path, not whatever $PATH spelling spawned it).
+    vmm: Option<String>,
+    /// Host CPU fingerprint: vendor/family/model + watchlist feature bits.
+    cpu: Option<String>,
+}
+
+impl SnapIdentity {
+    fn is_empty(&self) -> bool {
+        self.closure.is_none() && self.vmm.is_none() && self.cpu.is_none()
+    }
+}
+
+fn cpu_fingerprint_from(cpuinfo: &str) -> String {
+    // First processor block only: family/model/flags are uniform across a
+    // socket, and hybrid parts still report one vendor/family/model.
+    let first = cpuinfo.split("\n\n").next().unwrap_or("");
+    let field = |key: &str| -> String {
+        first
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                (k.trim() == key).then(|| v.trim().to_string())
+            })
+            .unwrap_or_else(|| "unknown".into())
+    };
+    let flags = field("flags");
+    let set: std::collections::HashSet<&str> = flags.split_whitespace().collect();
+    let have: Vec<&str> = CPU_FEATURE_WATCHLIST
+        .iter()
+        .copied()
+        .filter(|f| set.contains(f))
+        .collect();
+    format!(
+        "{}/{}/{}+{}",
+        field("vendor_id"),
+        field("cpu family"),
+        field("model"),
+        have.join(",")
+    )
+}
+
+fn cpu_fingerprint() -> String {
+    let raw = std::fs::read_to_string("/proc/cpuinfo")
+        .unwrap_or_else(|e| die(&format!("read /proc/cpuinfo: {e}")));
+    cpu_fingerprint_from(&raw)
+}
+
+/// Identity lines for the manifest: `identity <field> <value>`. Appended
+/// after the node lines so pre-identity parsers of the node section (and
+/// read_manifest itself) keep working on byte-identical prefixes.
+fn identity_lines(id: &SnapIdentity) -> String {
+    [("closure", &id.closure), ("vmm", &id.vmm), ("cpu", &id.cpu)]
+        .iter()
+        .filter_map(|(k, v)| v.as_ref().map(|v| format!("{IDENTITY_PREFIX}{k} {v}\n")))
+        .collect()
+}
+
+fn parse_identity(manifest: &str) -> SnapIdentity {
+    let mut id = SnapIdentity {
+        closure: None,
+        vmm: None,
+        cpu: None,
+    };
+    for line in manifest.lines() {
+        let Some(rest) = line.strip_prefix(IDENTITY_PREFIX) else {
+            continue;
+        };
+        let Some((key, value)) = rest.split_once(' ') else {
+            continue;
+        };
+        let value = Some(value.trim().to_string());
+        match key {
+            "closure" => id.closure = value,
+            "vmm" => id.vmm = value,
+            "cpu" => id.cpu = value,
+            // Future fields: this binary ignores them rather than refusing —
+            // an unknown lock it cannot check is the legacy warning's job.
+            _ => {}
+        }
+    }
+    id
+}
+
+struct IdentityMismatch {
+    field: &'static str,
+    recorded: String,
+    live: String,
+    why: &'static str,
+}
+
+const WHY_CLOSURE: &str = "the snapshot is a booted instance of one exact node closure; \
+     a different closure means the guest inside is not the system being asked for (closure lock)";
+const WHY_VMM: &str = "snap.vmstate is written by and locked to one exact firecracker build; \
+     a different VMM misparses or refuses the device state (VMM version lock)";
+const WHY_CPU: &str = "snap.mem freezes guest xstate/CPUID against the take host's CPU \
+     features; restoring under a different feature set has a measured history of guest \
+     XRSTORS #GP kernel panics (CPU-feature lock)";
+
+/// Field-by-field compare, skipping fields either side does not know.
+fn identity_mismatches(recorded: &SnapIdentity, live: &SnapIdentity) -> Vec<IdentityMismatch> {
+    let mut out = Vec::new();
+    let pairs = [
+        ("closure", &recorded.closure, &live.closure, WHY_CLOSURE),
+        ("vmm", &recorded.vmm, &live.vmm, WHY_VMM),
+        ("cpu", &recorded.cpu, &live.cpu, WHY_CPU),
+    ];
+    for (field, rec, liv, why) in pairs {
+        if let (Some(r), Some(l)) = (rec, liv) {
+            if r != l {
+                out.push(IdentityMismatch {
+                    field,
+                    recorded: r.clone(),
+                    live: l.clone(),
+                    why,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Resolve what `--firecracker` would actually execute: bare names walk
+/// $PATH like the spawn will, then canonicalize so store-path symlink
+/// spellings and the /proc/<pid>/exe form recorded at take compare equal.
+fn resolve_exe(name: &str) -> Option<String> {
+    let path = if name.contains('/') {
+        PathBuf::from(name)
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|d| d.join(name))
+            .find(|p| p.is_file())?
+    };
+    path.canonicalize().ok().map(|p| p.display().to_string())
+}
+
+/// The VMM's true binary via /proc/<pid>/exe — survives $PATH tricks and
+/// wrapper scripts. Only trusted when it IS a firecracker (the runner may
+/// wrap rather than exec-chain, leaving the runner's own pid here).
+fn vmm_exe_of(pid: i32) -> Option<String> {
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let s = exe.display().to_string();
+    s.contains("firecracker").then_some(s)
+}
+
+/// Fallback for wrapped runners and attached/mesh takes: the firecracker
+/// process is findable by its CWD (where its API socket lives), the same
+/// handle kill_mesh_vmms uses on processes someone else spawned.
+fn find_vmm_exe_by_cwd(want: &Path) -> Option<String> {
+    // /proc/<pid>/cwd readlinks are absolute and resolved; match in kind.
+    let want = want.canonicalize().ok()?;
+    for entry in std::fs::read_dir("/proc").ok()?.filter_map(|e| e.ok()) {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        if !comm.trim_end().ends_with("firecracker") {
+            continue;
+        }
+        let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) else {
+            continue;
+        };
+        if cwd == want {
+            return std::fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .map(|p| p.display().to_string());
+        }
+    }
+    None
+}
+
+/// Identity the live host presents at resume time: no closure (resume has
+/// no runner input; drift detection against the closure is the minting
+/// harness's compare), the would-be VMM, this host's CPU.
+fn live_identity(firecracker: &str) -> SnapIdentity {
+    let vmm = resolve_exe(firecracker);
+    if vmm.is_none() {
+        eprintln!(
+            "kubenyx-snap: warning: cannot resolve '{firecracker}' to a binary — \
+             the VMM lock is not verifiable (the spawn below will fail anyway if it is absent)"
+        );
+    }
+    SnapIdentity {
+        closure: None,
+        vmm,
+        cpu: Some(cpu_fingerprint()),
+    }
+}
+
+fn read_snapshot_identity(dir: &Path) -> Option<SnapIdentity> {
+    let raw = std::fs::read_to_string(dir.join("manifest")).ok()?;
+    let id = parse_identity(&raw);
+    (!id.is_empty()).then_some(id)
+}
+
+/// The refusal gate, run before any VMM is spawned. Missing identity is a
+/// warning, not an error: pre-identity snapshots keep resuming (compat),
+/// they just do so unverified.
+fn enforce_identity(snapshot: &Path, firecracker: &str, allow_mismatch: bool) {
+    let Some(recorded) = read_snapshot_identity(snapshot) else {
+        eprintln!(
+            "kubenyx-snap: warning: {} has no identity fields in its manifest \
+             (pre-identity snapshot) — the CPU-feature and VMM locks cannot be \
+             verified; proceeding",
+            snapshot.display()
+        );
+        return;
+    };
+    let mismatches = identity_mismatches(&recorded, &live_identity(firecracker));
+    if mismatches.is_empty() {
+        return;
+    }
+    for m in &mismatches {
+        eprintln!(
+            "kubenyx-snap: identity mismatch: {}\n  recorded: {}\n  live:     {}\n  fatal because {}",
+            m.field, m.recorded, m.live, m.why
+        );
+    }
+    if allow_mismatch {
+        eprintln!(
+            "kubenyx-snap: WARNING: --allow-identity-mismatch set — proceeding against \
+             {} identity mismatch(es); a guest kernel panic or silently corrupt restore \
+             is the expected failure mode here, not a bug to report",
+            mismatches.len()
+        );
+    } else {
+        die(
+            "snapshot identity mismatch (fields above) — snapshots never move between \
+             hosts or VMM builds; mint a fresh snapshot on this host, or pass \
+             --allow-identity-mismatch to proceed anyway",
+        );
+    }
+}
+
 // ---- subcommands ------------------------------------------------------------
 
 struct Flags(Vec<String>);
@@ -497,7 +771,31 @@ fn cmd_take(flags: &Flags) {
         out.display()
     );
 
+    // Identity (§D3) while the VMM is still alive: the runner usually
+    // exec-chains into firecracker (same pid), else find it by CWD (it
+    // dropped kubenyx.sock here).
     let vm_pid = vm.id() as i32;
+    let identity = SnapIdentity {
+        closure: PathBuf::from(&runner)
+            .canonicalize()
+            .ok()
+            .map(|p| p.display().to_string()),
+        vmm: vmm_exe_of(vm_pid).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|d| find_vmm_exe_by_cwd(&d))
+        }),
+        cpu: Some(cpu_fingerprint()),
+    };
+    if identity.vmm.is_none() {
+        eprintln!(
+            "take: warning: could not identify the VMM binary — resume will not \
+             verify the VMM lock for this snapshot"
+        );
+    }
+    std::fs::write(out.join("manifest"), identity_lines(&identity))
+        .unwrap_or_else(|e| die(&format!("write manifest: {e}")));
+
     kill_wait(&mut vm); // frees the tap for future resumes
     disown_vmm(vm_pid);
     let _ = std::fs::remove_file(&sock);
@@ -530,6 +828,29 @@ fn cmd_take_attached(flags: &Flags) {
     let t = Instant::now();
     api_expect(&sock, "PUT", "/snapshot/create", &body);
     api_expect(&sock, "PATCH", "/vm", r#"{"state":"Resumed"}"#);
+
+    // Identity (§D3): the attached VM's closure is its operator's knowledge,
+    // not ours (no runner path in sight) — record what this side can prove.
+    // The VMM binds its API socket relative to its own CWD, so the socket's
+    // directory is the CWD to scan for.
+    let identity = SnapIdentity {
+        closure: None,
+        vmm: sock
+            .canonicalize()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .and_then(|d| find_vmm_exe_by_cwd(&d)),
+        cpu: Some(cpu_fingerprint()),
+    };
+    if identity.vmm.is_none() {
+        eprintln!(
+            "take: warning: could not identify the VMM binary — resume will not \
+             verify the VMM lock for this snapshot"
+        );
+    }
+    std::fs::write(out.join("manifest"), identity_lines(&identity))
+        .unwrap_or_else(|e| die(&format!("write manifest: {e}")));
+
     eprintln!(
         "take: snapshot written in {:?} -> {} (source VM resumed and still owns the tap; \
          stop it before `kubenyx-snap resume`)",
@@ -633,6 +954,12 @@ fn resume_flags(flags: &Flags) -> (String, PathBuf, PathBuf, String, String, boo
         .get("--poke")
         .unwrap_or_else(|| "10.100.0.2:10123".into());
     let enable_pci = !flags.has("--no-pci");
+    // Identity gate (§D3) before anything is spawned.
+    enforce_identity(
+        &snapshot,
+        &firecracker,
+        flags.has("--allow-identity-mismatch"),
+    );
     (
         firecracker,
         snapshot,
@@ -950,10 +1277,13 @@ fn mesh_nodes(
     nodes
 }
 
-fn write_manifest(out: &Path, nodes: &[MeshNode]) {
+fn write_manifest(out: &Path, nodes: &[MeshNode], identity: &SnapIdentity) {
+    // Node lines first, byte-identical to the pre-identity format; the
+    // identity lines (§D3) append after them.
     let body: String = nodes
         .iter()
         .map(|n| format!("{} {}\n", n.name, n.ip))
+        .chain(std::iter::once(identity_lines(identity)))
         .collect();
     std::fs::write(out.join("manifest"), body)
         .unwrap_or_else(|e| die(&format!("write manifest: {e}")));
@@ -962,8 +1292,9 @@ fn write_manifest(out: &Path, nodes: &[MeshNode]) {
 fn read_manifest(dir: &Path) -> Vec<MeshNode> {
     let data = std::fs::read_to_string(dir.join("manifest"))
         .unwrap_or_else(|e| die(&format!("read {}/manifest: {e}", dir.display())));
-    data.lines()
-        .filter(|l| !l.trim().is_empty())
+    let nodes: Vec<MeshNode> = data
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with(IDENTITY_PREFIX))
         .map(|l| {
             let (name, ip) = l
                 .split_once(' ')
@@ -973,7 +1304,16 @@ fn read_manifest(dir: &Path) -> Vec<MeshNode> {
                 ip: ip.into(),
             }
         })
-        .collect()
+        .collect();
+    if nodes.is_empty() {
+        // Single-VM snapshot dirs now carry an identity-only manifest; a
+        // mesh verb pointed at one should say so, not index-panic later.
+        die(&format!(
+            "{}/manifest has no node lines — not a mesh snapshot",
+            dir.display()
+        ));
+    }
+    nodes
 }
 
 /// Kill the mesh's VMMs by workdir: each node's firecracker runs with
@@ -1068,7 +1408,24 @@ fn cmd_mesh_take(flags: &Flags) {
     for h in handles {
         h.join().unwrap_or_else(|_| die("snapshot thread panicked"));
     }
-    write_manifest(&out, &nodes);
+    // Identity (§D3) before the kill below erases the evidence: the
+    // launcher spawned every node from one eval, so the first node's VMM
+    // speaks for the mesh. Closure stays unknown — the launcher holds the
+    // eval, this tool only sees run dirs and API sockets.
+    let identity = SnapIdentity {
+        closure: None,
+        vmm: nodes
+            .iter()
+            .find_map(|n| find_vmm_exe_by_cwd(&run_dir.join(&n.name))),
+        cpu: Some(cpu_fingerprint()),
+    };
+    if identity.vmm.is_none() {
+        eprintln!(
+            "mesh-take: warning: could not identify the VMM binary — mesh-resume \
+             will not verify the VMM lock for this snapshot"
+        );
+    }
+    write_manifest(&out, &nodes, &identity);
     eprintln!(
         "mesh-take: all snapshots written in {:.1}s",
         t_snap.elapsed().as_secs_f64()
@@ -1212,6 +1569,12 @@ fn mesh_resume_flags(flags: &Flags) -> (PathBuf, Vec<MeshNode>, String, bool) {
         .get("--firecracker")
         .unwrap_or_else(|| "firecracker".into());
     let enable_pci = !flags.has("--no-pci");
+    // Identity gate (§D3) before anything is spawned.
+    enforce_identity(
+        &snapshot,
+        &firecracker,
+        flags.has("--allow-identity-mismatch"),
+    );
     (snapshot, nodes, firecracker, enable_pci)
 }
 
@@ -1424,6 +1787,130 @@ mod tests {
         // Single-server keeps today's behavior: no manifest, no gate.
         assert!(assert_volatile_mesh_take(1, None).is_ok());
         assert!(assert_volatile_mesh_take(0, None).is_ok());
+    }
+
+    // ---- snapshot identity (§D3) --------------------------------------------
+
+    const CPUINFO: &str = "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\n\
+        model\t\t: 143\nmodel name\t: Xeon\nflags\t\t: fpu avx xsave amx_tile avx2 la57\n\n\
+        processor\t: 1\nvendor_id\t: GenuineIntel\n";
+
+    #[test]
+    fn cpu_fingerprint_is_stable_watchlist_order() {
+        // Watchlist order, not /proc flag order (avx2 listed after amx_tile
+        // in the input, before it in the fingerprint).
+        assert_eq!(
+            cpu_fingerprint_from(CPUINFO),
+            "GenuineIntel/6/143+avx,avx2,amx_tile,xsave,la57"
+        );
+        // A feature-set delta IS an identity delta.
+        let no_amx = CPUINFO.replace(" amx_tile", "");
+        assert_eq!(
+            cpu_fingerprint_from(&no_amx),
+            "GenuineIntel/6/143+avx,avx2,xsave,la57"
+        );
+        // Degenerate input still yields a comparable string, not a panic.
+        assert_eq!(cpu_fingerprint_from(""), "unknown/unknown/unknown+");
+    }
+
+    fn full_identity() -> SnapIdentity {
+        SnapIdentity {
+            closure: Some("/nix/store/aaa-microvm-run".into()),
+            vmm: Some("/nix/store/bbb-firecracker/bin/firecracker".into()),
+            cpu: Some("GenuineIntel/6/143+avx,avx2".into()),
+        }
+    }
+
+    #[test]
+    fn identity_round_trips_through_manifest_lines() {
+        let id = full_identity();
+        assert_eq!(parse_identity(&identity_lines(&id)), id);
+        // Partial identity (attached take: no closure) round-trips too, and
+        // absent fields stay absent rather than becoming empty strings.
+        let partial = SnapIdentity {
+            closure: None,
+            ..full_identity()
+        };
+        let lines = identity_lines(&partial);
+        assert!(!lines.contains("closure"));
+        assert_eq!(parse_identity(&lines), partial);
+    }
+
+    #[test]
+    fn legacy_manifest_has_no_identity() {
+        // Pre-identity mesh manifest: node lines only -> warn-and-proceed
+        // path (read_snapshot_identity returns None via is_empty).
+        let legacy = "server1 10.100.0.2\nserver2 10.100.0.3\nagent1 10.100.0.5\n";
+        assert!(parse_identity(legacy).is_empty());
+        // Unknown future identity fields are ignored, not misparsed.
+        assert!(parse_identity("identity tsc_khz 2100000\n").is_empty());
+    }
+
+    #[test]
+    fn identity_match_and_mismatch() {
+        let rec = full_identity();
+        // Exact match: nothing to refuse.
+        assert!(identity_mismatches(&rec, &rec).is_empty());
+        // Resume's live identity never knows the closure: skipped, and the
+        // two live-comparable locks pass.
+        let live = SnapIdentity {
+            closure: None,
+            ..full_identity()
+        };
+        assert!(identity_mismatches(&rec, &live).is_empty());
+        // CPU drift names the cpu field (feature lock).
+        let other_cpu = SnapIdentity {
+            cpu: Some("GenuineIntel/6/143+avx,avx2,amx_tile".into()),
+            ..live.clone()
+        };
+        let m = identity_mismatches(&rec, &other_cpu);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].field, "cpu");
+        assert_eq!(m[0].recorded, "GenuineIntel/6/143+avx,avx2");
+        assert_eq!(m[0].live, "GenuineIntel/6/143+avx,avx2,amx_tile");
+        // VMM drift names the vmm field (version lock); both at once report both.
+        let other_vmm = SnapIdentity {
+            vmm: Some("/nix/store/ccc-firecracker/bin/firecracker".into()),
+            ..other_cpu
+        };
+        let m = identity_mismatches(&rec, &other_vmm);
+        let fields: Vec<&str> = m.iter().map(|x| x.field).collect();
+        assert_eq!(fields, ["vmm", "cpu"]);
+        // A field the SNAPSHOT does not carry is not enforceable either.
+        let rec_no_vmm = SnapIdentity {
+            vmm: None,
+            ..full_identity()
+        };
+        assert!(identity_mismatches(&rec_no_vmm, &other_vmm)
+            .iter()
+            .all(|x| x.field != "vmm"));
+    }
+
+    #[test]
+    fn mesh_manifest_keeps_nodes_and_identity_apart() {
+        let dir = std::env::temp_dir().join(format!("kubenyx-snap-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let nodes = vec![
+            MeshNode {
+                name: "server1".into(),
+                ip: "10.100.0.2".into(),
+            },
+            MeshNode {
+                name: "agent1".into(),
+                ip: "10.100.0.5".into(),
+            },
+        ];
+        write_manifest(&dir, &nodes, &full_identity());
+        let raw = std::fs::read_to_string(dir.join("manifest")).unwrap();
+        // Node section byte-identical to the pre-identity format, first.
+        assert!(raw.starts_with("server1 10.100.0.2\nagent1 10.100.0.5\nidentity "));
+        // Round trip: nodes unpolluted by identity lines, identity intact.
+        let back = read_manifest(&dir);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].name, "server1");
+        assert_eq!(back[1].ip, "10.100.0.5");
+        assert_eq!(read_snapshot_identity(&dir), Some(full_identity()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

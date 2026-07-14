@@ -5,6 +5,14 @@
 # wrapper). Reachable as flake `lib.harness` AND as a plain
 #   import <kubenyx>/lib/harness.nix { inherit lib; }
 # — no flakes required; the module tree is referenced by relative path.
+#
+# v0.8 (air/v0.8/test-amplification.org D1) adds opt-in snapshot verbs:
+# mkCluster { snapshotable = true; } wires the nodes for in-driver QEMU
+# savevm/loadvm and folds kubenyx_snapshot_all / kubenyx_restore_all /
+# kubenyx_fresh_subtest into driverDefs. Reset-to-pristine costs
+# SECONDS (loadvm loads guest RAM eagerly), not the milliseconds of the
+# microVM snapshot path — it amortizes bring-up across subtests; it
+# does not make resets free.
 { lib }:
 let
   klib = import ./. { inherit lib; };
@@ -37,6 +45,17 @@ rec {
       defaults ? { },
       # Extra NixOS modules applied to every member.
       extraModules ? [ ],
+      # In-driver QEMU snapshot support (air/v0.8/test-amplification.org
+      # D1): savevm refuses VMs whose store rides 9p (un-snapshottable
+      # backend), so this flips the nodes onto useNixStoreImage with
+      # readonly=on on the store drive (readonly drives are exempt from
+      # the snapshot set; the driver's qcow2 root disk carries the
+      # vmstate), and folds the snapshot verbs into driverDefs. The
+      # snapshot point policy is fixed, not configurable: cut AFTER
+      # generic bring-up (waitReady complete), BEFORE any per-test
+      # mutation. Default off — at `false` every generated node and
+      # Python string is byte-identical to the pre-v0.8 output.
+      snapshotable ? false,
     }:
     let
       v6 = clusterCidr != null && klib.isV6 clusterCidr;
@@ -176,8 +195,155 @@ rec {
             # Kubenyx must work with the firewall on; keep the tests
             # honest by default.
             { networking.firewall.enable = lib.mkDefault true; }
+            # Snapshotable wiring (D1): savevm demands every writable
+            # block device be snapshot-capable. The store comes off 9p
+            # onto a raw erofs drive marked readonly=on — readonly
+            # drives are exempt — and the vmstate lands in the qcow2
+            # root disk. Guarded like the sizing block: only where the
+            # qemu-vm options exist.
+            (lib.optionalAttrs (snapshotable && options ? virtualisation.useNixStoreImage) {
+              virtualisation.useNixStoreImage = true;
+              # qemu-vm.nix renders `virtualisation.qemu.drives` as a
+              # plain list — no per-entry merge — so readonly=on can
+              # only reach the store drive by forcing the whole list.
+              # Mirrors the stock root + nix-store entries (nixpkgs
+              # nixos/modules/virtualisation/qemu-vm.nix) byte-for-byte
+              # in rendered flags, plus the one readonly.
+              virtualisation.qemu.drives = lib.mkForce [
+                {
+                  name = "root";
+                  file = ''"$NIX_DISK_IMAGE"'';
+                  driveExtraOpts = {
+                    cache = "writeback";
+                    werror = "report";
+                  };
+                  deviceExtraOpts = {
+                    bootindex = "1";
+                    serial = "root";
+                  };
+                }
+                {
+                  name = "nix-store";
+                  file = ''"$TMPDIR"/store.img'';
+                  driveExtraOpts = {
+                    format = "raw";
+                    readonly = "on";
+                  };
+                  deviceExtraOpts.bootindex = "2";
+                }
+              ];
+              assertions = [
+                {
+                  assertion = config.virtualisation.emptyDiskImages == [ ];
+                  message = ''
+                    kubenyx.harness: snapshotable forces the qemu drive list (the
+                    store drive must carry readonly=on for savevm), which would
+                    silently drop virtualisation.emptyDiskImages entries. Extend
+                    the forced list in lib/harness.nix or disable snapshotable.'';
+                }
+                {
+                  assertion = config.virtualisation.diskImage != null;
+                  message = ''
+                    kubenyx.harness: snapshotable needs the driver's qcow2 root
+                    disk — savevm writes the VM state there. diskImage = null
+                    leaves no snapshot-capable device.'';
+                }
+              ];
+            })
           ];
         };
+
+      # Snapshot verbs (air/v0.8/test-amplification.org D1), folded into
+      # driverDefs when snapshotable and exported standalone as
+      # snapshotDefs. Verified mechanics (2026-07-14): the driver's
+      # backdoor shell SURVIVES loadvm (restore is in-process, no channel
+      # re-establishment); measured 4-5 s savevm / 7.4 s loadvm for a 3 G
+      # VM — a seconds-class verb, never to be conflated with the
+      # milliseconds-class microVM recreation path.
+      #
+      # Resumed-state tolerance rule for consumers: wait-for-condition
+      # gates (the style waitReady generates) survive a restore; "assert
+      # event observed since boot" style does not. Subtests cheaper than
+      # one restore should not use these verbs at all.
+      snapshotPython = ''
+        # ── kubenyx.harness snapshot verbs (air/v0.8/test-amplification.org) ──
+        import time as _kubenyx_time
+        import contextlib as _kubenyx_contextlib
+
+        def _kubenyx_monitor(machine, cmd):
+            out = machine.send_monitor_command(cmd)
+            lowered = out.lower()
+            # HMP reports failure as prose, not a status code; savevm's
+            # classic refusals ("is writable but does not support
+            # snapshots", "Error: ...", "Device ... not found") must not
+            # scroll past silently. Keep snapshot tags free of these words.
+            for needle in ("error", "failed", "does not support", "not found"):
+                if needle in lowered:
+                    raise Exception(
+                        f"kubenyx.harness: monitor command {cmd!r} on "
+                        f"{machine.name} failed: {out}"
+                    )
+            return out
+
+        def kubenyx_snapshot_all(tag="pristine", nodes=None):
+            """Consistent multi-VM cut: stop all, savevm each, cont all —
+            monotonic clocks freeze together, so guests never observe the
+            pause. Detaches the driver's 9p shares first: virtio-9p attach
+            installs a QEMU migration blocker and savevm is migration to
+            disk; unmounting clunks the fids and lifts it. Policy: call
+            AFTER generic bring-up (waitReady), BEFORE any mutation."""
+            # machines_qemu, not machines: the driver types the latter
+            # list[BaseMachine], and send_monitor_command exists only on
+            # QemuMachine (savevm is a QEMU-only verb anyway).
+            ms = machines_qemu if nodes is None else nodes
+            for m in ms:
+                m.succeed(
+                    "for d in /tmp/shared /tmp/xchg /etc/ssl/certs; do "
+                    "if mountpoint -q $d; then umount $d; fi; done"
+                )
+            for m in ms:
+                m.send_monitor_command("stop")
+            for m in ms:
+                t0 = _kubenyx_time.monotonic()
+                _kubenyx_monitor(m, f"savevm {tag}")
+                m.log(
+                    f"kubenyx: savevm '{tag}' took "
+                    f"{_kubenyx_time.monotonic() - t0:.2f}s"
+                )
+            for m in ms:
+                m.send_monitor_command("cont")
+
+        def kubenyx_restore_all(tag="pristine", nodes=None):
+            """Rewind every VM to `tag`: stop all, loadvm each, cont all,
+            then hwclock --hctosys in every guest over the surviving
+            backdoor shell (guest time froze at the snapshot; the emulated
+            RTC kept tracking host time). Seconds-class: loadvm loads
+            guest RAM eagerly."""
+            ms = machines_qemu if nodes is None else nodes
+            for m in ms:
+                m.send_monitor_command("stop")
+            for m in ms:
+                t0 = _kubenyx_time.monotonic()
+                _kubenyx_monitor(m, f"loadvm {tag}")
+                m.log(
+                    f"kubenyx: loadvm '{tag}' took "
+                    f"{_kubenyx_time.monotonic() - t0:.2f}s"
+                )
+            for m in ms:
+                m.send_monitor_command("cont")
+            for m in ms:
+                m.succeed("hwclock --hctosys")
+
+        @_kubenyx_contextlib.contextmanager
+        def kubenyx_fresh_subtest(name, tag="pristine", nodes=None):
+            """Subtest that starts from genuinely virgin state: restore
+            the pristine snapshot, then run the body under subtest(name).
+            A retried subtest restores again — retry-from-pristine instead
+            of hoping cleanup was complete."""
+            kubenyx_restore_all(tag, nodes)
+            with subtest(name):
+                yield
+      '';
 
       driverDefs = ''
         # ── kubenyx.harness driver helpers (air/v0.6/harness.org) ────────
@@ -245,7 +411,25 @@ rec {
             server.wait_until_succeeds(
                 "kubectl -n default get serviceaccount default", timeout=600
             )
-      '';
+      ''
+      # Additive fold: at snapshotable = false the concatenation is the
+      # identity, keeping driverDefs (and every existing consumer's
+      # testScript, and with it the check drv) byte-identical.
+      + lib.optionalString snapshotable snapshotPython;
+
+      # The verbs standalone, for consumers that assemble their own
+      # driver Python instead of using driverDefs/waitReady. Gated at
+      # eval: without the snapshotable node wiring, savevm refuses the
+      # store-over-9p backend at runtime — fail loud and early instead.
+      snapshotDefs =
+        if snapshotable then
+          snapshotPython
+        else
+          throw ''
+            kubenyx.harness: snapshotDefs requires mkCluster { snapshotable = true; } —
+            without it the nix store rides 9p, which QEMU savevm refuses
+            (un-snapshottable backend). snapshotable moves the store to a
+            readonly raw drive and sizes the drive list for savevm.'';
 
       serverVar = pyVar primaryServer;
 
@@ -286,6 +470,7 @@ rec {
       nodes = lib.mapAttrs mkNodeModule checkedMembers;
       inherit
         driverDefs
+        snapshotDefs
         waitReady
         serverVar
         pyVar

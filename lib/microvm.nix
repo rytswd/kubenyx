@@ -29,6 +29,34 @@
   baseModules,
 }:
 rec {
+  # Per-mesh subnet threading (air/v0.8, D2): every 10.100.0.x constant on
+  # the mesh path flows from this one derivation. /24 only — mkGuestNet
+  # renders "<address>/24" and the index→last-octet math assumes exactly
+  # one octet of room. The default subnet MUST keep the historical names
+  # ("kubenyx-br0", "kubenyx-tapN") so every existing drv and launcher
+  # script stays byte-identical; any other subnet gets a short stable
+  # hash tag so two meshes on different subnets hold distinct bridge and
+  # tap families on one host and their launchers stop colliding.
+  # IFNAMSIZ caps interface names at 15 chars: "kubenyx-br-XXXX" is
+  # exactly 15, taps go "kx-XXXX-tN" (12 at the 254-node ceiling).
+  defaultSubnet = "10.100.0.0/24";
+  subnetFor =
+    subnet:
+    let
+      octets = builtins.match "([0-9]+\\.[0-9]+\\.[0-9]+)\\.0/24" subnet;
+    in
+    assert lib.assertMsg (
+      octets != null
+    ) "kubenyx.lib.microvm: subnet must be an a.b.c.0/24 CIDR, got ${subnet}";
+    rec {
+      isDefault = subnet == defaultSubnet;
+      prefix = lib.head octets;
+      gateway = "${prefix}.1";
+      tag = lib.substring 0 4 (builtins.hashString "sha256" subnet);
+      bridge = if isDefault then "kubenyx-br0" else "kubenyx-br-${tag}";
+      tapPrefix = if isDefault then "kubenyx-tap" else "kx-${tag}-t";
+    };
+
   mkMicrovm =
     hypervisor: extra:
     nixosSystem {
@@ -76,12 +104,14 @@ rec {
     {
       servers ? 1,
       agents,
+      subnet ? defaultSubnet,
     }:
     assert lib.assertMsg (servers >= 1) "kubenyx.lib.microvm: a mesh needs at least one server";
     assert lib.assertMsg (2 + servers + agents <= 254) ''
       kubenyx.lib.microvm: ${toString servers} servers + ${toString agents} agents
-      do not fit the 10.100.0.0/24 host bridge (guest addresses start at .2).'';
+      do not fit the ${subnet} host bridge (guest addresses start at .2).'';
     let
+      sn = subnetFor subnet;
       # servers == 1 keeps the single name "server": cp1w2/cp1w6 node
       # names, taps, MACs and addresses — and therefore their drvs — stay
       # byte-identical (quorum-mesh.org §D5, hard requirement).
@@ -89,14 +119,14 @@ rec {
         i:
         lib.nameValuePair (if servers == 1 then "server" else "server${toString i}") {
           index = i - 1;
-          address = "10.100.0.${toString (1 + i)}";
+          address = "${sn.prefix}.${toString (1 + i)}";
           role = "server";
         };
       agentFor =
         i:
         lib.nameValuePair "agent${toString i}" {
           index = servers + i - 1;
-          address = "10.100.0.${toString (1 + servers + i)}";
+          address = "${sn.prefix}.${toString (1 + servers + i)}";
           role = "agent";
         };
     in
@@ -114,9 +144,11 @@ rec {
     {
       members,
       joinProbeSec ? 3,
+      subnet ? defaultSubnet,
     }:
     name:
     let
+      sn = subnetFor subnet;
       n = members.${name};
       # Derived from the membership itself (not a caller flag) so mkNode
       # stays a pure function of its inputs — the same gate the modules
@@ -129,11 +161,11 @@ rec {
         (mkGuestNet {
           interface = {
             type = "tap";
-            id = "kubenyx-tap${toString n.index}";
+            id = "${sn.tapPrefix}${toString n.index}";
           };
           inherit mac;
           address = n.address;
-          gateway = "10.100.0.1";
+          gateway = sn.gateway;
         })
       ];
       networking.hostName = name;
@@ -146,6 +178,12 @@ rec {
       ];
       kubenyx = {
         nodes = members;
+        # The guest profile trusts this address for the kubeconfig handoff,
+        # the clockstep pokes and the launcher CA channel. The option's
+        # default equals the default subnet's gateway, so setting it here is
+        # a rendered no-op on the default subnet (byte-identity) and the
+        # actual fix on every other one.
+        hostGateway = sn.gateway;
       }
       // lib.optionalAttrs (n.role == "agent") (
         {
@@ -176,7 +214,10 @@ rec {
   # resolves peers by ARP, and kubenyx-routes points peer pod /24s
   # `via` peer node addresses. Separate unbridged taps cannot
   # provide that, so the launcher enslaves the per-node taps into
-  # one host bridge (kubenyx-br0) holding the 10.100.0.1/24 gateway.
+  # one host bridge per subnet (kubenyx-br0 on the default) holding
+  # the subnet's .1 gateway. Meshes on DIFFERENT subnets get distinct
+  # bridge + tap families and coexist on one host; two meshes on the
+  # SAME subnet remain exclusive (the launcher guard enforces it).
   # Consequence: on a shared L2 a compromised guest could spoof
   # another agent's source address, so the per-agent IPAddressAllow
   # on the credential handoff sockets is advisory here, not a
@@ -195,18 +236,20 @@ rec {
       # the 15-vs-3 cold-wall A/B is still pending, and the value is only
       # rendered for servers > 1 — single-server drvs never see it.
       joinProbeSec ? 3,
+      subnet ? defaultSubnet,
       name ? "kubenyx-cluster",
       runDir ? "/tmp/${name}",
     }:
     let
+      sn = subnetFor subnet;
       multiServer = servers > 1;
-      members = mkMembers { inherit servers agents; };
+      members = mkMembers { inherit servers agents subnet; };
       bootOrder = bootOrderFor members;
       nodes = lib.genAttrs bootOrder (mkNode {
-        inherit members joinProbeSec;
+        inherit members joinProbeSec subnet;
       });
       runners = lib.mapAttrs (_: node: node.config.microvm.declaredRunner) nodes;
-      tapFor = n: "kubenyx-tap${toString members.${n}.index}";
+      tapFor = n: "${sn.tapPrefix}${toString members.${n}.index}";
       # Every server serves its own address-pinned admin kubeconfig on
       # :10124 (quorum-mesh.org §D7): print one curl per server — on
       # server loss, re-curl a survivor. In boot order, so servers == 1
@@ -255,7 +298,7 @@ rec {
           ''sudo ${iptablesBin} -I INPUT 1 -i "$BR" -p tcp --dport 10123 -j ACCEPT''
           ''echo "${name}: minting the per-run CA bundle"''
           ''${kubenyxPki} mint-ca --out "$RUN/ca-bundle"''
-          ''${kubenyxPki} serve --dir "$RUN/ca-bundle" --listen 10.100.0.1:10123 --count ${toString servers} > "$RUN/ca-serve.log" 2>&1 &''
+          ''${kubenyxPki} serve --dir "$RUN/ca-bundle" --listen ${sn.gateway}:10123 --count ${toString servers} > "$RUN/ca-serve.log" 2>&1 &''
           "ca_pid=$!"
           ""
           ""
@@ -314,28 +357,142 @@ rec {
       # fewer than N servers fetched — the still-listening serve process.
       caShutdown = lib.optionalString multiServer (
         lib.concatStringsSep "\n" [
-          "sudo ${iptablesBin} -D INPUT -i kubenyx-br0 -p tcp --dport 10123 -j ACCEPT 2>/dev/null || true"
+          "sudo ${iptablesBin} -D INPUT -i ${sn.bridge} -p tcp --dport 10123 -j ACCEPT 2>/dev/null || true"
           ''pkill -f "kubenyx-pki serve --dir $RUN/ca-bundle" 2>/dev/null || true''
           ''rm -rf "$RUN/ca-bundle"''
           ""
         ]
       );
 
+      # ---- per-subnet process scoping (air/v0.8, D2) ------------------------
+      # The four fragments below exist in two flavors. Default subnet: the
+      # historical GLOBAL text, byte-for-byte (the cp1/cp3 launcher scripts
+      # are drv-identity gates). Any other subnet: per-mesh scoping, because
+      # global pgrep/pkill would see — and kill — a concurrently running
+      # default-subnet mesh. Two facts make precise scoping possible:
+      # every VMM is exec'd with cwd $RUN/<node> (firecracker's API socket
+      # is a relative path), so /proc/<pid>/cwd is a per-mesh identity that
+      # argv[0] (microvm@<node>, the SAME names in every mesh) cannot
+      # provide; and a tap interface reports LOWER_UP exactly while a VMM
+      # holds it, so the launch guard can check this mesh's own tap family
+      # instead of `pgrep -x firecracker`.
+      vmGuard =
+        if sn.isDefault then
+          ''
+            if pgrep -x firecracker >/dev/null 2>&1; then
+              echo "${name}: a firecracker VM is already running — the kubenyx tap family is exclusive; run ${name}-down (or kill it) first" >&2
+              exit 1
+            fi''
+        else
+          ''
+            for tap in ${lib.concatMapStringsSep " " tapFor bootOrder}; do
+              if ip link show "$tap" 2>/dev/null | grep -q LOWER_UP; then
+                echo "${name}: $tap is busy (a VMM is attached) — the ${sn.bridge} tap family is exclusive; run ${name}-down (or kill the holder) first" >&2
+                exit 1
+              fi
+            done'';
+      vmStopAll =
+        if sn.isDefault then
+          "pkill -x firecracker 2>/dev/null || true"
+        else
+          lib.concatStringsSep "\n  " [
+            "for pid in $(pgrep -f '^microvm@' 2>/dev/null); do"
+            "  case \"$(readlink /proc/$pid/cwd 2>/dev/null)\" in \"$RUN\"/*) kill \"$pid\" 2>/dev/null || true ;; esac"
+            "done"
+          ];
+      stopNodeFn =
+        if sn.isDefault then
+          ''
+            stop_node() {
+              node=$1
+              pgrep -f "^microvm@$node" >/dev/null 2>&1 || return 0
+              echo "${name}-down: $node"
+              if [ -S "$RUN/$node/$node.sock" ]; then
+                curl -s --max-time 3 --unix-socket "$RUN/$node/$node.sock" \
+                  -X PUT http://localhost/actions \
+                  -d '{ "action_type": "SendCtrlAltDel" }' >/dev/null 2>&1 || true
+              fi
+              for _ in $(seq 1 25); do
+                pgrep -f "^microvm@$node" >/dev/null 2>&1 || return 0
+                sleep 0.2
+              done
+              pkill -TERM -f "^microvm@$node" 2>/dev/null || true
+              for _ in $(seq 1 25); do
+                pgrep -f "^microvm@$node" >/dev/null 2>&1 || return 0
+                sleep 0.2
+              done
+              pkill -KILL -f "^microvm@$node" 2>/dev/null || true
+            }''
+        else
+          ''
+            node_pid() {
+              for pid in $(pgrep -f "^microvm@$1" 2>/dev/null); do
+                if [ "$(readlink /proc/$pid/cwd 2>/dev/null)" = "$RUN/$1" ]; then
+                  echo "$pid"
+                  return 0
+                fi
+              done
+              return 1
+            }
+            mesh_pids() {
+              for pid in $(pgrep -f '^microvm@' 2>/dev/null); do
+                case "$(readlink /proc/$pid/cwd 2>/dev/null)" in "$RUN"/*) echo "$pid" ;; esac
+              done
+            }
+            stop_node() {
+              node=$1
+              node_pid "$node" >/dev/null || return 0
+              echo "${name}-down: $node"
+              if [ -S "$RUN/$node/$node.sock" ]; then
+                curl -s --max-time 3 --unix-socket "$RUN/$node/$node.sock" \
+                  -X PUT http://localhost/actions \
+                  -d '{ "action_type": "SendCtrlAltDel" }' >/dev/null 2>&1 || true
+              fi
+              for _ in $(seq 1 25); do
+                node_pid "$node" >/dev/null || return 0
+                sleep 0.2
+              done
+              kill -TERM "$(node_pid "$node")" 2>/dev/null || true
+              for _ in $(seq 1 25); do
+                node_pid "$node" >/dev/null || return 0
+                sleep 0.2
+              done
+              kill -KILL "$(node_pid "$node")" 2>/dev/null || true
+            }'';
+      vmSettleCheck =
+        if sn.isDefault then
+          ''
+            for _ in $(seq 1 25); do
+              pgrep -x firecracker >/dev/null 2>&1 || break
+              sleep 0.2
+            done
+            if pgrep -x firecracker >/dev/null 2>&1; then
+              echo "${name}-down: firecracker still running — pkill -x firecracker if it is wedged" >&2
+              exit 1
+            fi''
+        else
+          ''
+            for _ in $(seq 1 25); do
+              [ -z "$(mesh_pids)" ] && break
+              sleep 0.2
+            done
+            if [ -n "$(mesh_pids)" ]; then
+              echo "${name}-down: mesh VMMs still running (pids: $(mesh_pids | tr '\n' ' ')) — kill them if wedged" >&2
+              exit 1
+            fi'';
+
       launcher = pkgs.writeShellScriptBin name ''
         set -euo pipefail
         export PATH=${hostTools}''${PATH:+:$PATH}
 
-        BR=kubenyx-br0
+        BR=${sn.bridge}
         RUN="''${KUBENYX_CLUSTER_DIR:-${runDir}}"
 
-        if pgrep -x firecracker >/dev/null 2>&1; then
-          echo "${name}: a firecracker VM is already running — the kubenyx tap family is exclusive; run ${name}-down (or kill it) first" >&2
-          exit 1
-        fi
+        ${vmGuard}
 
         echo "${name}: configuring host bridge $BR + taps (sudo)"
         sudo ip link add "$BR" type bridge 2>/dev/null || true
-        sudo ip addr replace 10.100.0.1/24 dev "$BR"
+        sudo ip addr replace ${sn.gateway}/24 dev "$BR"
         sudo ip link set "$BR" up
         for tap in ${lib.concatMapStringsSep " " tapFor bootOrder}; do
           # Recreate each tap: guarantees current-user ownership (so
@@ -351,7 +508,7 @@ rec {
         mkdir -p "$RUN"
 
         ${meshManifestWrite}cleanup() {
-          ${caTeardown}pkill -x firecracker 2>/dev/null || true
+          ${caTeardown}${vmStopAll}
         }
         trap cleanup INT TERM
 
@@ -411,38 +568,12 @@ rec {
         # every mesh VM is disposable by design. The runner names each
         # VMM process microvm@<node> (exec -a), which is what pgrep/
         # pkill -f match on.
-        stop_node() {
-          node=$1
-          pgrep -f "^microvm@$node" >/dev/null 2>&1 || return 0
-          echo "${name}-down: $node"
-          if [ -S "$RUN/$node/$node.sock" ]; then
-            curl -s --max-time 3 --unix-socket "$RUN/$node/$node.sock" \
-              -X PUT http://localhost/actions \
-              -d '{ "action_type": "SendCtrlAltDel" }' >/dev/null 2>&1 || true
-          fi
-          for _ in $(seq 1 25); do
-            pgrep -f "^microvm@$node" >/dev/null 2>&1 || return 0
-            sleep 0.2
-          done
-          pkill -TERM -f "^microvm@$node" 2>/dev/null || true
-          for _ in $(seq 1 25); do
-            pgrep -f "^microvm@$node" >/dev/null 2>&1 || return 0
-            sleep 0.2
-          done
-          pkill -KILL -f "^microvm@$node" 2>/dev/null || true
-        }
+        ${stopNodeFn}
 
         # Reverse boot order: agents drain first, the server last.
         ${lib.concatMapStringsSep "\n" (n: "stop_node ${n}") (lib.reverseList bootOrder)}
         # Settle before judging: the last VMM may still be mid-exit.
-        for _ in $(seq 1 25); do
-          pgrep -x firecracker >/dev/null 2>&1 || break
-          sleep 0.2
-        done
-        if pgrep -x firecracker >/dev/null 2>&1; then
-          echo "${name}-down: firecracker still running — pkill -x firecracker if it is wedged" >&2
-          exit 1
-        fi
+        ${vmSettleCheck}
         ${caShutdown}echo "${name}-down: all nodes down"
       '';
     in

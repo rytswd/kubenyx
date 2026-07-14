@@ -7,6 +7,44 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-14 — v0.8 test amplification: in-driver savevm/loadvm, per-mesh subnets, snapshot identity
+
+air/v0.8/test-amplification.org D1–D3 landed together; numbers below are
+from the combined-tree verification run (KVM host).
+
+**D1 — `lib.harness` snapshot verbs** (`mkCluster { snapshotable = true; }`,
+store off 9p via `useNixStoreImage` + `readonly=on` store drive). The
+dogfood check `checks.harness-snapshot` (2-node, 4 G VMs): snapshot after
+Ready, mutation proven gone after restore (real NotFound from a serving
+apiserver), fresh post-restore write lands, second rewind pristine.
+Seconds-class by design (eager RAM load):
+
+| Operation | agent | server |
+|---|---|---|
+| `savevm` (pristine cut) | 5.44 s | 7.29 s |
+| `loadvm` #1 | 8.04 s | 11.88 s |
+| `loadvm` #2 | 7.58 s | 10.61 s |
+
+testScript total 81.6 s — one bring-up plus two full rewinds; resets
+amortize against the ~28 s a full pristine bring-up costs in the plain
+harness check, exactly the D1 economics.
+
+**D2 — per-mesh subnets**: `mkCluster { subnet = "10.101.0.0/24"; }`
+derives `kubenyx-br-4c6d` + `kx-4c6d-tN`; live two-mesh smoke ran cp1w2
+(default subnet, MESH-READY 4033 ms) concurrently with a 2-node mesh on
+10.101.0.0/24 (MESH-READY 3973 ms), kubectl Ready against both, each
+teardown scoped to its own mesh, zero leftover processes/bridges/taps.
+Not a bench — the contention contract stands.
+
+**D3 — snapshot identity**: `take` stamps the snapshot-dir manifest with
+the identity triple (node closure, VMM binary, host CPU fingerprint).
+Combined-tree smoke: cp1 take → identity-stamped manifest → `resume`
+35.3 ms total to a serving apiserver (node Ready via kubectl); a
+tampered-CPU manifest refuses before any VMM spawn, naming
+field/recorded/live and the XRSTORS #GP history. Drv gate for the whole
+wave: cp1w2 program + check drvs move *only* through the kubenyx-tools
+`rust` src input (nix-diff verified — no rendered unit text changed).
+
 ## 2026-07-12 — cp3 recreation: the quorum back in ~48 ms, quorum-write-probed
 
 air/v0.7 D8 — the gated fast-follow — closed. `kubenyx-snap` grew real
