@@ -7,6 +7,50 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-15 — phase 10 CI artifacts: mint once, restore in another derivation at ~2× the bring-up speed
+
+air/v0.1/snapshot/ci-artifacts.org landed: `checks.snapshot-mint` builds the
+artifact (2-node harness shape, etcd, 4 G / 4-core VMs, mintable mode:
+derivation-built store image + `-cpu Skylake-Server-v4,enforce`);
+`checks.snapshot-restore` consumes it AS A DERIVATION INPUT, identity-gated
+exact-string before any qemu spawn. KVM host, hot store.
+
+| Wall | measured |
+|---|---|
+| mint drv (boot → Ready → savevm cut → package) | 26 s (testScript 22.5 s) |
+| parallel savevm cut | 7.16 s (agent 5.57 / server 7.16) |
+| consumer check total | 19 s |
+| parallel loadvm (seed on /dev/shm) | 4.93 s (agent 4.53) |
+| restore to running guests (seed+`-S` start+loadvm+cont+adopt+hwclock) | 9.83 s |
+| **restore-to-healthy** (…+ apiserver/Ready/SA gates) | **10.10 s** |
+| same shape boot-to-Ready (A/B baseline median, N=4) | 20.90 s |
+
+Artifact (self-contained qcow2 per node, vmstate inside): server 1.49 GiB
+raw → 368 MiB zstd-3 (4.2×), agent 0.97 GiB → 271 MiB (3.7×). Honesty:
+~4×, not the 13–14× phase 8 measured — that number was firecracker mem
+files (mostly zero pages); a qcow2 carrying vmstate plus allocated
+root-fs clusters compresses less. Store images now derivations
+(765/741 MiB, shared by store path between mint and consumer — identity
+by construction, per-boot mkfs.erofs eliminated).
+
+Honesty bar (all pass, 0.04–0.08 s each): post-cut mint mutation ABSENT
+(loadvm really rewound — a consumer booting the shipped disk would see
+it), pre-cut provenance marker PRESENT (state genuinely the mint's),
+fresh post-restore write lands. Adopt drained zero stale chardev bytes;
+the echo probe is the ground truth either way.
+
+**cpuModel A/B** (same shape, only `virtualisation.qemu.options`
+differs): baseline 19.74/20.77/21.03/23.51 s (median 20.90), pinned
+21.06/21.17/20.54/20.16 s (median 20.80) — **−0.5 %, inside the
+baseline's own spread** ⇒ no measurable boot cost from the pin. N=4 per
+variant, not a D5-grade N≥20; the confirmatory pass rides the
+real-builder validation ci-artifacts.org D4 holds open. loadvm under
+the pin proven by the restore leg itself.
+
+Drv gates after the change (at defaults): harness, harness-snapshot,
+single-node, quorum-volatile, multi-server, cp1w2 all byte-identical to
+the pre-campaign baseline.
+
 ## 2026-07-15 — phase 9 CPU templates: amx-mask costs nothing measurable, identity goes template-keyed
 
 air/v0.1/snapshot/portable-snapshots.org D1–D3 landed together; single-node cp1

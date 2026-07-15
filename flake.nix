@@ -484,6 +484,26 @@
           ca-custody = runTest ./tests/ca-custody.nix;
           bench-vs-k3s = runTest ./tests/bench-vs-k3s.nix;
         }
+        # v0.10 cross-derivation snapshot artifacts
+        # (air/v0.1/snapshot/ci-artifacts.org): snapshot-mint BUILDS the
+        # artifact (boot → savevm → package qcow2s + identity manifest
+        # into $out); snapshot-restore consumes that output as a
+        # derivation input, restores it without one cold-boot
+        # instruction, and proves the honesty bar (post-cut mint
+        # mutation absent, pre-cut provenance present, fresh write
+        # lands). x86_64-only: the artifact pins Skylake-Server-v4.
+        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+          snapshot-mint = import ./tests/snapshot-mint.nix {
+            kubenyx = self;
+            inherit pkgs;
+          };
+          snapshot-restore = pkgs.testers.runNixOSTest (
+            import ./tests/snapshot-restore.nix {
+              kubenyx = self;
+              inherit pkgs;
+            }
+          );
+        }
       );
 
       devShells = forAllSystems (pkgs: {

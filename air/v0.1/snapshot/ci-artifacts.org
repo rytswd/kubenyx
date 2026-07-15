@@ -1,0 +1,349 @@
+#+title: CI Artifacts — Cross-Derivation Snapshot Mint and Restore
+#+state: complete
+#+FILETAGS: :core:snapshots:testing:
+
+* Summary
+
+Phase 8 built reset-in-place: one derivation boots a cluster, cuts a
+pristine =savevm= snapshot, and rewinds itself N times — the snapshot
+never outlives the run that made it. Phase 9 pinned the firecracker
+path's CPU assumptions to a template so host-side artifacts stop
+being host-generation-locked. Phase 10 combines the two theses on the
+QEMU/test-driver side and walks through the door phase 8 D4 named
+"CI cross-derivation snapshot artifacts": *mint once, in one
+derivation; restore in another, as a derivation input*.
+
+The economics are the same asymmetry every embedding host measures:
+bring-up is CPU-bound (minutes-class on real builders at consumer
+scale), restore is memory-bound (=loadvm= 4–13 s at harness scale
+regardless of cores — NUMA locality matters, core count does not).
+A suite that pays one mint per closure and =loadvm= everywhere else
+converts its per-check bring-up walls into one shared build product.
+The nix sandbox can boot VMs and =savevm= — the =harness-snapshot=
+check has been proving that since phase 8 — so the mint is an
+ordinary derivation, cached and substituted like any other.
+
+Two hard problems make this more than "copy the qcow2 somewhere":
+
+1. *The artifact assumes things qemu never re-validates.* =loadvm=
+   checks device vmstate, not CPUID (plain CPUID divergence is not
+   fully validated by the stream), and readonly drives are excluded
+   from the snapshot set entirely — a divergent store image or CPU
+   surface is silent corruption, not an error. Today's baked
+   =-cpu max= freezes the mint host's CPU generation into the
+   vmstate; on this host it exposes AMX to every test VM, importing
+   exactly the phase 2 XRSTORS-panic class. D1 pins the model; D3
+   makes everything else exact-string identity, refused before any
+   VMM spawns.
+2. *The driver has no notion of adopting a restored guest.* The
+   phase 6 harness doc named the two branches; phase 8 built the
+   in-process one (backdoor survives =loadvm=, no surgery). A fresh
+   VMM in a fresh derivation is the second branch, and the enumerated
+   bypass turns out to be exactly one thing: the banner wait.
+   ="Spawning backdoor root shell..."= is printed once, at the mint's
+   real boot, and a restored guest never re-emits it. Everything else
+   in =create_machine=/=start()= works unchanged against a paused
+   qemu — sockets, monitor prompt, serial thread. D2 replaces the
+   banner wait with drain-plus-probe and touches nothing else.
+
+Ground rules carried forward unchanged: snapshot point is fixed
+(after =waitReady=, before mutation); the honesty bar is a write
+landing and a rewind proven byte-honest, never "the apiserver answers
+TLS"; existing drvs stay byte-identical at defaults (=cpuModel =
+null=, =mintable = false= — the phase 7/8/9 drv-gate discipline,
+fourth campaign running).
+
+* Measured ground truth
+
+Substrate facts, verified against the pinned nixpkgs source and live
+qemu before any code moved (2026-07-14):
+
+| Fact                                                     | Where / how verified                              |
+|----------------------------------------------------------+---------------------------------------------------|
+| =-cpu max= comes from nixpkgs, not kubenyx               | =nixos/lib/qemu-common.nix:42=, baked into the run script |
+| last =-cpu= on the command line wins                     | live: bogus-then-valid boots, valid-then-bogus refuses |
+| =virtualisation.qemu.options= renders AFTER the baked cpu | =qemu-vm.nix:359= — the whole pin mechanism        |
+| savevm state lives INSIDE the first writable qcow2       | qemu doc; store drive readonly=on ⇒ one artifact per node |
+| state dirs survive driver exit                           | =driver.py= — cleanup only at a LATER run's machine init |
+| =startVM= reuses a pre-seeded disk                       | =test -e= guard; =readlink -f= follows symlinks    |
+| store.img rebuilt at EVERY start under =useNixStoreImage= | =qemu-vm.nix:172-200=; GNU tar readdir order ⇒ not byte-stable by construction |
+| =start()= works against a paused (=-S=) qemu             | monitor/shell sockets are host-side; only =connect()='s banner wait breaks |
+| =QEMU_OPTS= reaches the run script from driver env       | =build_environment= copies =os.environ=            |
+| restore is memory-bound                                  | loadvm 4–13 s harness-scale regardless of cores; NUMA locality matters |
+| artifact compresses ~13–14× under zstd                   | phase 8 D4 transfer measurement                    |
+| sandbox can boot VMs and savevm                          | =harness-snapshot= check, green since phase 8      |
+
+CPU model facts (live =,enforce= probes on the pinned qemu 11.0.1,
+Granite Rapids host): Skylake-Server-v4/v5, Cascadelake-Server-v5,
+Icelake-Server-v6, SapphireRapids-v3, GraniteRapids-v2 all pass
+enforce here (GNR is a superset) — so the model choice is pure
+fleet-floor policy, and =enforce= is what turns fleet heterogeneity
+into a loud spawn-time refusal instead of qemu's default behavior
+(silently FILTER missing features with a warning — precisely the
+quiet cross-host drift the identity scheme exists to kill).
+
+* Decisions
+
+** D1. Pinned CPU model: =Skylake-Server-v4,enforce=
+=mkCluster= grows =cpuModel ? null=; non-null renders
+=-cpu <model>,enforce= via =virtualisation.qemu.options=, after the
+baked =-cpu max=, which the last-wins rule makes dead. At =null=
+every existing drv is byte-identical (the gate). Mint/consumer mode
+*requires* non-null — =-cpu max= artifacts are host-generation-locked
+by construction, which is the disease, not a default.
+
+Why this model, on the three axes that matter:
+
+- /What the stack actually uses/: Go (etcd, k8s) needs amd64 baseline
+  and opportunistically uses AES-NI/PCLMULQDQ/AVX2 for the TLS that
+  is everywhere, RDRAND for boot entropy (virtio-rng also present);
+  eBPF JITs on the host kernel with zero guest CPUID demands. All of
+  it is in Skylake-Server. Nothing in the stack wants anything newer.
+- /What the versioned-model design is for/: frozen definitions built
+  for cross-host migration; qemu's own doc says use "the newest CPU
+  model that is compatible across all desired hosts". v4 is the noTSX
+  variant (v1/v2 demand HLE/RTM, which TAA-mitigated microcode
+  removed — enforce would refuse most modern hosts) and predates
+  XSAVES (v5 adds it; excluding it keeps supervisor xstate out of the
+  frozen vmstate — the same hazard class the firecracker path
+  handled with =noxsaves= after the phase 2 XRSTORS #GP).
+- /What the fleet floor supports/: every Xeon Scalable gen 1 (2017+)
+  satisfies Skylake-Server-v4 under enforce.
+
+Structural bonus: no Skylake/Cascadelake/Icelake model carries AMX —
+the pin masks AMX at the VMM level for qemu, the same medicine
+=amx-mask.json= is for firecracker.
+
+Rejected alternatives:
+- *=-cpu host= / =-cpu max= (status quo)*: qemu documents both as
+  migration-unsafe across hosts ("cannot guarantee a stable CPU is
+  exposed to the guest across hosts"). On this host, max exposes AMX
+  into every vmstate. This is the thing being fixed.
+- *qemu64 / Nehalem (lowest common denominator)*: costs AES-NI, AVX2
+  and RDRAND — real crypto-throughput and boot-entropy regressions
+  for zero portability gain over the Skylake floor. Correctly
+  rejected, not just unfashionable.
+- *Cascadelake-Server-v5*: carries ARCH_CAPABILITIES, an emulated MSR
+  whose enforce-checkable bits depend on host kernel + microcode — an
+  enforce-portability trap across a mixed-microcode fleet.
+  Skylake-Server-v4 carries none.
+- *Skylake-Server-v5*: XSAVES (see above).
+- *SapphireRapids-* / GraniteRapids-**: AMX/XTILE in the model —
+  importing the exact phase 2 panic class into qemu vmstate. Rejected
+  on principle even where enforce passes.
+- *Icelake-Server-v6 now*: passes here, but "here" is not a fleet
+  floor measurement. Documented as the upgrade path instead: when the
+  fleet floor is proven Ice Lake+, Icelake-Server (noTSX variant) is
+  the "newest compatible" step (VAES/GFNI — marginal for Go).
+
+Cost expectation: ≈0–2 %, by precedent (firecracker AMX-mask A/B:
++1.8 % cold, +1.4 ms resume, both in budget). Named-model application
+is KVM_SET_CPUID2-class, sub-ms; the exposure is guest-kernel paths
+under fewer features. A/B gate: two variants of one harness check
+differing ONLY in =virtualisation.qemu.options=, cold runs under the
+bench contention contract, p50 testScript wall — same budget shape as
+phase 9 D5.
+
+** D2. The mint/consumer contract
+*Mint* (=lib.harness.mkSnapshotMint=): a derivation whose builder
+runs the test driver — boot, =waitReady=, the parallel =savevm= cut
+(phase 8 verbs, wall ≈ slowest node) — then, after the driver exits,
+packages each node's state-dir qcow2 (the vmstate lives inside it;
+the qcow2 *is* the artifact, one self-contained file per node) as
+zstd into =$out= next to the identity manifest. No testScript file
+gymnastics: state dirs survive driver exit by construction. The
+check-leg mint additionally plants the honesty pair — a provenance
+marker *before* the cut (the one documented exception to
+cut-before-mutation) and a leak marker *after* it, in the active
+qcow2 layer only — then quits each VMM via the monitor (clean bdrv
+close; the active layer is never booted).
+
+*Consumer* (=lib.harness.mkRestoreTest=): reconstructs the identical
+cluster from the mint's own passthru (same =mkCluster= arguments by
+API shape — mint and consumer *cannot* diverge), and its generated
+driver flow is, per machine, concurrent across nodes:
+
+1. Identity gate (D3) — before any qemu spawn.
+2. Seed: decompress =$mint/<node>.qcow2.zst= into the state dir —
+   via /dev/shm + symlink when it verifiably fits (probed at
+   runtime; =startVM= =readlink -f= follows), because restore is
+   memory-bound and this is the hottest file in the run.
+3. =QEMU_OPTS=-S=: spawn paused. The seeded disk is provably
+   untouched until =loadvm=; the guest never executes one cold-boot
+   instruction.
+4. =m.start()= — UNCHANGED. Sockets, serial thread, monitor prompt
+   all work against a paused qemu.
+5. =loadvm <tag>= all nodes concurrently (independent monitor
+   sockets), then =cont= all.
+6. Adopt the shell: drain stale chardev bytes non-blocking, set
+   =connected = True= (bypassing the banner wait — the one boot-flow
+   step a restored guest can never satisfy), then an echo probe as
+   ground truth.
+7. =hwclock --hctosys= (guest time froze at the cut; the emulated
+   RTC kept tracking host time).
+8. Health-gate (wait-for-condition style only — the phase 8
+   resumed-state tolerance rule), then run the caller's testScript.
+
+The check legs are =snapshot-mint= (the mint drv itself) and
+=snapshot-restore= (consumes the mint AS A DERIVATION INPUT — the
+dependency edge is the point of the campaign). The restore leg's
+honesty bar is double-sided: the post-cut leak must be *absent* (a
+consumer that booted the shipped disk instead of loading the
+snapshot would see it) and the pre-cut provenance marker must be
+*present* (a consumer that quietly cold-booted would not have it),
+plus the standard fresh-write-lands.
+
+Rejected alternatives:
+- *driver surgery for a real "adopt" verb*: everything except the
+  banner wait already works; a patched driver is a fork to maintain
+  against nixpkgs for one bypassed readline. Drain-plus-probe is
+  smaller and the probe is a stronger truth than the banner ever was.
+- *=-loadvm <tag>= on the command line instead of =-S= + monitor*:
+  boots-then-loads; the guest executes cold-boot instructions first
+  and the VM is never provably paused for the identity/seed steps.
+- *external snapshot / migrate-to-file artifacts*: more moving
+  parts, same eager-RAM load cost, and it reopens the multi-file
+  identity problem the internal snapshot closes (one qcow2 per node,
+  self-contained).
+
+** D3. Identity: exact-string manifest + store image by construction
+The manifest written into the mint output carries the tag, the
+=-cpu= line, and one line per node: the *run-vm script drv path*.
+That drv closes over the qemu binary, the pinned cpu flags, the
+drive list, and the kernel cmdline — so exact string equality of
+these paths is equality of everything =loadvm= assumes and cannot
+itself validate. The consumer regenerates the manifest from its OWN
+node eval and compares exact-string *before any qemu spawn*; the
+refusal names both sides. This is mandatory, not belt-and-braces:
+the migration stream fails loudly only for device vmstate it models
+— plain CPUID divergence and readonly-drive content are NOT fully
+validated.
+
+The store image is the sharpest instance: the guest's frozen page
+cache holds erofs metadata mapped to block addresses, and qemu
+excludes readonly drives from the snapshot set — a divergent image
+is silent corruption. Under =useNixStoreImage= the image is rebuilt
+at every VM start by =tar | mkfs.erofs=, and GNU tar's readdir-order
+directory walk makes byte-identity across builds a filesystem
+accident, not a guarantee. So =mintable= mode lifts the image into
+its own derivation (the same tar|mkfs.erofs invocation, verbatim,
+inputs pinned) and points the readonly store drive at
+=${storeImage}/store.img=: mint and consumer reference the *same
+store path* on their command lines. Divergence becomes
+inexpressible, the manifest covers it for free (the drive line is in
+the run script), and the per-boot mkfs.erofs cost disappears as a
+bonus.
+
+Rejected alternatives:
+- *runtime sha256 gate on the rebuilt store.img (Option B)*: works
+  on one host (same store, same readdir order), but it verifies
+  after paying the rebuild cost every boot, and across machines it
+  fails exactly when it matters. By-construction identity is
+  strictly stronger and cheaper; keep the sha256 idea only if some
+  future consumer cannot share a store path with its mint (none can
+  exist today — the mint IS a store input).
+- *closure-hash manifest instead of run-script paths*: the closure
+  hash misses the qemu command line (drives, cpu, cmdline) — the
+  exact surface loadvm assumes. The run-script drv path subsumes it.
+- *trusting the migration stream to catch mismatches*: it catches
+  subsection-modeled device state only; the doc-verified gap (CPUID,
+  readonly drives) is the dangerous part. That gap is why this
+  decision exists.
+
+** D4. What stays open
+- *Real-builder validation*: every number in this doc was minted on
+  one KVM host under the bench contention contract. The mint wall,
+  restore wall and artifact sizes on the actual CI builder classes
+  are unmeasured; the A/B budget must be re-run there before the
+  legs become required gates rather than opt-in ones.
+- *Fleet CPU floor confirmation*: Skylake-Server-v4 is chosen as the
+  documented safe floor, not from a fleet inventory. Confirming the
+  floor (and stepping to Icelake-Server noTSX if it is provably Ice
+  Lake+) is operator work this repo can only document.
+- *Cross-HOST restore*: this campaign proves cross-DERIVATION on one
+  host. The mechanism is deliberately host-independent (pinned cpu,
+  store-path store image, exact-string refusal), but an actual
+  mint-on-A/restore-on-B run across a real fleet boundary has not
+  been exercised. Same gate as above: the fleet floor first.
+- *Mesh-scale artifacts*: the check legs mint the 2-node harness
+  shape. Larger topologies ride the same verbs (walls are
+  max(node), not sum), but the artifact-size economics at 3+ nodes
+  with real workloads deserve their own measurement before anyone
+  quotes them.
+- *Store image must travel by substitution*: the storeImage
+  derivation is input-addressed, and its tar walk inherits the host
+  filesystem's readdir order — two machines REBUILDING the same drv
+  could produce different bytes under one store path. On one host
+  (this campaign) that is moot; across hosts the image must flow
+  through the binary cache from the mint side (the manifest's
+  run-script references pin the whole runner closure into the mint
+  output, which the consumer needs anyway), or the tar walk must
+  become content-stable (=--sort=name=). Named here so nobody
+  discovers it as a heisenbug.
+- *Negative identity drill*: the exact-string gate demonstrably
+  executes (it is the first statement of every restore run), but no
+  leg yet constructs a deliberately divergent consumer and watches
+  it refuse — the mkRestoreTest API makes divergence hard to even
+  express (consumer args come from the mint's passthru), which is
+  the point, but a tamper drill in the style of the phase 9 mismatch
+  drills would still be worth a cheap eval-level check.
+
+* Work plan
+
+1. =lib/harness.nix=: =cpuModel ? null= (null ⇒ byte-identical drvs
+   — gate); =mintable= store-image derivation mode;
+   =mkSnapshotMint=; =mkRestoreTest=. Existing drv gates: cp1w2
+   canary + =harness= + =harness-snapshot= byte-identical at
+   defaults.
+2. Check legs: =snapshot-mint=, =snapshot-restore= (mint as a real
+   derivation input), honesty pair as specified in D2.
+3. Validate + measure: both legs green; mint wall; artifact size
+   (raw + zstd); restore-to-healthy wall; cpuModel A/B on the
+   harness cluster (boot delta; loadvm under the pinned model).
+4. nixfmt; flake check.
+
+* Status
+
+- [X] Substrate research: cpu-pin mechanism, last-wins, savevm
+      artifact layout, state-dir survival, paused-start viability,
+      banner-wait enumeration (verified 2026-07-14)
+- [X] D1 =cpuModel= + D3 =mintable= store-image mode +
+      D2 =mkSnapshotMint= / =mkRestoreTest= in =lib/harness.nix=;
+      byte-identity gates held (harness, harness-snapshot, cp1w2
+      drv paths unchanged at defaults)
+- [X] =snapshot-mint= + =snapshot-restore= check legs wired
+      (x86_64-only: the artifact pins Skylake-Server-v4); mint
+      confirmed in the consumer drv's requisites
+- [X] Both legs green, first run (2026-07-15, KVM host, 2-node
+      harness shape, 4 G / 4-core VMs). Mint: drv wall 26 s
+      (hot store), testScript 22.5 s, parallel savevm cut 7.16 s
+      (agent 5.57 / server 7.16). Artifact: server 1.49 GiB raw →
+      368 MiB zstd-3 (4.2×), agent 0.97 GiB → 271 MiB (3.7×) —
+      note this is a qcow2 with vmstate *and* allocated root-fs
+      clusters, not the mostly-zero-page mem files the 13–14×
+      phase 8 number came from; say 4×, not 14×, for this artifact
+      class. Store images lifted to derivations (765/741 MiB,
+      shared store paths; per-boot mkfs.erofs gone — mint
+      testScript 22.5 s vs the dogfood leg's 28.4 s bring-up).
+      Restore: check wall 19 s; seed decompressed onto /dev/shm
+      (probe hit), parallel loadvm 4.93 s (agent 4.53), restore to
+      running guests 9.83 s, *restore-to-healthy 10.10 s* — vs
+      ~20.9 s median boot-to-Ready for the same shape, ~2× at this
+      scale, and the win grows with bring-up cost. Adopt drained
+      zero stale bytes (the predicted chardev replay never
+      materialized; the probe stands guard regardless); honesty
+      subtests 0.04/0.04/0.08 s, all three pass.
+- [X] cpuModel A/B on the harness shape (same run set): baseline
+      19.74/20.77/21.03/23.51 s (median 20.90), pinned
+      21.06/21.17/20.54/20.16 s (median 20.80) — delta −0.5 %,
+      inside the baseline's own 19.7–23.5 s spread ⇒ no measurable
+      boot cost, consistent with the 0–2 % expectation. Honesty:
+      N=4 per variant, not a D5-grade N≥20 — the confirmatory pass
+      belongs with the real-builder validation D4 already holds
+      open. loadvm under the pin: proven by the restore leg itself
+      (the artifact both minted and restored under
+      =Skylake-Server-v4,enforce=).
+- [X] nixfmt + flake check (eval-level, --all-systems) on the final
+      tree; drv identity re-verified after formatting (harness,
+      harness-snapshot, single-node, quorum-volatile, multi-server,
+      cp1w2 — all byte-identical to the pre-campaign baseline)
