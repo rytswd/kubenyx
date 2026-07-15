@@ -1,5 +1,5 @@
 #+title: Declarative PKI
-#+state: work-in-progress
+#+state: in-progress
 #+FILETAGS: :core:
 
 * Summary
@@ -62,6 +62,23 @@ Notes:
 
 The control-plane node generates the CA. Worker material is *derived from the same CA*, so workers need =ca.crt=, =ca.key= is never copied to workers — instead the control-plane node pre-generates each declared node's kubelet client/server certs (node list is static config), and the operator ships =/var/lib/kubenyx/pki/nodes/<node>/= to each worker via their secret channel (sops-nix, agenix, scp — documented recipe, not Kubenyx machinery). =kubenyx.pki.dir= lets any node consume a pre-populated directory and skip generation entirely (bring-your-own-PKI).
 
+Re-ship cadence (agent-side renewal, documented 2026-07-15): shipped
+leaves are renewed on the *server* — every activation re-mints any
+leaf under =nodes/<node>/= that is within =renewBeforeDays= (default
+30) of expiry, exactly like local leaves. The operator's contract is
+therefore: re-ship each worker's =nodes/<node>/= directory often
+enough that one re-ship lands inside each leaf's renewal window — a
+periodic cadence of at most =renewBeforeDays= guarantees it, and
+"after every server rebuild that touches PKI inputs, and at least
+once a month" is the simple habit under the defaults. Tune
+=leafValidityDays= / =renewBeforeDays= up if that cadence is too
+tight for your ops channel. Re-shipping is idempotent and
+hitless: the agent's path unit picks the material up, kubeconfig
+staleness is detected by embedded-content equality (not mtimes — see
+History 2026-07-06), and unchanged material is a no-op. A worker
+whose leaves expire because nothing was re-shipped fails loudly at
+the kubelet TLS layer, not silently.
+
 ** Options sketch
 
 #+begin_src nix
@@ -100,3 +117,13 @@ kubenyx.pki = {
 - 2026-07-05: Agent story implemented: the server packages a one-stop credential directory per remote worker under =nodes/<name>/= (ca.crt + kubelet pair + kubelet-server pair + shared kube-proxy/coredns certs — the CA key never leaves the server); the agent's =kubenyx-pki= unit variant blocks until the material is shipped, then renders kubeconfigs locally against =controlPlaneEndpoint=. Verified by the multi-node VM test. Open: agent-side renewal (shipped leaves are re-shipped by the operator; document cadence).
 - 2026-07-06: Reimplemented in Rust (=rust/kubenyx-pki=, architecture.org D13): the whole PKI + kubeconfigs in one ~5ms process (was 530ms across ~80 openssl forks). Semantics preserved (fingerprints, renewal window, agent mode); hardened beyond the shell version after review: fsync-before-rename writes, zero-length CA detection, CA-identity digest in leaf fingerprints (CA rotation now cascades into reissuance — verified), kubeconfig staleness by embedded-content equality instead of mtimes (mtime-preserving transports like tar/rsync -a no longer leave stale certs), IPv6-capable node-IP detection.
 - 2026-07-07: Scope clarification learned the hard way: the =kubenyx-healthz= identity passes only the authorization-always-allowed =/healthz=, =/readyz=, =/livez= paths — any resource read (e.g. =GET /api/v1/nodes/<n>=) returns 403. Probes that inspect objects must use the admin identity (whose binding lands with the addons bundle) or another bound identity.
+- 2026-07-15: State audit — the agent-renewal "document cadence" open
+  item is closed (re-ship cadence now documented under Multi-node
+  distribution). The SAN-change targeted-regeneration AC remains the
+  sole open item: the machinery is exercised live by the
+  =server-add= leg (v0.1 phase 5 — the PKI rerun re-mints the etcd
+  cert with the grown SAN set, no CA reissue), but no leg changes
+  =extraApiserverSANs= and asserts that *only* the apiserver cert
+  regenerates and *only* the apiserver restarts. Left open —
+  test-matrix additions need a matrix run. Stays =in-progress= on
+  that one assertion.

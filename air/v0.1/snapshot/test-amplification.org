@@ -1,0 +1,339 @@
+#+title: Test Amplification — Reusing and Multiplying Cheap Clusters
+#+state: complete
+#+FILETAGS: :core:testing:
+
+* Summary
+
+phases 1–7 made kubenyx clusters cheap to *create*: 3.4 s cold boot,
+33 ms single-node recreation, a real 3-member quorum mesh at 6.5 s
+p50 with 47.8 ms mesh recreation. Phase 8 is a different thesis: make
+them cheap to *reuse and multiply* inside embedding hosts. A cluster
+that costs milliseconds to recreate is still expensive if every
+consumer test suite pays a full bring-up per test file, and still
+singular if the host bridge only admits one mesh at a time.
+
+Three doors, one campaign:
+
+1. *Reuse inside the NixOS test driver* — =lib.harness= grows
+   snapshot verbs backed by in-driver QEMU =savevm=/=loadvm=. The
+   phase 6 harness doc recorded four requirements a driver-native
+   snapshot fixture would need and honestly declined to build it;
+   research (verified 2026-07-14) has since knocked down the
+   mechanism blocker: the driver backdoor shell *survives* =loadvm=,
+   so restore is in-process and no control channel is re-established.
+   Reset-to-pristine costs seconds, not milliseconds — =loadvm= loads
+   guest RAM eagerly (measured 7.4 s for a 3 G VM) — and the doc says
+   so plainly, because seconds still beat the 28.4 s the dogfood
+   check's testScript pays for a full bring-up.
+2. *Multiply on one host* — =lib/microvm.nix= hardcodes the
+   10.100.0.0/24 bridge singleton: one mesh at a time per host, by
+   construction. Subnet becomes a =mkCluster= parameter (default
+   unchanged ⇒ drvs byte-identical), bridge/tap names derived from
+   it, and N concurrent meshes stop being a design impossibility.
+3. *Refuse quietly-wrong reuse* — =kubenyx-snap= snapshots are
+   host-locked artifacts pretending to be portable files. The
+   manifest gains the identity triple (node closure hash, VMM store
+   path, host CPU fingerprint) and =resume=/=mesh-resume= refuse
+   mismatches loudly. Mint-per-host is the policy; distribution is
+   rejected (D3 cites the AMX/xstate panic that makes this
+   non-negotiable, not conservative).
+
+What phase 8 is *not*: per-subtest clone fan-out, cross-host snapshot
+shipping, or CI snapshot artifacts. All three are real doors; all
+three are rejected or deferred with reasons in D4.
+
+* Measured ground truth
+
+In-driver QEMU snapshot mechanics (research session, verified
+2026-07-14, 3 G VM under the NixOS test driver):
+
+| Operation                                   | Measured            |
+|---------------------------------------------+---------------------|
+| =savevm= (internal snapshot, store off 9p)  | 4–5 s               |
+| =loadvm= (eager RAM load)                   | 7.4 s               |
+| driver backdoor shell across =loadvm=       | survives — no rewire |
+| wall clock post-restore                     | stale; =hwclock --hctosys= fixes |
+
+- The gating precondition: =savevm= works IF the nix store is off 9p
+  (=useNixStoreImage=) with =readonly=on= on the store drive.
+  Internal snapshots refuse VMs with un-snapshottable backends; a
+  read-only store drive is exempt, a 9p share is not.
+- Consistent multi-VM cut = stop-all, =savevm= each, cont-all — the
+  same freeze-together discipline =mesh-take= proved on firecracker
+  (2.8 ms cut across 3 servers; monotonic clocks freeze together, so
+  guests never observe the pause).
+- Eager RAM is the honest cost delta vs the firecracker path:
+  =loadvm= has no demand-paged =File= backend, so restore scales
+  with RAM size. This is a *seconds-class* reset verb, not the 33 ms
+  recreation — the two mechanisms serve different layers and the doc
+  never conflates them.
+
+Existing kubenyx numbers this campaign builds on (all from
+=bench/RESULTS.md= and prior air docs):
+
+| What                                          | Measured        |
+|-----------------------------------------------+-----------------|
+| cp1 cold boot                                 | 3.4 s           |
+| single-node recreation (=kubenyx-snap cycle=) | 33 ms (tuned); 65.6 ms median stock |
+| 3-node mesh recreation                        | 92.8 ms         |
+| 7-node mesh recreation                        | 102.7 ms (~flat) |
+| cp3 quorum mesh cold, p50                     | 6545 ms         |
+| cp3 mesh recreation, quorum-write-probed      | 47.8 ms (write 97.1 ms) |
+| =harness= dogfood check                       | 39 s solo, testScript 28.4 s |
+| cp3 snapshot footprint                        | 11 GB on /dev/shm |
+
+The last two rows carry the economics: a consumer suite that resets
+via =loadvm= between subtests pays ~7 s instead of ~28 s per pristine
+state, and an 11 GB mesh snapshot is why "just upload it to CI" needs
+a transfer measurement before anyone believes it (D4).
+
+* Decisions
+
+** D1. =lib.harness= snapshot verbs — in-driver savevm/loadvm
+The helper grows a snapshot surface next to =waitReady=: driver
+Python defs that (a) flip the generated nodes onto
+=useNixStoreImage= with =readonly=on= on the store drive, (b)
+=kubenyx_snapshot_all(tag)= — stop-all, =savevm= each via the
+monitor, cont-all, (c) =kubenyx_restore_all(tag)= — =loadvm= each,
+then =hwclock --hctosys= in every guest over the surviving backdoor
+shell. Snapshot point policy is fixed, not configurable: *after
+generic bring-up (=waitReady= complete), before any per-test
+mutation* — the same point =kubenyx-snap take= keys on.
+
+The phase 6 harness doc ("The snapshot-fixture pattern, honestly")
+recorded four requirements. Ledger, one by one:
+
+1. /Driver owns the VM lifecycle and control channel/ — MET. =loadvm=
+   is in-process restore: the chardev, and with it the backdoor
+   shell, survives (verified 2026-07-14). No firecracker-style
+   fresh-VMM spawn, no channel re-establishment, no driver surgery.
+2. /Snapshot identity keyed on closure + VMM, rebuilt on drift/ —
+   MET BY CONSTRUCTION in-driver. Internal snapshots live in the
+   run's own overlay disks, which the driver creates fresh per run
+   from the current closure; a snapshot can never outlive the
+   derivation that made it. Cross-run persistence is exactly what
+   this construction forbids — deferred to D4, not smuggled in.
+3. /Snapshot after bring-up, before mutation; checks tolerate resumed
+   state/ — MET for the verb, SCOPED for the consumers. The verbs
+   enforce the snapshot point; wait-for-condition gates (the style
+   =waitReady= already generates) survive resume, "assert event
+   observed" style does not. Kubenyx ships the tolerance rule in the
+   helper docs; auditing an embedding host's subtests against it is
+   consumer-side work kubenyx cannot do for them.
+4. /Concurrent checks need isolated clones/ — DOES NOT APPLY, by
+   design choice. =loadvm= restores the *same* VMs in place — this is
+   reset-in-place, not clone fan-out. One test run, one cluster,
+   rewound N times. Fan-out stays behind D4's gate.
+
+Primary payoffs, in order: *retry-from-pristine* (a flaky subtest
+reruns against genuinely virgin state instead of hoping cleanup was
+complete) and *per-subtest reset* (N subtests share one 28.4 s
+bring-up plus N×~7 s restores, instead of N full bring-ups — and the
+reset is byte-honest, not "delete the namespace and trust").
+
+Stated plainly: eager-RAM =loadvm= means this verb costs *seconds,
+not milliseconds*. 4–5 s save once, 7.4 s per restore at 3 G. It
+amortizes bring-up; it does not make resets free. Consumers whose
+subtests are cheaper than the restore should not use it, and the doc
+for the verb says so.
+
+*Parallel across nodes* (landed 2026-07-14, follow-up): each VM's
+monitor socket is independent, so the per-node =savevm=/=loadvm=
+walls now run concurrently — =ThreadPoolExecutor= in the driver
+defs, one worker per machine, each machine's
+=send_monitor_command= touched only by its own worker, the shared
+driver logger serialized behind a lock. The stop-all/cont-all
+barriers stay serial: they *are* the consistent cut, and only the
+per-node walls between them overlap, so the cut semantics are
+unchanged. Measured on the 2-node dogfood check (4 G VMs, KVM
+host): cut wall *7.78 s* = the slowest node (agent 5.83 / server
+7.78 s savevm) vs a ~13.6 s serial sum; restore walls *12.96 /
+13.27 s* (agent ~8.9, server ~13 s loadvm) vs ~21–22 s serial
+sums; testScript total 81.6 → 62.4 s. Two nodes understate the win
+by construction: the wall tracks max(node), not sum(nodes) — a
+5-VM consumer cluster pays one slowest-node wall where serial paid
+five, so the gain grows with cluster width while the parallel wall
+stays ~flat.
+
+Rejected alternatives:
+- *firecracker-artifact restore under the driver*: the driver has no
+  notion of adopting an externally spawned VMM, and =kubenyx-snap=
+  artifacts don't apply to QEMU. Wrong layer; already declined in
+  phase 6 requirement 1's original form.
+- *external snapshot files (=blockdev-snapshot= + migrate-to-file)*:
+  more moving parts, same eager-RAM cost on load, and it reopens the
+  identity problem that internal snapshots close by construction.
+- *store on 9p with RAM-only snapshot*: =savevm= refuses the
+  un-snapshottable backend outright. Dead channel, do not revisit.
+
+** D2. Per-mesh subnets in =lib/microvm.nix=
+=mkCluster= gains a =subnet= parameter, default =10.100.0.0/24=. At
+the default, every derived value — bridge name, tap names, MACs,
+guest addresses, gateway — must be *byte-identical* to today's
+output; the cp1w2 program path is the regression gate, recorded
+before the edit and verified after (same discipline as the D5 naming
+work in phase 7). Non-default subnets derive the bridge and tap names
+from the subnet (a short stable hash suffix — =kubenyx-br-<h>=,
+=kubenyx-tap-<h>-<index>=), so two meshes on one host cannot collide
+on interface names, addresses, or MACs *by construction* rather than
+by operator care.
+
+This opens the fan-out door the singleton kept shut: N concurrent
+meshes per host — a cp1w2 and a cp3 side by side, per-consumer
+isolated meshes on a shared runner, A/B benches without serialized
+teardown. The door is opened, not walked through: concurrent-mesh
+*bench* numbers are explicitly out of scope, because the bench
+contention contract stands — published numbers come from a solo
+host, and concurrent meshes contend for the same cores the numbers
+were minted on.
+
+Rejected alternatives:
+- *netns-per-mesh instead of subnet-per-mesh*: heavier launcher
+  surgery (every host-side probe, serve, and kubectl path grows an
+  =ip netns exec=), and it hides rather than removes the naming
+  collision. Subnet derivation is smaller and the names stay
+  greppable.
+- *auto-allocating subnets*: allocation state on the host is exactly
+  the kind of hidden mutability the launcher avoids; the caller
+  passes the subnet, collisions are a loud bind error.
+
+** D3. Snapshot identity in =kubenyx-snap=
+The snapshot-dir manifest (today: node name/IP lines) gains the
+identity triple: *node closure hash, VMM store path, host CPU
+fingerprint*. =take=/=mesh-take= record them; =resume=/=mesh-resume=
+compare all three against the live host and *refuse loudly* on any
+mismatch — the error names the field, the recorded value, and the
+live value, before any VMM is spawned. Same refusal discipline the
+posture manifest already established for =mesh-take= on durable
+posture.
+
+Mint-per-host is the policy: every host that wants recreation speed
+mints its own snapshot from the same derivation (a 3.4–6.5 s cost,
+paid once per closure per host). Distribution of snapshot artifacts
+between hosts is REJECTED, and the reason is history, not caution:
+restoring on an AMX host into a fresh VMM panicked the guest kernel
+in =restore_fpregs_from_fpstate= — XRSTORS #GP, RFBM=0x618e7 —
+because guest xstate permissions are process-level host state that
+the artifact silently assumes (phase 2). The shipped fix
+(=clearcpuid=amx_tile,amx_int8,amx_bf16 noxsaves=) makes snapshots
+work *on that host class*; it does not make the artifact carry its
+CPU assumptions with it. The mem file is a serialized xsave area,
+TSC state, and CPUID-shaped kernel structures — moving it to a host
+with a different feature set is undefined behavior with a measured
+history of kernel panics. Snapshots never move between hosts; the
+manifest now enforces what the phase 2 doc could only warn about.
+
+Rejected alternative:
+- *fingerprint on the "compatible feature subset" instead of the
+  host identity*: computing true snapshot-compatibility between two
+  CPU feature sets is the CPU-template problem (D4), and a
+  half-right subset check fails exactly like no check — with a guest
+  panic instead of an error message. Exact-match is crude and
+  correct; loosen it only when templates land.
+
+** D4. Rejected / deferred — the doors not walked through
+- *Cross-host snapshot distribution*: requires firecracker CPU
+  templates (mask CPUID at the VMM so the snapshot's feature
+  assumptions are pinned to the template, not the minting host) plus
+  a compatibility story for TSC and xstate layout. That is a
+  campaign of its own, gated on D3's exact-match refusal being in
+  place first so the interim is safe. LATER.
+- *Per-subtest fan-out harness* (restore N isolated clones of one
+  snapshot, run subtests concurrently): mechanism exists host-side
+  in staged form (per-clone NAT/address remap, phase 2 future work) and
+  D2 removes the bridge singleton, but the payoff depends entirely
+  on embedding hosts' subtests tolerating resumed state and isolated
+  re-addressing — a consumer-side audit kubenyx cannot run. GATED on
+  NixOS-test consumers reporting audit results; building the harness
+  first would be speculation with a large blast radius.
+- *CI cross-derivation snapshot artifacts* (mint once in CI, restore
+  in every downstream check): REFRAMED 2026-07-14 — the transfer
+  measurement this entry originally demanded has been run, and the
+  economics are a GO, not the blocker. Pre-mutation snapshots are
+  mostly zero pages and compress ~13–14× under zstd; measured
+  transfer lands at ~0.5–0.9 s/GB *landed on /dev/shm*, so an 11 GB
+  cp3 snapshot moves as ~800 MB and lands well inside the budget the
+  6.5 s cold boot sets. The binding blocker is now *CPU identity
+  across heterogeneous build hosts*: D3's exact-match policy is
+  correct precisely because a snapshot silently assumes the minting
+  host's feature set (the XRSTORS #GP history), and a CI fleet is the
+  heterogeneous-host case by construction — an artifact minted on one
+  runner class refuses (correctly) on every other. STILL DEFERRED,
+  new reason: not transfer economics but D3 exact-match, and the
+  unlock is named — firecracker *CPU templates* (mask CPUID at the
+  VMM so the artifact's feature assumptions are pinned to the
+  template, not the minting host), the same unlock the cross-host
+  distribution entry above waits on. When templates land, both doors
+  open together; until then, mint-per-host stands.
+
+* Work plan
+
+1. =lib/harness.nix=: store-off-9p wiring (=useNixStoreImage=,
+   =readonly=on=) in the generated nodes; =kubenyx_snapshot_all= /
+   =kubenyx_restore_all= driver defs (stop-all → savevm-each →
+   cont-all; loadvm-each → =hwclock --hctosys= each); snapshot-point
+   and resumed-state-tolerance rules in the helper docs. Existing
+   check drvs byte-identical (verbs are additive, store flip is
+   opt-in with the verbs).
+2. Dogfood: extend =tests/harness.nix= — bring up, snapshot, mutate
+   (create a marker workload), restore, assert the marker is *gone*
+   and the cluster serves; then a second restore to prove
+   rewind-twice. Record save/load wall numbers into
+   =bench/RESULTS.md=.
+3. =lib/microvm.nix=: =subnet= parameter, derived bridge/tap naming,
+   assertion for guest-count vs subnet size. Baseline the cp1w2
+   program path and existing check drvs BEFORE the edit; verify
+   byte-identity at the default after.
+4. =kubenyx-snap=: manifest identity triple (closure hash, VMM store
+   path, CPU fingerprint) on =take=/=mesh-take=; loud three-field
+   refusal on =resume=/=mesh-resume=. cargo fmt/clippy clean.
+5. Two-mesh smoke on one host (non-default subnet + default subnet
+   concurrently): both reach READY, teardown leaves no bridges, taps,
+   or VMM processes. Not a bench — the contention contract stands.
+6. README + air overview: the reuse-vs-recreate table (which verb at
+   which layer, seconds vs milliseconds, honestly labeled). LAST.
+
+* Status
+
+- [X] Mechanism research: in-driver savevm/loadvm viability,
+      backdoor survival, store-off-9p precondition, clock fix,
+      multi-VM cut (verified 2026-07-14)
+- [X] lib.harness snapshot verbs (D1) — =snapshotable = true= wires
+      store-off-9p + the three driver verbs; existing check drvs held
+      byte-identical (verbs additive, store flip opt-in)
+- [X] Dogfood check + measured save/load numbers — landed as its own
+      check =tests/harness-snapshot.nix= (2-node, savevm 5.4/7.3 s,
+      loadvm 7.6–11.9 s at 4 G; rewind-twice proven); numbers in
+      =bench/RESULTS.md= 2026-07-14
+- [X] Parallel snapshot verbs (D1 follow-up) — savevm/loadvm
+      concurrent across nodes, stop/cont barriers serial (cut
+      unchanged); leg re-run green: cut wall 7.78 s ≈ slowest node,
+      restores 12.96/13.27 s vs serial sums ~13.6/21–22 s,
+      testScript 81.6 → 62.4 s (2026-07-14)
+- [X] D4 CI-artifacts entry reframed on new evidence — transfer
+      economics measured GO (~13–14× zstd, ~0.5–0.9 s/GB landed);
+      binding blocker is now D3 CPU exact-match across heterogeneous
+      CI hosts; CPU templates named as the unlock (2026-07-14)
+- [X] lib/microvm.nix subnet parameter (D2) — drv gate recorded and
+      verified (default subnet: cp1w2 + all preset scripts
+      byte-identical; combined tree re-verified via nix-diff — only
+      the kubenyx-tools rust src moves)
+- [X] kubenyx-snap identity manifest + loud refusal (D3) — triple
+      recorded on take, exact-match refusal live-tested (tampered CPU
+      field refuses pre-spawn; clean resume 35.3 ms)
+- [X] Two-mesh smoke — cp1w2 (default) + 10.101.0.0/24 2-node mesh
+      concurrent, both Ready, scoped teardown, zero leftovers
+- [X] README / overview table (2026-07-15) — README grew the
+      snapshot-verbs section under the embedding details (seconds-class
+      labeling, snapshot-point rule, subtest-tolerance rule), the
+      "which verb at which layer" table, the concurrent-meshes note
+      with the bench-contract caveat, the identity-refusal note in the
+      recreation details, and the =harness-snapshot= row (matrix now
+      21 legs); the air OVERVIEW carries the same at-a-glance table
+
+All six work-plan items done ⇒ =#+state: complete= (the ledger above
+also records three non-plan entries: the mechanism research, the
+parallel-verbs follow-up, and the D4 reframe). The doors D4
+deliberately left shut (per-subtest fan-out, cross-host distribution,
+CI artifacts) stay shut behind their named gates; phase 9
+(portable-snapshots.org) picked up the CPU-template unlock.

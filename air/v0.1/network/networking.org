@@ -1,5 +1,5 @@
 #+title: Networking — Zero-Daemon CNI, kube-proxy, Multi-Node Routes
-#+state: work-in-progress
+#+state: complete
 #+FILETAGS: :network:
 
 * Summary
@@ -88,3 +88,9 @@ kubenyx.network = {
 - 2026-07-05: Divergence — KCM allocate-node-cidrs turned off entirely (see Addressing section); the original 'keep it truthful' stance did not survive contact with the allocator's behavior.
 - 2026-07-05: Implemented (modules/network.nix); single-node service path, hairpin, NodePort and firewall-on all green. Post-review: blanket cni0 trust replaced with targeted pod->host rules (6443 + DNS only); node-index CIDR bounds assertion added. Open: multi-node test (blocked on the agent credential story; role=agent currently fails at eval by design).
 - 2026-07-05: Multi-node VM test green: server+agent over the test VLAN, cross-node pod-to-pod via the static host-gw routes (zero daemons confirmed), full cross-node service path (agent-side host CoreDNS -> VIP via agent's nftables kube-proxy -> DNAT to a server-side pod), agent pod IPs in the Nix-computed 10.244.1.0/24. Gotcha for test authors: the NixOS driver assigns VLAN IPs by *alphabetical* node order.
+- 2026-07-15: State audit — the multi-node entry above closed the
+  last tracked open item; all acceptance criteria are covered by
+  green legs (single-node service path/hairpin/NodePort, multi-node
+  cross-node routes and service round-trip, firewall on in every
+  test, ps daemon audit). The patch-podcidr oneshot remains a stated
+  phase 2 candidate, never promised. Marked =complete=.

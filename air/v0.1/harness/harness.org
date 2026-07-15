@@ -149,6 +149,15 @@ restore (=kubenyx-clockstep= — monotonic time and leases ride through,
 REALTIME does not); AMX/CET hosts need the =clearcpuid=…= +
 =noxsaves= guest params.
 
+/2026-07-15 note: the driver-native version below WAS subsequently
+built — v0.1 phase 8 knocked down requirement 1's mechanism blocker
+(the backdoor shell survives =loadvm=) and landed
+=mkCluster { snapshotable = true; }= with
+=kubenyx_snapshot_all=/=kubenyx_restore_all=; the four requirements
+are dispositioned one by one in
+[[file:../snapshot/test-amplification.org][test-amplification.org]] D1. The list below stands as the requirements
+record this doc honestly declined to build against./
+
 *What a driver-native version needs (not built):*
 1. The NixOS test driver owns the VM lifecycle and its control channel
    (backdoor shell over a serial chardev). A restore must either

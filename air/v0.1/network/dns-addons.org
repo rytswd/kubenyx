@@ -1,5 +1,5 @@
 #+title: DNS & Addon Delivery
-#+state: work-in-progress
+#+state: in-progress
 #+FILETAGS: :network:
 
 * Summary
@@ -71,3 +71,14 @@ kubenyx.addons.manifests = { };   # attrsOf (attrs | path)
 - 2026-07-05: Implementation: dropped the =Before=kubelet= ordering (measured boot serialization behind the addons RBAC chain); host mode verified end-to-end in the single-node VM test (zero images, pod resolution of cluster names with the registry unreachable). Cluster mode not yet implemented — v0.1 ships host mode; the matrix row for cluster DNS moves to the etcd test once built.
 - 2026-07-05: The addon applier is also the delivery path for the kcm shared-identity binding (control-plane.org History) — applied with the bootstrap identity immediately after first readyz.
 - 2026-07-05: Implemented (modules/dns.nix, modules/addons.nix); host mode + applier verified in VM test. Open: cluster mode rendering.
+- 2026-07-15: State audit — cluster-mode rendering is still the sole
+  open item: =modules/dns.nix= implements host mode only, no leg in
+  the 21-check matrix runs cluster DNS, and the "matrix row moves to
+  the etcd test once built" note above never executed
+  (=single-node-etcd= runs host mode). It is unblocked, not gated:
+  the preloaded-image mechanics it needs (=node.seedImages=, archive
+  seeding) have existed since v0.1 phases 1 and 4 — nobody has needed
+  the orthodox in-cluster Deployment because host mode shipped as the
+  only mode through nine phases. Stays =in-progress= on that one
+  item; if a consumer ever needs in-cluster CoreDNS this is the doc
+  that builds it.

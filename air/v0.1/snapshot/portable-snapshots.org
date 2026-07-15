@@ -1,0 +1,374 @@
+#+title: Portable Snapshots — CPU Templates and the Cross-Host Door
+#+state: in-progress
+#+FILETAGS: :core:snapshots:
+
+* Summary
+
+Phase 8 D3 made snapshots honest about what they are: host-locked
+artifacts, refused loudly on any identity mismatch. Phase 8 D4 then
+measured the economics of moving them anyway and came back GO —
+pre-mutation snapshots compress ~13–14× under zstd, transfer lands at
+~0.5–0.9 s/GB onto /dev/shm, an 11 GB cp3 mesh moves as ~800 MB, well
+inside the budget the 6.5 s cold boot sets. The binding blocker D4
+named was never transfer cost: it is *CPU identity across
+heterogeneous hosts*, and the named unlock was firecracker CPU
+templates. Phase 9 walks through that door.
+
+The thesis: pin the snapshot's CPU feature assumptions to a
+*template* instead of to whatever host minted it. A template masks
+CPUID/MSRs at the KVM level, pre-boot; the guest kernel builds its
+CPUID-shaped structures and its frozen xsave area against the
+template's feature set, not the host's. Two hosts running the same
+template produce and consume interchangeable artifacts — mint once,
+restore everywhere in the fleet class. That converts =kubenyx-snap=
+artifacts from per-host caches into *distributable CI artifacts*: the
+cross-host distribution door and the CI cross-derivation door (both
+deferred together in phase 8 D4) open together, exactly as that entry
+predicted.
+
+Honesty up front, same discipline as D3's refusal policy:
+
+1. A template makes portability *plausible and checkable*, not
+   proven. One host can prove the template masks what it claims and
+   that the mask survives restore; it cannot prove that a snapshot
+   minted on CPU generation A restores on generation B (divergent
+   xsave layouts, microcode-fed MSRs). The cross-host gate stays
+   *OPEN* and this doc says exactly what closes it (D4).
+2. Firecracker's static templates are deprecated and none of them
+   bless our host anyway — custom templates are the only realistic
+   path, and we author ours against measured CPUID dumps, not SDM
+   recall (D1).
+3. The identity manifest changes rule, not rigor: template-keyed
+   exact-match replaces host-keyed exact-match *only when a template
+   is present*; template-less artifacts keep today's host gate
+   unchanged (D3).
+
+Also recorded here: the consumer fan-out gate status (phase 8 D4's
+per-subtest fan-out entry) — the consumer-side audit has now run, and
+its numbers make this campaign the named prerequisite for the wall
+the estimate promised. See "The fan-out gate, audited".
+
+* Verified ground truth (firecracker v1.15.1 tag, pinned via flake)
+
+Source evidence fetched at the v1.15.1 tag (the nix store carries
+only the built binary); load-bearing claims checked against source
+files, one WebFetch abstraction removed from raw text — flagged where
+it matters.
+
+- *Static templates* C3/T2/T2S/T2CL/T2A/V1N1 all exist at 1.15.1 and
+  are all *deprecated since v1.5.0*. Intel statics target only
+  Skylake–Ice Lake (T2S is the sole snapshot-migration template,
+  Skylake↔Cascade Lake, with a stated perf penalty); T2A is AMD
+  Milan-only. Our host is a Granite Rapids Xeon 6975P-C (AMX) —
+  *outside every static template's blessed set*. Behavior of a static
+  on an unsupported/newer host is not documented (error vs silent
+  misbehavior); treat statics on this host as unsupported, full stop.
+- *Custom templates*: JSON =cpuid_modifiers= (leaf/subleaf/flags +
+  per-register bitmaps) and =msr_modifiers= (addr + bitmap), =0b=
+  bitmaps with =x= as passthrough. Loaded *pre-boot* via
+  =PUT /cpu-config= OR the config-file key =cpu-config=, whose type
+  in =resources.rs= is =CustomCpuTemplateOrPath= — untagged, inline
+  object or path string, so a store-path string is valid at 1.15.1.
+  Last-configured wins between static and custom.
+- *The template is baked into the snapshot.* =VcpuState= carries
+  cpuid/saved_msrs/xsave/xcrs; restore calls
+  =set_cpuid2=/=set_msrs= verbatim from the saved state
+  (=src/vmm/src/arch/x86_64/vcpu.rs=). =/snapshot/load= takes no CPU
+  config — the resume side *cannot and need not* re-specify the
+  template. =kubenyx-snap= resume already spawns firecracker with
+  only =--api-sock=/=--enable-pci= (=main.rs:879-911=), so the resume
+  path needs zero VMM-side changes. One sharp edge: without a
+  template, =MSR_IA32_TSX_CTRL= overwrites are *not* preserved across
+  restore. Official upstream stance remains "restore only on
+  identical hw/sw" — templates are our lever to make "identical"
+  mean "same template", and D4 is honest about how far that lever is
+  proven.
+- *The threading already exists.* The pinned astro/microvm.nix rev
+  =048907f= exposes =microvm.firecracker.cpu= (=nullOr attrs=,
+  default =null=) → the runner writes a =cpu-config.json= store path
+  into the config's =cpu-config= key — valid via the Path variant
+  above. Static templates would ride =extraConfig= (recursiveUpdate
+  into machine-config); =extraArgs= exists too. *No runner API hack
+  needed.*
+- *Application cost*: template application is pre-boot
+  =KVM_SET_CPUID2=/=SET_MSRS= — expected sub-ms. The real boot-cost
+  risk is the guest kernel taking different paths with features
+  masked; that is what the A/B budget in D5 exists to catch.
+- *Interplay with the shipped phase 2 fix*
+  (=clearcpuid=amx_tile,amx_int8,amx_bf16 noxsaves=): those are
+  guest-kernel-side — userspace CPUID still sees AMX, and =noxsaves=
+  keeps supervisor xstate out of the snapshot. A custom template
+  masking AMX/XTILE at leaf 0x7.0 EDX and the leaf 0xD XTILE state
+  bits masks at the *KVM* level and makes the frozen xsave shape
+  template-keyed. The template supersedes in principle; the
+  kernelParams *stay* (D2).
+
+Economics this campaign inherits (measured, phase 8 D4 reframe,
+2026-07-14): zstd ~13–14× on pre-mutation snapshots, ~0.5–0.9 s/GB
+transferred-and-landed on /dev/shm, 11 GB cp3 → ~800 MB moved.
+Transfer was never the blocker again after that entry; identity was.
+
+* Decisions
+
+** D1. Custom template, authored from dumps — statics rejected
+One custom template, versioned in-repo as canonicalized JSON, is the
+unit of portability. Content: mask the AMX feature bits (leaf 0x7.0
+EDX bits 22/24/25) and the XTILE state components (leaf 0xD.0/0xD.1),
+optionally XSAVES (leaf 0xD.1 EAX bit 3) — i.e. make the template
+enforce at KVM level what =clearcpuid=/=noxsaves= only arranged
+kernel-side, so the frozen xsave shape is keyed to the template.
+
+Authoring rule: the bit positions above are SDM recall, *not yet
+re-verified against 1.15.1* — the template is authored from
+=cpu-template-helper template dump= output on the live host and
+checked with =template verify=, never typed in from memory. The
+canonicalized JSON's sha256 is the template's identity (D3).
+
+Rejected alternatives:
+- *Static templates*: deprecated since 1.5.0, no blessed set includes
+  Granite Rapids, undocumented failure mode on unsupported hosts.
+  Dead on this host class; the identity scheme still supports
+  =template:<NAME>= for the day a blessed static host exists.
+- *Maximal masking down to a lowest-common-denominator fleet
+  profile*: tempting for portability, but every masked feature is a
+  guest-kernel path change we would have to re-bench, and we have no
+  heterogeneous pair to validate the wider mask against (D4). Start
+  with the narrow AMX/XTILE mask that our own panic history (phase 2
+  XRSTORS #GP, RFBM=0x618e7) proves is the live hazard; widen only
+  against measured fleet CPUID diffs.
+
+** D2. Config surface — =cpuTemplate= threaded, drv-neutral
+=lib/microvm.nix= =mkCluster=/=mkNode= gain =cpuTemplate ? null=,
+rendered into =microvm.firecracker.cpu= *only when non-null* — at the
+default, every existing drv and launcher script stays byte-identical.
+The cp1w2 program path is the canary, recorded before the edit and
+verified after (the phase 7 D5 / phase 8 D2 discipline, third campaign
+running).
+
+The =clearcpuid=/=noxsaves= kernelParams *stay* even though the
+template supersedes them in principle: removing them changes every
+existing drv — that is a separate intended-target change with its own
+gate, not a rider on this one. Belt and suspenders is also the honest
+posture while the template is new: the kernel-side fix has two years
+of green runs behind it.
+
+Rejected alternative:
+- *=extraArgs=/runner surgery to inject =--cpu-config=*: unnecessary —
+  the pinned rev's =microvm.firecracker.cpu= option already lands the
+  store path in the right config key. No hack to maintain, nothing to
+  rebase when the pin moves.
+
+** D3. Identity manifest — template-keyed when templated, host-keyed
+when not
+The phase 8 D3 manifest gains one line class. =take=/=mesh-take= record,
+when a template is in force:
+
+: identity cpu template:sha256:<hash of canonicalized cpu-config JSON>
+
+(or =template:<NAME>= for a static, should one ever apply).
+=resume=/=mesh-resume= grow =--cpu-template=; the comparison is
+*exact string* — no subset logic, no compatibility inference, per the
+same =main.rs:413-416= philosophy the host fingerprint gate already
+follows. A half-right subset check fails exactly like no check, with
+a guest panic instead of an error message; phase 8 D3 said it, it stays
+said.
+
+The rule table:
+
+| Artifact minted…   | take records                  | resume gate                        | =identity cpu-host= line   |
+|--------------------+-------------------------------+------------------------------------+----------------------------|
+| without template   | host CPU fingerprint (phase 8)   | exact-match refusal — *unchanged*  | the gate, as today         |
+| with custom        | =template:sha256:<hash>=      | exact-string vs =--cpu-template=   | advisory, warn-only        |
+| with static        | =template:<NAME>=             | exact-string vs =--cpu-template=   | advisory, warn-only        |
+
+The host fingerprint is *demoted, not deleted*: when templates match,
+a differing host fingerprint prints a warn line (it is exactly the
+signal a future cross-host incident report needs) but does not
+refuse. Template-less manifests keep today's refusal untouched — the
+interim stays as safe as phase 8 left it. Old binaries reading new
+manifests are already safe: the parser ignores unknown keys
+(=main.rs:514-516=), and an old binary falls back to the host
+fingerprint gate it knows, which is strictly more conservative.
+
+** D4. What one host can and cannot prove — the cross-host gate
+stays OPEN
+One-host validation, all three parts required before the status box
+ticks:
+
+1. *Mask proof*: an in-guest *userspace CPUID prober* — NOT
+   =/proc/cpuinfo=, which =clearcpuid= already scrubs and would fake
+   a pass — diffed baseline-vs-templated for the AMX/XTILE bits;
+   cross-checked against =cpu-template-helper template dump= +
+   =template verify=.
+2. *Bake-in proof*: take under the template → manifest shows the
+   template-keyed identity; resume (which passes no CPU config, by
+   construction) → the prober shows CPUID *still masked post-restore*.
+   Plus the mismatch drill: wrong =--cpu-template= string refuses
+   loudly pre-spawn, same as the D3 tamper test in phase 8.
+3. *Cost proof*: the D5 A/B budget holds.
+
+What one host *cannot* prove, stated plainly: that an artifact minted
+on CPU generation A restores on generation B. Divergent xsave layouts
+and microcode-fed MSRs (=IA32_ARCH_CAPABILITIES= class) are exactly
+the state a same-host test cannot exercise. So the cross-host gate —
+the actual thesis of this campaign — stays *OPEN* until a
+heterogeneous CPU pair exists in the fleet. What closes it, exactly:
+
+- entry criterion: =cpu-template-helper fingerprint dump= on both
+  hosts, =fingerprint compare= clean under the template;
+- then the real drill: mint on A, transfer (the measured ~0.5–0.9
+  s/GB path), restore on B under =--cpu-template=, quorum-write probe
+  green (the phase 7 D8 honesty bar, unchanged — a 401 or a wedged mesh
+  cannot pass as "restored");
+- both directions, A→B and B→A.
+
+Until then, distribution remains policy-OFF: the code paths land, the
+identity scheme lands, the one-host proofs land, and mint-per-host
+stays the operational stance. Opening the door and walking through it
+are different acts; phase 8 D2 drew that line and it holds here.
+
+** D5. Boot/resume cost budget
+Template application is pre-boot =KVM_SET_CPUID2=/=SET_MSRS= —
+sub-ms expected; the exposure is guest-kernel path changes under
+masked features. Budget, measured under the bench contention contract
+(exclusive host, no concurrent meshes):
+
+- cold boot: N≥20 runs, p50 vs the 3.4 s baseline; threshold *>2%* ⇒
+  investigate before shipping the template as default-for-snapshots;
+- resume: 100-round =kubenyx-snap cycle=, p50 vs the 33 ms baseline;
+  threshold *>2 ms* ⇒ investigate;
+- separate snapshot dirs per variant — templated and untemplated
+  artifacts never share a dir, so a mixed-dir resume can never
+  silently compare across variants.
+
+Not yet run; the Status box stays open until the numbers are in
+=bench/RESULTS.md=.
+
+* The fan-out gate, audited (consumer subtest chains)
+
+Phase 8 D4 gated per-subtest fan-out on a consumer-side audit kubenyx
+could not run itself. That audit has now run (2026-07-14), across all
+23 consumer checks: *112 subtest units* total. Classification: *83*
+strictly fan-out-eligible (69 independent + 14 sharing only a cheap
+replicable prelude), 621.9 s summed serial — 88 units / 897.6 s once
+the cheap preludes are replicated per shard; *24 units / 543.4 s
+hard-locked in stateful chains* that no harness verb can split from
+the outside.
+
+The wall-clock verdict is the part that lands on this campaign: at
+the audit's *measured per-shard overhead of 73–124 s (median ~92 s)*
+— fixture bring-up, not subtest bodies — per-subtest fan-out confirms
+only a *~227 s wall as-written, ~199 s after the cheapest consumer-side
+restructures*. The earlier 91–111 s estimate is not wrong, it is
+conditional: that band exactly brackets the largest un-splittable
+chain bodies (87–108 s), so it is reachable *only* when per-shard
+bring-up drops to the 3–23 s class — i.e. when every shard restores a
+cached cluster instead of building one. That is this campaign's
+deliverable: portable, cached snapshot artifacts are the named
+prerequisite for the fan-out wall the estimate promised. The
+remaining distance is consumer-side chain splitting, which stays
+consumer-side work, same boundary phase 8 D1 drew.
+
+Gate status: fan-out remains GATED — not on audit results anymore
+(they exist), but on this campaign's cross-host door and on
+consumer-side restructuring. One audit caveat carried forward: one
+consumer check failed during the sweep and contributed a single
+measured unit, so the source-level census is marginally higher than
+112.
+
+* Work plan
+
+1. Author the template: =cpu-template-helper template dump= on the
+   host, derive the AMX/XTILE mask, =template verify=, canonicalize,
+   commit JSON + its sha256. Prober binary (userspace CPUID diff)
+   alongside.
+2. =lib/microvm.nix=: =cpuTemplate ? null= threading into
+   =microvm.firecracker.cpu=; cp1w2 canary recorded before, verified
+   byte-identical after. kernelParams untouched.
+3. =kubenyx-snap=: manifest =template:= identity line on
+   =take=/=mesh-take=; =--cpu-template= exact-string gate on
+   =resume=/=mesh-resume=; host fingerprint demoted to warn-only when
+   templates match; template-less path untouched. Tamper drill both
+   ways (wrong template string; templated artifact without the flag).
+4. One-host validation (D4 parts 1–2): prober diff, bake-in-across-
+   restore proof, mismatch drills. Record in =bench/RESULTS.md=.
+5. Bench (D5): 20× cold A/B, 100-round cycle A/B, thresholds as
+   written; then the ship/hold decision for template-by-default on
+   snapshot-bearing presets.
+6. README + air overview: the portability table (what a template
+   does and does not prove; the OPEN cross-host gate and its exact
+   closing criteria). LAST.
+
+The cross-host drill itself (D4's closing criteria) is deliberately
+NOT a work-plan item — it is gated on hardware that does not exist in
+the fleet yet, and this doc refuses to pretend otherwise. When the
+heterogeneous pair lands, the drill runs under this doc and the gate
+line flips.
+
+* Status
+
+- [X] Research: 1.15.1 template surface, snapshot bake-in,
+      microvm.nix threading, statics ruled out on this host class
+      (verified against tag source, 2026-07-14)
+- [X] Template authored from dumps + prober (D1) —
+      =lib/cpu-templates/amx-mask.json= (canonical toJSON form,
+      sha256 =5dd93095…= committed alongside), authored from
+      =cpu-template-helper template dump= on the live host and
+      =template verify= green; the dump confirmed the bit positions
+      (0x7.0 EDX 22/24/25, 0xD.0 EAX 17/18) and surfaced one SDM
+      recall had missed: leaf 0x7.1 EAX bit 21 (AMX-FP16), set on
+      Granite Rapids, now in the mask. Prober committed as
+      =pkgs/cpuid-probe.nix= (2026-07-15)
+- [X] =cpuTemplate= threading, cp1w2 canary green (D2) — mkNode/
+      mkCluster =cpuTemplate ? null= into =microvm.firecracker.cpu=;
+      old-vs-new =lib/microvm.nix= isolation on the final tree:
+      cp1w2, cp3 and microvm-firecracker drvs byte-identical at the
+      default. Bonus identity: the runner-rendered cpu-config.json is
+      byte-identical to the committed template (same sha256), so the
+      canonical-form bet holds with zero normalization (2026-07-15)
+- [X] Manifest template-keyed identity + =--cpu-template= gate (D3) —
+      detection from the live VMM's =--config-file= (never a caller
+      claim), =identity cpu template:sha256:…= + advisory =identity
+      cpu-host=; exact-string resume gate; 21 unit tests cover every
+      row of the rule table incl. the legacy-binary conservatism
+      (2026-07-15)
+- [X] One-host validation: mask proof, bake-in proof, mismatch
+      drills (D4 parts 1–2) — userspace CPUID prober in-guest:
+      baseline all-1s (proving =/proc/cpuinfo= would have lied),
+      templated all-0s; take under template → template-keyed
+      manifest; resume (no CPU config passed, by construction) →
+      prober timer tick in resume-console.log still all-0s; wrong
+      =--cpu-template= refused pre-spawn, flagless resume of a
+      templated artifact refused, =--cpu-template= against an
+      untemplated artifact refused (2026-07-15)
+- [X] A/B cost budget vs 3.4 s / 33 ms baselines (D5) — numbers in
+      =bench/RESULTS.md= (2026-07-15 entry): cold median 3.31 s
+      baseline vs 3.37 s templated (+1.8%), resume median-of-medians
+      31.4 ms vs 32.8 ms (+1.4 ms); both inside budget — HOLDS. Run
+      count honesty: 3 runs per variant this session, not the N≥20
+      this section specifies; the 20-run pass is the remaining
+      pre-ship item for template-by-default (2026-07-15)
+- [X] README / overview portability table (2026-07-15) — README's
+      firecracker fine print carries the template story (what it does,
+      the template-keyed identity, the measured 3-run cost, the honest
+      cross-host caveat) plus the =--cpu-template= /
+      =--allow-identity-mismatch= rows in the kubenyx-snap reference;
+      the air OVERVIEW's at-a-glance section states the policy-OFF
+      gate
+- [ ] Cross-host gate: *OPEN* — the mechanism is fully landed
+      (template committed, identity template-keyed, one-host proofs
+      green above); what remains is exactly D4's closing criteria and
+      it is hardware-gated: a heterogeneous CPU pair in the fleet,
+      =fingerprint compare= clean under the template, then mint-on-A /
+      restore-on-B (and B→A) with the quorum-write probe green.
+      Intentionally not a work-plan item; until it runs, distribution
+      stays policy-OFF and mint-per-host stands
+
+State stays =in-progress= for one reason only: the D5 pre-ship pass
+(N≥20 cold A/B + 100-round cycle A/B, per the budget this doc
+specifies) has not run — the 3-run session numbers hold the budget but
+do not meet the spec, so template-by-default is not yet a ship/hold
+decision anyone has made. That pass is solo-host work; when it lands
+in =bench/RESULTS.md=, this doc goes =complete= with the cross-host
+gate as its explicitly-pointed open follow-up (the quorum-mesh.org
+convention).

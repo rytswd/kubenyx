@@ -1,5 +1,5 @@
 #+title: NixOS VM Test Suite
-#+state: work-in-progress
+#+state: complete
 #+FILETAGS: :testing:
 
 * Summary
@@ -56,3 +56,12 @@ The test driver logs =T_apiserver_ready=, =T_node_ready=, =T_pod_running= to std
 - 2026-07-05: Drafted; moved to ready.
 - 2026-07-05: single-node happy path green (18 steps); bench-vs-k3s green with in-VM primary metric (Kubenyx 96.3s vs k3s 113.2s). Open: etcd leg (first run in progress), multi-node, chaos/reboot steps in the main test.
 - 2026-07-05: multi-node test green (credential shipping via the driver's shared 9p dir standing in for the operator channel; SA-controller race guarded by an explicit default-SA wait, also added to single-node). etcd leg green including reboot persistence. Matrix fully implemented.
+- 2026-07-15: State audit — the three-test matrix this doc specified
+  has grown into the 21-leg checks matrix (see README), which is this
+  doc's mission fulfilled many times over. Honesty note on the happy
+  path: step 6's chaos smoke landed only in halves — datastore
+  SIGKILL is covered by =checks.failover= (v0.1 phase 3), the kubelet
+  SIGKILL never landed anywhere and is tracked as node-runtime.org's
+  open AC (single source of truth there, not here). Marked
+  =complete= — the suite exists, is green, and every later phase
+  added its legs through it.

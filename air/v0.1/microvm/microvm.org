@@ -1,5 +1,5 @@
 #+title: MicroVM Test Clusters
-#+state: work-in-progress
+#+state: complete
 #+FILETAGS: :packaging:
 
 * Summary
@@ -44,3 +44,10 @@ Full NixOS test VMs pay for BIOS, initrd, udev and a general-purpose userspace b
   runner pinned to one virtio-net queue pair: microvm.nix hardcodes
   =num_queues=2*vcpu=, which refuses the plain single-queue shared tap
   (MultiQueueNoTapSupport). Full tables: bench/RESULTS.md 2026-07-07.
+- 2026-07-15: State audit — both acceptance criteria were met by the
+  2026-07-07 entries (qemu-under-TCG verified; firecracker verified
+  on real KVM, measured not extrapolated). Every "phase 2 initial"
+  non-goal has since landed elsewhere: snapshot/restore in
+  [[file:../snapshot/snapshot-restore.org][snapshot-restore.org]], multi-node meshes in
+  [[file:multinode-microvm.org][multinode-microvm.org]], and host tap/bridge automation in the
+  =lib/microvm.nix= mesh launcher. Marked =complete=.

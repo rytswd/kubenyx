@@ -1,10 +1,10 @@
 #+title: Datastore — kine/sqlite and etcd Backends
-#+state: work-in-progress
+#+state: complete
 #+FILETAGS: :core:
 
 * Summary
 
-The =kubenyx.datastore= module: the storage the (unmodified) kube-apiserver talks etcd-v3 gRPC to. Two backends: =kine-sqlite= (default for single control-plane node) and =etcd= (multi-node / heavy API load). The apiserver does not know or care which is running — that is the point.
+The =kubenyx.datastore= module: the storage the (unmodified) kube-apiserver talks etcd-v3 gRPC to. Two backends: =kine-sqlite= (default for single control-plane node) and =etcd= (multi-node / heavy API load). The apiserver does not know or care which is running — that is the point. /(2026-07-07 update: a third backend, =etcd-mem=, joined for volatile single-node microVM boots and replaced kine on that path — see History; the two-backend framing above is the original v0.1 phase 1 scope.)/
 
 * Motivation
 
@@ -104,3 +104,11 @@ Assertion: =backend == "kine-sqlite" -> single control-plane node=.
   KVM-validated (bench/RESULTS.md 2026-07-07; three bugs fixed during
   validation — see the etcd-mem commit). kine-sqlite remains the
   default for persistent clusters.
+- 2026-07-15: State audit — every tracked open item was closed by a
+  later entry (etcd leg + reboot persistence 2026-07-05, notify-type
+  readiness 2026-07-06, etcd-mem 2026-07-07). The mid-test
+  datastore-kill AC is additionally covered on the etcd backend by
+  =checks.failover= (SIGKILL of etcd.service, API rides through — a
+  v0.1 phase 3 leg); the kine variant never got a dedicated
+  restart-mid-test leg and relies on =Restart=always= + the applier's
+  internal retries (2026-07-06 entry). Marked =complete=.

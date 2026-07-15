@@ -228,7 +228,15 @@ Keep the snapshot on tmpfs (`/dev/shm`) as shown — restores demand-page
 the 3.5 GB memory image, and tmpfs makes that free.
 
 > Snapshots are VMM-version-locked; `kubenyx-snap` from the flake ships
-> the matching firecracker on PATH. Details, gotchas and design:
+> the matching firecracker on PATH. They are also host-locked artifacts,
+> and the manifest enforces it: `take` records the node closure hash,
+> VMM store path and host CPU fingerprint, and `resume`/`mesh-resume`
+> refuse any mismatch loudly before a VMM is spawned (a snapshot
+> silently assumes the minting host's CPU feature set — moving one to a
+> different host has a measured history of guest kernel panics).
+> Mint-per-host is the policy; a firecracker CPU template (see the
+> firecracker fine print below) keys the identity to the template
+> instead. Details, gotchas and design:
 > [`air/v0.1/snapshot/snapshot-restore.org`](air/v0.1/snapshot/snapshot-restore.org).
 
 </details>
@@ -262,9 +270,20 @@ kubenyx.lib.microvm.mkCluster {
   agents = 9;                     # 1 control plane + 9 workers
   name = "cp1w9";                 # launcher binary + console prefix
   runDir = "/tmp/kubenyx-cp1w9";  # per-size run dir; snapshots coexist
+  # subnet = "10.101.0.0/24";     # non-default subnet = own bridge + taps
 }
 # => { members, bootOrder, nodes, runners, launcher, shutdown }
 ```
+
+**Concurrent meshes.** The default subnet (`10.100.0.0/24`) is a
+singleton — one mesh at a time, and the presets all use it. Give a
+second mesh its own `subnet` and every derived name changes with it
+(bridge `kubenyx-br-<hash>`, taps `kx-<hash>-t<N>`, MACs, addresses),
+so two meshes on one host cannot collide by construction. A default
+`cp1w2` and a `10.101.0.0/24` mesh have run side by side, both Ready,
+with scoped teardown. One caveat, honestly: the published timing
+numbers come from a solo host — concurrent meshes contend for the same
+cores, so don't benchmark two at once.
 
 `launcher`/`shutdown` are the same bridge-and-boot / escalation-ladder
 scripts the presets ship (single-control-plane; for a volatile
@@ -512,6 +531,45 @@ minimal on purpose. Generated `waitReady` covers single-server clusters;
 multi-server bring-up needs the CA custody ceremony from
 [`tests/multi-server.nix`](tests/multi-server.nix).
 
+### Rewinding the cluster between subtests
+
+`mkCluster { snapshotable = true; }` adds in-driver snapshot verbs to
+the generated Python: `kubenyx_snapshot_all()` freezes every node with
+a consistent cut (stop-all, `savevm` each, cont-all — same discipline
+as the firecracker mesh snapshots) and `kubenyx_restore_all()` rewinds
+the whole cluster to that point, fixing each guest's wall clock on the
+way back. Snapshot once after `waitReady`, then every subtest — or
+every retry of a flaky one — starts from genuinely pristine state
+instead of trusting cleanup:
+
+```nix
+testScript = ''
+  start_all()
+  ${cluster.waitReady}
+  kubenyx_snapshot_all()        # once, after generic bring-up
+  # ... mutate, assert ...
+  kubenyx_restore_all()         # byte-honest rewind; repeatable
+'';
+```
+
+Honest cost label: this verb is **seconds-class**, not milliseconds —
+`loadvm` loads guest RAM eagerly (~7–13 s per restore at 4 G; the
+per-node walls run in parallel, so the cut tracks the slowest node,
+not the sum). It amortizes a ~28 s bring-up across N subtests; if your
+subtests are cheaper than the restore, don't use it. Subtest style
+matters too: wait-for-condition gates survive a resume, "assert event
+observed" style does not. The
+[`harness-snapshot`](tests/harness-snapshot.nix) check is the dogfood
+(rewind-twice proven).
+
+### Which verb at which layer
+
+| Layer | Verb | Cost | What it buys |
+|---|---|---|---|
+| Cold boot (microVM) | `nix run .#cp1` / `.#cp3` | ~3.4 s / ~6.5 s | A fresh cluster from nothing; mints the snapshots below |
+| Recreation (microVM, per host) | `kubenyx-snap resume` / `mesh-resume` | ~28–48 ms | A live cluster per test *run*, cheaper than a fork |
+| Rewind (NixOS test driver) | `kubenyx_restore_all()` | seconds | Pristine state per *subtest* inside one driver run |
+
 </details>
 
 ## 🔬 Tests & Benchmarks
@@ -544,9 +602,9 @@ Two harness gotchas worth knowing (found the hard way, recorded in
 |---|---|
 | `modules/` | The NixOS module: control plane, datastore, PKI, node runtime, DNS, addons, network, storage |
 | `guests/`, `flake.nix` | MicroVM guest profile + firecracker/cloud-hypervisor/qemu variants + mesh generators |
-| `lib/` | CIDR math (v4/v6), `harness.nix` (test embedding) |
+| `lib/` | CIDR math (v4/v6), `microvm.nix` (mesh construction, per-mesh subnets, CPU templates), `harness.nix` (test embedding + snapshot verbs) |
 | `rust/` | The boot-path tools: `kubenyx-pki`, `kubenyx-ready`, `etcd-mem`, `kubenyx-snap`, `kubenyx-clockstep`, `kubenyx-lb` |
-| `tests/` | The 20-leg NixOS VM test matrix + the k3s benchmark |
+| `tests/` | The 21-leg NixOS VM test matrix + the k3s benchmark |
 | `bench/RESULTS.md` | Every measurement, newest first, including the honest corrections |
 | `air/` | Design docs (planning-first workflow): architecture, per-subsystem specs, session plans |
 | `templates/` | `nix flake init -t` starting point |
@@ -589,7 +647,7 @@ when a dependency is the bottleneck, replace it with 300 lines of Rust.
 </details>
 
 <details>
-<summary><b>Checks matrix</b> — 20 legs, all green</summary>
+<summary><b>Checks matrix</b> — 21 legs, all green</summary>
 
 `nix build .#checks.x86_64-linux.<name>.driver -o d && d/bin/nixos-test-driver`
 — give each **concurrent** run its own `XDG_RUNTIME_DIR` (the driver keys
@@ -599,6 +657,7 @@ vde sockets and vm-state off it with no per-run namespace).
 |---|---|---|
 | `single-node` / `single-node-etcd` | Happy path on kine / real etcd | 37 s / 153 s |
 | `harness` | `lib.harness` dogfood: server+agent stood up exclusively through the exported helper | 39 s |
+| `harness-snapshot` | In-driver snapshot verbs: consistent savevm cut after Ready, mutate, loadvm rewind-twice; per-node walls parallel | 62 s (testScript) |
 | `multi-node` / `multi-node-mem` | Server + agent on etcd / on etcd-mem | 38 s / 22 s |
 | `multi-server` | 3-server etcd quorum + LB agent + CA custody | 50 s |
 | `quorum-volatile` | The cp3 posture: pre-seeded CA custody, quorum on tmpfs, join-probe fast-exit, cross-server write/read; require-shipped-ca refuses before the ship | 34 s |
@@ -631,6 +690,8 @@ and the per-variant `nixosConfigurations`.
 | `take` (attach) | `--sock PATH` | `kubenyx.sock` | Snapshot a *running* VM: pause → create → resume in place |
 | `resume` | `--snapshot DIR` | `snapshot` | Restore into a fresh VMM, leave it running |
 | | `--firecracker BIN` | from PATH | Must match the snapshot's VMM version |
+| | `--cpu-template PATH\|literal` | *(none)* | Required for template-keyed snapshots; exact-string match against the manifest, no subset logic |
+| | `--allow-identity-mismatch` | off | Override the identity refusal (closure/VMM/CPU triple) — loudly |
 | | `--api-sock NAME` | `kubenyx-resume.sock` | Keep it relative (SUN_LEN) |
 | | `--probe ADDR` / `--poke ADDR` | `10.100.0.2:6443` / `:10123` | API liveness probe / clock-poke target |
 | | `--no-pci` | off | Only for snapshots taken without `--enable-pci` |
@@ -638,7 +699,7 @@ and the per-variant `nixosConfigurations`.
 | `mesh-take` | `--run-dir DIR` | `/tmp/kubenyx-cluster` | Pause ALL nodes, snapshot in parallel, free the taps |
 | | `--out DIR` | `mesh-snapshot` | Per-node subdirs + manifest |
 | | `--node name=ip` (repeat) | auto-discovered | Only needed off-convention (launcher manifest, else `server`/`server1`=.2, `serverN`=.1+N, agents after the servers) |
-| `mesh-resume` | `--snapshot DIR` | `mesh-snapshot` | Concurrent restore of every node from the manifest |
+| `mesh-resume` | `--snapshot DIR` | `mesh-snapshot` | Concurrent restore of every node from the manifest (takes `--cpu-template` / `--allow-identity-mismatch` too) |
 | `mesh-cycle` | mesh-resume's flags + `-n N` | 5 | Mesh recreation benchmark |
 
 </details>
@@ -667,6 +728,20 @@ firecracker yourself:
   `XRSTORS` unless the snapshot was taken with
   `clearcpuid=amx_tile,amx_int8,amx_bf16 noxsaves` (already in the
   firecracker variant's kernel params).
+- A custom **CPU template** masks the same hazard at the KVM level
+  instead of the guest kernel: the repo ships
+  [`lib/cpu-templates/amx-mask.json`](lib/cpu-templates/amx-mask.json)
+  (authored from `cpu-template-helper` dumps, sha256 committed
+  alongside), threaded via
+  `mkCluster { cpuTemplate = kubenyx.lib.microvm.cpuTemplates.amx-mask; }`.
+  Snapshots minted under a template get a *template-keyed* identity —
+  resume needs the matching `--cpu-template`, and the host CPU
+  fingerprint demotes to a warning. Measured cost is inside noise
+  (+1.8 % cold, +1.4 ms resume, 3-run A/B). Honesty note: same-host
+  proofs are green (mask survives restore, mismatches refuse), but
+  cross-host restore is unvalidated until a heterogeneous CPU pair
+  exists — mint-per-host remains the policy
+  ([`air/v0.1/snapshot/portable-snapshots.org`](air/v0.1/snapshot/portable-snapshots.org)).
 - `--enable-pci` must match between snapshot and restore VMM.
 - API socket paths must stay under 108 chars (`SUN_LEN`) — use relative
   paths from a short working directory.

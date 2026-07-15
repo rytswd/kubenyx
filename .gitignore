@@ -19,7 +19,9 @@ microvm-*.log
 *.sock
 resume-console.log
 take-console.log
-snapshot/
+# Anchored: kubenyx-snap's default --out dir at the repo root only —
+# unanchored `snapshot/` silently untracked air/v0.1/snapshot/.
+/snapshot/
 
 # Fetched per-boot cluster credentials (host-side kubectl)
 *.kubeconfig

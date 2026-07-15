@@ -82,6 +82,25 @@ Read =core/architecture.org= first — it records the cross-cutting decisions ev
 
 Research reference (raw findings, kept verbatim): =air/context/research/{prior-art,control-plane-pki,runtime-node,networking-addons,fast-start}.md=
 
+* Reuse, recreation and portability at a glance
+
+The snapshot/ area grew three distinct verbs at three layers; they are
+deliberately not the same thing and carry different cost classes:
+
+| Layer | Verb | Cost class | Doc |
+|-------+------+------------+-----|
+| Cold boot (microVM) | =nix run .#cp1= / =.#cp3= | ~3.4 s / ~6.5 s | microvm/microvm.org, quorum/quorum-mesh.org |
+| Recreation, per host (firecracker) | =kubenyx-snap resume= / =mesh-resume= | ~28–48 ms | snapshot/snapshot-restore.org |
+| Rewind, in-driver (QEMU savevm/loadvm) | =kubenyx_restore_all()= | seconds (eager RAM load) | snapshot/test-amplification.org D1 |
+
+Portability status: snapshots are host-locked and the manifest
+enforces it (phase 8 D3 identity triple, loud refusal). A firecracker
+CPU template (phase 9, =lib/cpu-templates/amx-mask.json=) re-keys the
+identity to the template; same-host proofs are green, but cross-host
+restore stays *policy-OFF* until the heterogeneous-pair drill runs
+(snapshot/portable-snapshots.org D4 — hardware-gated). Per-subtest
+fan-out stays gated on that door plus consumer-side chain splitting.
+
 * Historical phase → area mapping
 
 Older citations (commit messages, bench/RESULTS.md history, external notes) may reference docs under their pre-2026-07-15 phase-directory paths — those directories carried version-shaped names, but they were phases of v0.1, not separate versions. To locate an old citation, find its document row by phase and filename; the new path is relative to this directory:

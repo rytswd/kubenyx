@@ -1,5 +1,5 @@
 #+title: Flake Shape & Module Layout
-#+state: work-in-progress
+#+state: in-progress
 #+FILETAGS: :packaging:
 
 * Summary
@@ -97,3 +97,14 @@ kubenyx = {
 * History
 - 2026-07-05: Drafted; moved to ready.
 - 2026-07-05: Implemented (flake.nix + modules/ + templates/). Divergences: kubernetes package kept with default components — the nixpkgs installPhase hard-requires kubeadm for shell completions, so trimming needs an overridden installPhase (phase 2 cleanup); options.nix not split out yet; closure report and options-doc checks not wired.
+- 2026-07-15: State audit — the 2026-07-05 divergences are all still
+  current: the kubernetes package still ships default components
+  (kubeadm in the closure; no =components== override anywhere in the
+  tree), the =kubernetesAgent= trimmed build was never made,
+  =modules/options.nix= was never split out, and neither the
+  closure-size report nor the =nixosOptionsDoc= render is wired as a
+  check. Everything else in this doc landed (module layout, option
+  surface, templates, devShells, VM-test checks — the matrix has
+  since grown to 21 legs). None of the remainders block anything and
+  none were picked up across phases 2–9; they stay this doc's open
+  ledger. Stays =in-progress=.

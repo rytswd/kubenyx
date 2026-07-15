@@ -1,5 +1,5 @@
 #+title: Node Runtime — containerd, crun, kubelet
-#+state: work-in-progress
+#+state: in-progress
 #+FILETAGS: :node:
 
 * Summary
@@ -85,3 +85,12 @@ CLI remainder: =--config=, =--kubeconfig=, =--node-ip=, =--hostname-override=<de
 - 2026-07-05: Drafted from runtime research; moved to ready.
 - 2026-07-05: Implemented and verified (single-node VM test: pod start with no network access proves preload+pin; crun as default runtime; watchdog active). Divergences: seed-images parallel to kubelet (above); kubelet settings merge is =lib.recursiveUpdate= so nested overrides don't wipe siblings.
 - 2026-07-05: Implemented (modules/node.nix); zero-registry pod start proven in VM test. Open ACs: configz inspection, crictl runtime assert, kubelet SIGKILL restart test.
+- 2026-07-15: State audit — all three open ACs are still open: no leg
+  in the 21-check matrix inspects kubelet configz, asserts the crun
+  runtime via crictl, or SIGKILLs kubelet (the only SIGKILL leg is
+  etcd in =checks.failover=). The kubelet-SIGKILL item is the same
+  gap vm-tests.org's happy-path step 6 carries; it is tracked here as
+  the single source of truth. Left open — test-matrix additions need
+  a matrix run to land honestly. Everything else (preload+pin, crun
+  default, watchdog, PATH/sysctl handling) is implemented and
+  test-covered; stays =in-progress= on those three assertions.

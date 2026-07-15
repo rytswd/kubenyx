@@ -1,0 +1,154 @@
+#+title: Firecracker Snapshot/Restore — 66ms Cluster Recreation
+#+state: complete
+#+FILETAGS: :core:testing:
+
+* Summary
+
+Snapshot a cluster-ready Kubenyx microVM once, restore it into a fresh
+firecracker process in ~75 ms — a live Kubernetes cluster faster than a
+process fork. Proven end-to-end on the EC2 KVM session (2026-07-07)
+with raw firecracker API calls; this doc records the measured findings
+and specifies =kubenyx-snap=, the runner extension (third Rust tool)
+that packages the flow.
+
+* Measured results (EC2 metal, Xeon 6975P-C, firecracker 1.15.1)
+
+3 restores from one snapshot of the etcd-mem guest (snapshotted ~5s
+after =KUBENYX-CLUSTER-READY= at 8.74s uptime):
+
+| Leg | median |
+|---|---|
+| fresh VMM spawn → API socket up | 8 ms |
+| PUT /snapshot/load returns (VMM-internal load ~23 ms) | 40 ms |
+| load return → first apiserver TLS response | 40 ms |
+| *load request → usable API* | *74.5 ms* |
+| VMM spawn → usable API | ~88 ms |
+
+Artifacts: vmstate 68 KB + mem file 3.5 GB (=File= backend, demand-paged
+— warm host page cache makes this nearly free). The snapshot pair is
+immutable; every restore is a byte-identical clone that diverges only
+after resume. The apiserver kept serving cleanly 30s+ after restore.
+
+* Findings (the four design questions)
+
+** Clock resync
+TSC/kvmclock state restores with the snapshot, so guest
+=CLOCK_MONOTONIC= continues seamlessly — components never observe the
+pause, leases stay internally coherent, and there is NO lease-expiry
+storm (this fear from the plan did not materialize). The cost:
+=CLOCK_REALTIME= is stale by exactly (restore − snapshot) wall time
+(measured 91s via the apiserver =Date= header) and nothing resyncs it —
+firecracker sends no resume notification and the kernel reads KVM
+wallclock only at boot. vmgenid DOES fire (=crng reseeded due to
+virtual machine fork= on console), so CRNG uniqueness across clones is
+handled. Serving certs remain valid (stale clock moves *away* from
+expiry). =kubenyx-snap= must step the wall clock post-restore: the
+guest already loads =ptp_vmclock=, so chrony/phc2sys against it — or a
+oneshot step triggered off the vmgenid change.
+
+** Network state
+The host tap survives VMM death; =/snapshot/load= reattaches it by name
+and firecracker kicks the queues. New inbound TCP works within ~40 ms;
+host ARP re-resolves unaided. All in-guest connections
+(kubelet↔apiserver↔etcd-mem) are inside the snapshot and survive
+intact. Host-side connections open at snapshot time become dead
+half-open guest sockets — close them before pausing. The tap name is
+baked into the snapshot ⇒ one restored clone at a time;
+=network_overrides= on /snapshot/load can remap the host tap for
+concurrent clones, but guest IP/MAC/cluster identity still collide —
+clone fan-out needs per-clone NAT namespaces (future work).
+
+** Datastore coherence
+etcd-mem lives entirely in guest RAM: pause-then-snapshot is a fully
+quiesced capture, stronger than crash-consistent, no WAL/fsync concerns
+by construction. This is the payoff of dropping kine/sqlite: the
+datastore question disappears entirely.
+
+** AMX/CET xstate (the discovery)
+Restoring into a fresh VMM on AMX hosts (Granite Rapids) panics the
+guest kernel in =restore_fpregs_from_fpstate=: XRSTORS #GP with
+RFBM=0x618e7 — the new firecracker process never re-acquires AMX guest
+xstate permission (bits 17,18), and masking AMX alone still panics on
+IA32_XSS-managed CET state (bits 11,12). Fix (shipped in the
+firecracker variant, no measured boot cost):
+=clearcpuid=amx_tile,amx_int8,amx_bf16 noxsaves= — no AMX in XCR0, no
+supervisor xstates in XSAVES, so the snapshot carries neither.
+Alternative for later: a firecracker CPU template masking the CPUID
+bits instead of guest-side clearcpuid. /(Landed 2026-07-15, v0.1
+phase 9: =lib/cpu-templates/amx-mask.json= masks AMX/XTILE at the KVM
+level and keys the snapshot identity to the template — see
+[[file:portable-snapshots.org][portable-snapshots.org]]; the kernelParams stay as belt-and-suspenders.)/
+
+* kubenyx-snap specification
+
+A small Rust tool (kubenyx-tools workspace, alongside kubenyx-pki and
+kubenyx-ready) speaking to the firecracker API socket. The stock
+microvm.nix runner already passes =--api-sock kubenyx.sock= in CWD, so
+no runner fork is needed.
+
+- =kubenyx-snap take [--sock kubenyx.sock] [--out DIR]= ::
+  wait for =KUBENYX-CLUSTER-READY= on the console log, close any host
+  connections, =PATCH /vm {state:Paused}=, =PUT /snapshot/create=
+  (Full → =snap.vmstate= + =snap.mem=), then kill the VMM (frees the
+  tap).
+- =kubenyx-snap resume [--snapshot DIR]= ::
+  verify tap free, spawn =firecracker --api-sock <relative path>
+  --enable-pci= with NO =--config-file= (the =--enable-pci= flag must
+  match the snapshot), =PUT /snapshot/load= with
+  ={mem_backend:{backend_type:File}, resume_vm:true}=, poll the guest
+  API for first TLS response, report the ms number.
+- Post-restore clock step in-guest (ptp_vmclock/chrony or
+  vmgenid-triggered oneshot) — the one guest-side change required.
+
+Gotchas encoded by the session: API socket paths must stay under
+SUN_LEN=108 chars (use relative paths in CWD); =--enable-pci= mismatch
+between snapshot and restore VMM fails the load.
+
+Optimizations staged for later: =snap.mem= on tmpfs;
+=snapshot_type:Diff= + balloon deflate to shrink the 3.5 GB mem file;
+uffd backend for lazy clone fan-out; =network_overrides= + NAT
+namespaces for concurrent clones.
+
+* Acceptance Criteria
+- =kubenyx-snap take/resume= reproduce the measured flow without
+  hand-run curl. ✓
+- Resume-to-usable-API ≤ 100 ms sustained across 5 consecutive resumes.
+  ✓ (median 65.6 ms, max 71.5 ms)
+- Guest wall clock correct within 1s after resume. ✓ (to the second;
+  =KUBENYX-CLOCKSTEP stepped=149412ms= on a deliberately aged snapshot)
+- One-clone-at-a-time: =cycle= kills between rounds; a busy tap fails
+  the load with a clear firecracker error (no silent corruption).
+
+* History
+- 2026-07-07: Findings from the EC2 KVM session written up; flow proven
+  manually at 74.5 ms median; AMX/CET boot-args fix shipped in the
+  firecracker variant. State: ready (for the kubenyx-snap
+  implementation).
+- 2026-07-07: Implemented and validated same-session. =kubenyx-snap=
+  (host: take/resume/cycle, hand-rolled HTTP over the API socket —
+  firecracker ignores =Connection: close=, read by Content-Length or
+  every call stalls to the socket timeout) + =kubenyx-clockstep=
+  (guest UDP time-poke daemon; steps CLOCK_REALTIME on >500ms offset).
+  Design revision vs the findings above: firecracker attaches NO
+  VMCLOCK device (in-guest ACPI probe shows only FCVMGID — the
+  "ptp_vmclock already loads" note was wrong), so the clock fix is
+  host-poked UDP rather than ptp_vmclock/chrony. Also fixed: =vmgenid=
+  driver was never loaded, so restored clones shared the snapshot's
+  CRNG state; =boot.kernelModules= now loads it and the kernel reseeds
+  on restore. Measured: take 9.1s boot + 2.7s write (tmpfs); cycle
+  median 65.6 ms (25–72 ms, 5 rounds). Recreation is ~120× cheaper
+  than the 7.8s cold boot. Flake exposes =packages.kubenyx-snap=
+  (wrapper pinning the matching firecracker). State: complete.
+  Remaining ideas staged in "Optimizations" (Diff snapshots, uffd
+  fan-out, per-clone NAT).
+- 2026-07-08: Mesh recreation shipped (the phase-2 item): =mesh-take= /
+  =mesh-resume= / =mesh-cycle= on kubenyx-snap. Consistency model:
+  pause every node before snapshotting any (4.1ms cut across 3 nodes);
+  monotonic clocks freeze together so guests never observe it, and
+  cross-VM TCP survives — kubectl shows all nodes Ready immediately
+  after restore. Measured: 3-node mesh 92.8ms median, 7-node 102.7ms
+  (~flat in node count; 7 concurrent tmpfs restores load in ~40ms).
+  Per-node clock pokes moved OFF the measured path (they were 400ms of
+  sleeps inside it). Per-node taps make concurrent restores
+  collision-free by construction — the network_overrides/NAT ideas
+  below remain only for restoring multiple CLONES of the same node.
