@@ -15,7 +15,7 @@ Full NixOS test VMs pay for BIOS, initrd, udev and a general-purpose userspace b
 - A grep-able =KUBENYX-CLUSTER-READY uptime=<t>s= console marker as the benchmark interface.
 - The guest profile verifiable on KVM-less machines (qemu variant, TCG).
 
-** Non-Goals (v0.2 initial)
+** Non-Goals (phase 2 initial)
 - Firecracker snapshot/restore (sub-second resume) — next step, needs KVM hardware to develop against.
 - Multi-node microVM meshes.
 - Host tap/bridge automation (documented one-liner; automation later).
@@ -40,7 +40,7 @@ Full NixOS test VMs pay for BIOS, initrd, udev and a general-purpose userspace b
   the boot path), plus initrd store warmup and kubenyx.target pulled to
   sysinit (~3.5s of the win; etcd-mem itself ~0.5s wall). Firecracker
   variant carries snapshot-safe kernel params (AMX/CET —
-  [[file:snapshot-restore.org][snapshot-restore.org]]). cloud-hypervisor
+  [[file:../snapshot/snapshot-restore.org][snapshot-restore.org]]). cloud-hypervisor
   runner pinned to one virtio-net queue pair: microvm.nix hardcodes
   =num_queues=2*vcpu=, which refuses the plain single-queue shared tap
   (MultiQueueNoTapSupport). Full tables: bench/RESULTS.md 2026-07-07.

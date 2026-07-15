@@ -1,4 +1,4 @@
-# Single-node happy path (air/v0.1/vm-tests.org). Runs in the Nix sandbox
+# Single-node happy path (air/v0.1/harness/vm-tests.org). Runs in the Nix sandbox
 # with no network — which is itself the proof of the zero-registry design.
 { kubenyx }:
 { pkgs, lib, ... }:

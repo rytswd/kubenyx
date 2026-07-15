@@ -1,4 +1,4 @@
-# Build-time pre-baked containerd store (air/v0.4/prebake.org): run
+# Build-time pre-baked containerd store (air/v0.1/perf/prebake.org): run
 # containerd inside the nix sandbox with --root $out, `ctr import` the
 # seed set, and ship the resulting /var/lib/containerd tree (content
 # blobs + boltdb metadata) in the closure. Boot-time import cost drops

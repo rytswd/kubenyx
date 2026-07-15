@@ -1,4 +1,4 @@
-# CA custody gate (air/v0.3/durable-ha.org §3, test matrix "ca-custody"):
+# CA custody gate (air/v0.1/quorum/durable-ha.org §3, test matrix "ca-custody"):
 # a durable-posture server (balanced profile + persistent datastore) must
 # REFUSE to boot its PKI without an operator-shipped CA bundle — hard error
 # naming the mint-ca command, never a silent self-mint (a re-minted CA would

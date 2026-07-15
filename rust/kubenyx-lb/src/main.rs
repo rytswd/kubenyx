@@ -1,4 +1,4 @@
-//! kubenyx-lb: client-side apiserver load balancer (air/v0.3/durable-ha.org
+//! kubenyx-lb: client-side apiserver load balancer (air/v0.1/quorum/durable-ha.org
 //! §4, Decision 1). A local health-checking TCP forwarder on every agent of
 //! a multi-server cluster: kubelet/kube-proxy/coredns dial
 //! https://127.0.0.1:6444 and this process forwards to whichever declared

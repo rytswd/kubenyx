@@ -1,4 +1,4 @@
-# Control plane (air/v0.1/control-plane.org): stock apiserver / kcm /
+# Control plane (air/v0.1/core/control-plane.org): stock apiserver / kcm /
 # scheduler as systemd services with k0s-derived lean flags and real
 # readiness via the notify wrapper (no sd_notify upstream, k8s#8311).
 {

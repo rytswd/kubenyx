@@ -57,7 +57,7 @@ design decision:
 - Packages/helpers: `./pkgs/`
 - Rendered addon manifests: `./modules/addons/`
 - NixOS VM tests: `./tests/`
-- Planning documents: `./air/` (milestones under `air/v0.1/`, …)
+- Planning documents: `./air/` (area subdirectories under `air/v0.1/`: core, microvm, snapshot, quorum, network, hosts, perf, harness)
 - Air context: `./air/context/`
 
 ## Current Focus

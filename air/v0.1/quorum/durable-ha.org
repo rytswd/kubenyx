@@ -36,7 +36,7 @@ discovery, no join tokens.
 
 * Design
 
-** 1. Membership schema (shared with v0.2 mesh — build first)
+** 1. Membership schema (shared with phase 2 mesh — build first)
 =nodes.<name>.role = "server" | "agent"= (default "agent"; assertion:
 the machine-level =kubenyx.role= must match its own entry). Derived
 everywhere: =servers = filterAttrs (n: v: v.role == "server") nodes=.
@@ -164,7 +164,7 @@ credentials means no kubelet for READY to gate either.
 ** 6. Agent scale-out (supported; hitless by construction)
 Adding a compute node is: add the entry to =kubenyx.nodes= → rebuild →
 ship → boot. The existing architecture already makes this
-non-disruptive; v0.3 only has to *prove* it:
+non-disruptive; phase 3 only has to *prove* it:
 - Server rebuild re-runs =kubenyx-pki=, which is fingerprint-gated and
   additive — it mints the new agent's leaves and touches nothing else;
   the PKI unit is deliberately =Wants= (not =Requires=) so a PKI rerun
@@ -252,7 +252,7 @@ overrides (D12).
 * Sizing (relative)
 | Piece | Size | Notes |
 |---|---|---|
-| nodes.role schema + assertions | S | shared with v0.2 mesh |
+| nodes.role schema + assertions | S | shared with phase 2 mesh |
 | etcd quorum wiring + SANs | M | mostly datastore.nix + pki |
 | CA custody flow | M | kubenyx-pki subcommand + gate hardening |
 | kubenyx-lb | M | new Rust tool, reuses probe code |
@@ -287,7 +287,7 @@ overrides (D12).
 
 * History
 - 2026-07-08: Drafted on request ("check how this would look with
-  non-disposable + HA CP") before starting the v0.2 mesh
+  non-disposable + HA CP") before starting the phase 2 mesh
   implementation, so the shared membership schema lands once.
 - 2026-07-08: §3 (CA custody: mint-ca + hard gate) and §4 (kubenyx-lb
   + agent wiring) implemented; details recorded inline in those
@@ -326,7 +326,7 @@ overrides (D12).
   path held the performance gate (bench/RESULTS.md 2026-07-08
   campaign entry). Complete.
 - 2026-07-09: Decision 3 revised by user steer — CP growth is now
-  machinery, not a runbook: [[file:../v0.5/cp-growth.org][cp-growth.org]] (learner-based declarative
+  machinery, not a runbook: [[file:cp-growth.org][cp-growth.org]] (learner-based declarative
   reconcile through exactly the door-open hooks this doc encoded:
   the member-set guard error site, eval-derived member/backend/SAN
   sets). Shrink remains a runbook.

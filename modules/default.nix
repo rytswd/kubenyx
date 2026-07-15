@@ -33,8 +33,8 @@ let
         default = "agent";
         description = ''
           This member's cluster role, as seen by every node. Shared schema
-          for the v0.2 microVM mesh and v0.3 durable/HA tracks: datastore
-          constraints count servers, and v0.3 later derives the etcd quorum
+          for the phase 2 microVM mesh and phase 3 durable/HA tracks: datastore
+          constraints count servers, and phase 3 later derives the etcd quorum
           and LB backend set from the same field. Default "agent" — explicit
           multi-node declarations must mark their server(s); the implicit
           single-node default entry inherits the machine-level kubenyx.role.
@@ -170,7 +170,7 @@ in
           only observe the console: systemd stops mirroring unit status
           once startup "finishes", so without the markers a profiler has
           to reconstruct phases from journal timestamps after the fact
-          (air/v0.7). Semantics: notify units (the datastore,
+          (air/v0.1/quorum/quorum-mesh.org). Semantics: notify units (the datastore,
           kube-apiserver, coredns) mark genuine readiness — ExecStartPost
           runs after READY=1 — while kubelet (Type=simple) and oneshots
           mark process start/completion. The flake's own microVM guest
@@ -269,7 +269,7 @@ in
   config = lib.mkIf cfg.enable {
     # warnIf (not an assertion): a 2-server membership is legal but an even
     # quorum — it survives zero failures while doubling the blast surface.
-    # v0.3's durable track wants 1 or 3+.
+    # phase 3's durable track wants 1 or 3+.
     assertions =
       lib.warnIf (serverCount == 2)
         "kubenyx: 2 nodes declare role = \"server\" — an even quorum tolerates zero failures; use 1 or 3+ servers"

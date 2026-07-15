@@ -17,7 +17,7 @@ Same-node pod traffic over a plain bridge is the theoretical performance maximum
 - Correct-by-construction sysctls/modules (=br_netfilter= + =bridge-nf-call-iptables= — the classic silent-failure pair).
 
 ** Non-Goals
-- NetworkPolicy enforcement (bridge CNI does not implement it; documented loudly; Cilium integration is the v0.2+ answer for policy users).
+- NetworkPolicy enforcement (bridge CNI does not implement it; documented loudly; Cilium integration is the phase 2+ answer for policy users).
 - Encrypted cross-node traffic (WireGuard mesh recipe documented as a NixOS-level pattern in module docs, not v0.1 machinery).
 - IPv6 / dual-stack (option-shape must not preclude it: CIDRs are lists internally from day one).
 
@@ -27,7 +27,7 @@ Same-node pod traffic over a plain bridge is the theoretical performance maximum
 
 - =kubenyx.network.clusterCidr= default =10.244.0.0/16=.
 - =kubenyx.nodes= is an ordered attrset of declared members; node at index N owns =10.244.N.0/24= (computed in Nix; exposed read-only as =kubenyx.network.nodePodCidr=). Single-node: index 0, no ambiguity.
-- KCM CIDR allocation is *disabled* (=--allocate-node-cidrs=false=): implementation testing showed the allocator hands out order-unstable subnets (observed =10.244.12.0/24= for the first node after allocator retries), which would make =node.spec.podCIDR= actively wrong next to the Nix-owned datapath. An empty podCIDR is more honest than a wrong one. v0.2 candidate: a patch-podcidr oneshot that writes the Nix-computed subnet into =node.spec.podCIDR= for tooling that reads it.
+- KCM CIDR allocation is *disabled* (=--allocate-node-cidrs=false=): implementation testing showed the allocator hands out order-unstable subnets (observed =10.244.12.0/24= for the first node after allocator retries), which would make =node.spec.podCIDR= actively wrong next to the Nix-owned datapath. An empty podCIDR is more honest than a wrong one. Phase 2 candidate: a patch-podcidr oneshot that writes the Nix-computed subnet into =node.spec.podCIDR= for tooling that reads it.
 
 ** CNI conflist (rendered to /etc/cni/net.d/10-kubenyx.conflist)
 

@@ -1,4 +1,4 @@
-# Test-harness embedding (air/v0.6/harness.org): one members attrset in,
+# Test-harness embedding (air/v0.1/harness/harness.org): one members attrset in,
 # everything a NixOS VM test needs to host a kubenyx cluster out — the
 # per-node modules (roles, addresses incl. v6, external-CNI toggle) and
 # the driver-side Python (credential ship, readiness gates, kubectl
@@ -6,7 +6,7 @@
 #   import <kubenyx>/lib/harness.nix { inherit lib; }
 # — no flakes required; the module tree is referenced by relative path.
 #
-# v0.8 (air/v0.8/test-amplification.org D1) adds opt-in snapshot verbs:
+# phase 8 (air/v0.1/snapshot/test-amplification.org D1) adds opt-in snapshot verbs:
 # mkCluster { snapshotable = true; } wires the nodes for in-driver QEMU
 # savevm/loadvm and folds kubenyx_snapshot_all / kubenyx_restore_all /
 # kubenyx_fresh_subtest into driverDefs. Reset-to-pristine costs
@@ -45,7 +45,7 @@ rec {
       defaults ? { },
       # Extra NixOS modules applied to every member.
       extraModules ? [ ],
-      # In-driver QEMU snapshot support (air/v0.8/test-amplification.org
+      # In-driver QEMU snapshot support (air/v0.1/snapshot/test-amplification.org
       # D1): savevm refuses VMs whose store rides 9p (un-snapshottable
       # backend), so this flips the nodes onto useNixStoreImage with
       # readonly=on on the store drive (readonly drives are exempt from
@@ -54,7 +54,7 @@ rec {
       # snapshot point policy is fixed, not configurable: cut AFTER
       # generic bring-up (waitReady complete), BEFORE any per-test
       # mutation. Default off — at `false` every generated node and
-      # Python string is byte-identical to the pre-v0.8 output.
+      # Python string is byte-identical to the pre-phase-8 output.
       snapshotable ? false,
     }:
     let
@@ -253,7 +253,7 @@ rec {
           ];
         };
 
-      # Snapshot verbs (air/v0.8/test-amplification.org D1), folded into
+      # Snapshot verbs (air/v0.1/snapshot/test-amplification.org D1), folded into
       # driverDefs when snapshotable and exported standalone as
       # snapshotDefs. Verified mechanics (2026-07-14): the driver's
       # backdoor shell SURVIVES loadvm (restore is in-process, no channel
@@ -269,7 +269,7 @@ rec {
       # event observed since boot" style does not. Subtests cheaper than
       # one restore should not use these verbs at all.
       snapshotPython = ''
-        # ── kubenyx.harness snapshot verbs (air/v0.8/test-amplification.org) ──
+        # ── kubenyx.harness snapshot verbs (air/v0.1/snapshot/test-amplification.org) ──
         import time as _kubenyx_time
         import contextlib as _kubenyx_contextlib
         import threading as _kubenyx_threading
@@ -379,7 +379,7 @@ rec {
       '';
 
       driverDefs = ''
-        # ── kubenyx.harness driver helpers (air/v0.6/harness.org) ────────
+        # ── kubenyx.harness driver helpers (air/v0.1/harness/harness.org) ────────
         def kubenyx_kubectl(node, args, ns="default"):
             """kubectl through the node-local admin kubeconfig (kubenyx
             preconfigures KUBECONFIG for root on servers)."""

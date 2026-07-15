@@ -88,4 +88,4 @@ Boot the firecracker variant to =KUBENYX-CLUSTER-READY=, then via the firecracke
   Snapshot/restore proven at 74.5 ms resume-to-API — 13× under the 1s
   target — with one real discovery (AMX/CET xstate panic on restore;
   boot-args fix shipped). Findings + kubenyx-snap spec:
-  [[file:snapshot-restore.org][snapshot-restore.org]]. Complete.
+  [[file:../snapshot/snapshot-restore.org][snapshot-restore.org]]. Complete.

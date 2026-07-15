@@ -1,4 +1,4 @@
-# Addon delivery (air/v0.1/dns-addons.org): server-side apply of a
+# Addon delivery (air/v0.1/network/dns-addons.org): server-side apply of a
 # Nix-rendered manifest directory. The unit's store path changes whenever a
 # manifest changes, so `nixos-rebuild switch` reconverges the cluster.
 {

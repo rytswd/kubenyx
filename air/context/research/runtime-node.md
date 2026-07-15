@@ -1,7 +1,7 @@
 # Research: Runtime & Node Layer (2026-07-05)
 
 Raw research report from the runtime/node research pass. Source of truth for
-decisions recorded in `air/v0.1/*`; keep verbatim, do not edit conclusions in
+decisions recorded in `air/v0.1/core/*`; keep verbatim, do not edit conclusions in
 place — supersede via new dated files.
 
 ## 1. Container Runtime Choice

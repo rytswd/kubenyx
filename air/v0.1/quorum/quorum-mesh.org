@@ -95,7 +95,7 @@ honesty bar (see D8 for the gate numbers).
 - =etcdInitialCluster= is already *static full-membership at eval
   time* from =kubenyx.nodes=. A fresh simultaneous 3-server boot
   takes the declared/new static-bootstrap path on all three; learner
-  joins are only the runtime growth path (v0.5).
+  joins are only the runtime growth path (phase 5).
 - *The 15 s join-probe window* (=modules/datastore.nix:165-178=,
   ExecStartPre): on an all-fresh boot nobody serves, so all three
   servers burn the full 15 s before etcd even launches. 125× the

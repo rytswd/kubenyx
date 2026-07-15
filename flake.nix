@@ -52,7 +52,7 @@
         agents = 6;
         runDir = "/tmp/kubenyx-cluster7";
       };
-      # cp3 quorum presets (air/v0.7/quorum-mesh.org): 3 control planes
+      # cp3 quorum presets (air/v0.1/quorum/quorum-mesh.org): 3 control planes
       # forming a REAL etcd quorum in the volatile posture, alone and with
       # 2 workers. mkCluster's joinProbeSec default (3s, the §D3 measured
       # candidate) applies; own run dirs so snapshots of every mesh size
@@ -308,7 +308,7 @@
                   );
                 }
               )
-          # Mesh launcher / teardown (air/v0.2/multinode-microvm.org §2):
+          # Mesh launcher / teardown (air/v0.1/microvm/multinode-microvm.org §2):
           # `nix run .#microvm-cluster` boots server + agents, merges the
           # per-node consoles with name prefixes, and prints the kubeconfig
           # curl once every node reports KUBENYX-CLUSTER-READY.
@@ -448,10 +448,10 @@
                 touch $out
               '';
           single-node = runTest ./tests/single-node.nix;
-          # lib.harness dogfood (air/v0.6/harness.org): server + agent
+          # lib.harness dogfood (air/v0.1/harness/harness.org): server + agent
           # stood up exclusively through the exported helper.
           harness = runTest ./tests/harness.nix;
-          # D1 snapshot verbs (air/v0.8/test-amplification.org): the
+          # D1 snapshot verbs (air/v0.1/snapshot/test-amplification.org): the
           # same 2-node shape with snapshotable = true — savevm cut
           # after Ready, mutate, loadvm rewind twice; asserts the
           # mutation is gone AND a fresh post-restore write lands (a
@@ -464,7 +464,7 @@
           multi-node = runTest ./tests/multi-node.nix;
           multi-node-mem = runTest ./tests/multi-node-mem.nix;
           multi-server = runTest ./tests/multi-server.nix;
-          # The cp3 posture as a check (air/v0.7/quorum-mesh.org item 6):
+          # The cp3 posture as a check (air/v0.1/quorum/quorum-mesh.org item 6):
           # volatile 3-member quorum, launcher-shape CA pre-seed, D3
           # fast-exit. The firecracker launcher itself stays host-tested
           # via the bench.
@@ -473,7 +473,7 @@
           server-reboot = runTest ./tests/server-reboot.nix;
           agent-add = runTest ./tests/agent-add.nix;
           # Declarative control-plane scale-out via etcd learners
-          # (air/v0.5/cp-growth.org): growth machinery + shrink refusal.
+          # (air/v0.1/quorum/cp-growth.org): growth machinery + shrink refusal.
           server-add = runTest ./tests/server-add.nix;
           external-cni = runTest ./tests/external-cni.nix;
           local-storage = runTest ./tests/local-storage.nix;

@@ -1,4 +1,4 @@
-# Local storage (air/v0.4/byod.org §2): declared static local
+# Local storage (air/v0.1/hosts/byod.org §2): declared static local
 # PersistentVolumes plus a no-provisioner default StorageClass, so
 # PVC-shaped workloads run with zero daemons and zero images. Everything
 # rides the existing addons applier (addons.nix); a dynamic provisioner

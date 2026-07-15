@@ -1,4 +1,4 @@
-# Prebake bench leg (air/v0.4/prebake.org acceptance): a deliberately
+# Prebake bench leg (air/v0.1/perf/prebake.org acceptance): a deliberately
 # LARGE synthetic image set — 10 distinct 30 MB layers, ~300 MB total,
 # deterministic AES-CTR keystream so the bytes are incompressible and
 # the sha256-dominated import cost is honest — measured in-guest on two

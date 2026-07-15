@@ -1,4 +1,4 @@
-# IPv6 single-stack, multi-node (air/v0.4/ipv6.org acceptance leg two):
+# IPv6 single-stack, multi-node (air/v0.1/network/ipv6.org acceptance leg two):
 # 1 server + 1 agent, every address v6 — ULA node addresses on the shared
 # VLAN, v6 cluster/service CIDRs, etcd backend, the agent joining through
 # the BRACKETED v6 controlPlaneEndpoint (klib.hostPort renders

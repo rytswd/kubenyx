@@ -15,7 +15,7 @@ Three systemd services running the unmodified nixpkgs binaries with a lean, secu
 
 ** Non-Goals
 - HA / leader election topologies (options exist; untested in v0.1).
-- Secrets encryption-at-rest config (v0.2 candidate; trivial to add, needs a key-management story first).
+- Secrets encryption-at-rest config (phase 2 candidate; trivial to add, needs a key-management story first).
 - Konnectivity — never needed: every Kubenyx control-plane node runs a kubelet-reachable network (flat network assumption, like kubeadm).
 
 * Proposal

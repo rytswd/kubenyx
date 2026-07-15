@@ -1,6 +1,6 @@
 # System Architecture — Kubenyx
 
-Authoritative decision record: `air/v0.1/architecture.org` (D1–D13).
+Authoritative decision record: `air/v0.1/core/architecture.org` (D1–D13).
 This file is the quick orientation copy for tooling; when they disagree,
 the Air doc wins.
 

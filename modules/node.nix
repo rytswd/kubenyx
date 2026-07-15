@@ -1,4 +1,4 @@
-# Node runtime (air/v0.1/node-runtime.org): containerd + crun, preloaded
+# Node runtime (air/v0.1/core/node-runtime.org): containerd + crun, preloaded
 # pause image, tuned kubelet, and every NixOS-specific kubelet gotcha
 # (PATH, resolv.conf, sysctls, kernel modules) handled here.
 {

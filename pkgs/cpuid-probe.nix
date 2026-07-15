@@ -1,5 +1,5 @@
 # Userspace CPUID prober for CPU-template validation
-# (air/v0.9/portable-snapshots.org §D4): /proc/cpuinfo cannot prove a
+# (air/v0.1/snapshot/portable-snapshots.org §D4): /proc/cpuinfo cannot prove a
 # template masks anything — clearcpuid already scrubs it kernel-side and
 # would fake a pass — so this executes the CPUID instruction from
 # userspace and prints the AMX/XTILE-bearing leaves raw. Boot it inside a

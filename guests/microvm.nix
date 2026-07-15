@@ -24,7 +24,7 @@ let
   # still v4 — ipv6.org §5).
   klib = import ../lib { inherit lib; };
 
-  # ---- mesh membership (air/v0.2/multinode-microvm.org) ---------------------
+  # ---- mesh membership (air/v0.1/microvm/multinode-microvm.org) ---------------------
   # Everything below derives from kubenyx.nodes; on a single-node cluster
   # agentNames is empty and every handoff unit vanishes — the single-node
   # guest gains zero units and zero closure weight.
@@ -36,7 +36,7 @@ let
   # agent. Server and agents derive the identical mapping from the same
   # nodes attrset — no runtime negotiation.
   agentPort = name: 10125 + lib.lists.findFirstIndex (n: n == name) 0 agentNames;
-  # ---- agent dial targets (air/v0.7/quorum-mesh.org §D6) ---------------------
+  # ---- agent dial targets (air/v0.1/quorum/quorum-mesh.org §D6) ---------------------
   # Multi-server drops controlPlaneEndpoint so lb.enable defaults on and
   # agents ride kubenyx-lb; with an endpoint declared (every cp1 mesh) both
   # bindings render byte-identically to the previously hardcoded text.
@@ -98,7 +98,7 @@ let
   '';
 in
 {
-  # ---- host gateway (air/v0.8, D2 per-mesh subnets) --------------------------
+  # ---- host gateway (air/v0.1/snapshot/test-amplification.org D2 per-mesh subnets) --------------------------
   # The host-side address on this guest's subnet — the address the mesh
   # launcher (or a single-node host) holds on the bridge/tap. Everything
   # that trusts "the host" pins this one value: the kubeconfig handoff's

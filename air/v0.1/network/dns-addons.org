@@ -17,7 +17,7 @@ Host-mode DNS completes the "zero in-cluster workloads" story: with it, a Kubeny
 
 ** Non-Goals
 - node-local caching *in front of* cluster-mode CoreDNS (host mode already covers the latency story).
-- Addon pruning on removal in v0.1 (ApplySet-based =--prune= is the v0.2 path; v0.1 documents "removing a manifest does not delete objects").
+- Addon pruning on removal in v0.1 (ApplySet-based =--prune= is the phase 2 path; v0.1 documents "removing a manifest does not delete objects").
 
 * Proposal
 

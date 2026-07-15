@@ -1,5 +1,5 @@
 # kubenyx-lb: client-side apiserver load balancer for agents in
-# multi-server clusters (air/v0.3/durable-ha.org §4, Decision 1).
+# multi-server clusters (air/v0.1/quorum/durable-ha.org §4, Decision 1).
 #
 # Deliberately NOT part of kubenyx-tools: that package rides every guest's
 # boot path, and the single-node/single-server invariant is zero added

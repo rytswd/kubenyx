@@ -1,4 +1,4 @@
-# Dogfood leg for lib.harness (air/v0.6/harness.org): a MINIMAL consumer
+# Dogfood leg for lib.harness (air/v0.1/harness/harness.org): a MINIMAL consumer
 # stands up server + agent through mkCluster ONLY — no hand-written
 # kubenyx config beyond the workload seed image — and runs a pod. The
 # nodes, the credential ship, every readiness gate, and the kubectl

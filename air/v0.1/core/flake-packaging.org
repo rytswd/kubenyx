@@ -86,7 +86,7 @@ kubenyx = {
 
 - All inter-module wiring goes through =config.kubenyx.internal.*= read-only options (e.g. =internal.apiserverUrl=, =internal.pkiDir=, =internal.nodePodCidr=) so modules never reach into each other's implementation.
 - Assertions at eval time: node names RFC-1123; node indices unique and < 256; agent role requires =controlPlaneEndpoint=; kine backend requires single control-plane; service/cluster CIDRs disjoint.
-- =system.checks=-style build-time validation of rendered configs: containerd config checked with =containerd config dump= (nixpkgs module already does this); KubeletConfiguration/KubeProxyConfiguration checked by a strict-YAML parse; easykubenix-style ephemeral-apiserver manifest validation noted as v0.2 candidate.
+- =system.checks=-style build-time validation of rendered configs: containerd config checked with =containerd config dump= (nixpkgs module already does this); KubeletConfiguration/KubeProxyConfiguration checked by a strict-YAML parse; easykubenix-style ephemeral-apiserver manifest validation noted as phase 2 candidate.
 
 * Acceptance Criteria
 - A consumer flake using =templates.default= unchanged builds and boots a Ready single-node cluster in the VM test harness.
@@ -96,4 +96,4 @@ kubenyx = {
 
 * History
 - 2026-07-05: Drafted; moved to ready.
-- 2026-07-05: Implemented (flake.nix + modules/ + templates/). Divergences: kubernetes package kept with default components — the nixpkgs installPhase hard-requires kubeadm for shell completions, so trimming needs an overridden installPhase (v0.2 cleanup); options.nix not split out yet; closure report and options-doc checks not wired.
+- 2026-07-05: Implemented (flake.nix + modules/ + templates/). Divergences: kubernetes package kept with default components — the nixpkgs installPhase hard-requires kubeadm for shell completions, so trimming needs an overridden installPhase (phase 2 cleanup); options.nix not split out yet; closure report and options-doc checks not wired.

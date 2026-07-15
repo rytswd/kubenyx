@@ -1,8 +1,8 @@
-#+title: v0.1 — Kubenyx: Drop-in Stock Kubernetes for NixOS
+#+title: Kubenyx Air Docs — Area Index
 
 * Purpose
 
-This directory holds the v0.1 milestone: a bootable, single-node-first, multi-node-capable Kubernetes cluster built from *stock upstream binaries* (nixpkgs =kubernetes= 1.36.x), wired as plain systemd services by NixOS modules, delivered as a Nix flake. No kubeadm, no k3s/k0s, no =services.kubernetes= from nixpkgs.
+This directory holds every Kubenyx planning document, organized by *area* (subject) rather than by phase. The project as a whole is at v0.1; the historical directories once named after phases 2–9 were never separate versions — they were phases of v0.1, and were folded into this tree on 2026-07-15. The [[*Historical phase → area mapping][mapping table]] below locates any doc cited under its old path, and the [[*Phase history][phase history]] section preserves each phase's purpose and closing record.
 
 This OVERVIEW is a navigation aid only — it carries no acceptance criteria and is excluded from =airctl status= counts.
 
@@ -14,27 +14,162 @@ Performance thesis: stock Kubernetes is slow to start mostly because of how it i
 
 * Document Map
 
-Read =architecture.org= first — it records the cross-cutting decisions every other document builds on.
+Read =core/architecture.org= first — it records the cross-cutting decisions every other document builds on.
 
-| Document              | Scope                                                        |
-|-----------------------+--------------------------------------------------------------|
-| [[file:architecture.org][architecture.org]]      | Cross-cutting design decisions (ADR-style)                   |
-| [[file:pki.org][pki.org]]               | Declarative PKI: CAs, leaf certs, kubeconfigs, rotation      |
-| [[file:datastore.org][datastore.org]]         | Datastore module: etcd and kine/sqlite backends              |
-| [[file:control-plane.org][control-plane.org]]     | apiserver / controller-manager / scheduler systemd services  |
-| [[file:node-runtime.org][node-runtime.org]]      | containerd + crun, kubelet, sysctls, pause image preload     |
-| [[file:networking.org][networking.org]]        | Zero-daemon CNI, kube-proxy (nftables), multi-node routes    |
-| [[file:dns-addons.org][dns-addons.org]]        | CoreDNS (host-mode default), declarative addon applier       |
-| [[file:flake-packaging.org][flake-packaging.org]]   | Flake outputs, module layout, public option surface          |
-| [[file:vm-tests.org][vm-tests.org]]          | NixOS VM test suite proving the end-to-end flows             |
+** core/ — architecture, boot fundamentals, packaging
+
+| Document | Scope |
+|----------+-------|
+| [[file:core/architecture.org][core/architecture.org]] | Cross-cutting design decisions D1–D13 (ADR-style) |
+| [[file:core/pki.org][core/pki.org]] | Declarative offline PKI: CAs, leaf certs, kubeconfigs, rotation |
+| [[file:core/datastore.org][core/datastore.org]] | Datastore module: kine/sqlite, etcd-mem and etcd backends |
+| [[file:core/control-plane.org][core/control-plane.org]] | apiserver / controller-manager / scheduler systemd services |
+| [[file:core/node-runtime.org][core/node-runtime.org]] | containerd + crun, kubelet, sysctls, pause image preload |
+| [[file:core/flake-packaging.org][core/flake-packaging.org]] | Flake outputs, module layout, public option surface |
+
+** microvm/ — disposable microVM clusters
+
+| Document | Scope |
+|----------+-------|
+| [[file:microvm/microvm.org][microvm/microvm.org]] | Firecracker/cloud-hypervisor/qemu microVM guest profile and runners |
+| [[file:microvm/multinode-microvm.org][microvm/multinode-microvm.org]] | N-node microVM mesh — 3-node all-Ready in 8.7s median |
+| [[file:microvm/kvm-validation.org][microvm/kvm-validation.org]] | EC2/KVM validation plan: measured microVM numbers, matrix at hardware speed |
+
+** snapshot/ — snapshot, restore, amplification, portability
+
+| Document | Scope |
+|----------+-------|
+| [[file:snapshot/snapshot-restore.org][snapshot/snapshot-restore.org]] | Firecracker snapshot/restore findings (75ms resume measured) and the kubenyx-snap tool spec |
+| [[file:snapshot/test-amplification.org][snapshot/test-amplification.org]] | Reusing and multiplying cheap clusters: in-driver snapshot verbs, per-mesh subnets, snapshot identity |
+| [[file:snapshot/portable-snapshots.org][snapshot/portable-snapshots.org]] | CPU templates and the cross-host snapshot door |
+
+** quorum/ — HA control planes and quorum meshes
+
+| Document | Scope |
+|----------+-------|
+| [[file:quorum/durable-ha.org][quorum/durable-ha.org]] | HA control plane: multi-server etcd quorum, shared CA custody, client-side LB, failover test matrix |
+| [[file:quorum/cp-growth.org][quorum/cp-growth.org]] | Declarative control-plane scale-out via etcd learners (revises durable-ha Decision 3) |
+| [[file:quorum/quorum-mesh.org][quorum/quorum-mesh.org]] | cp3: an honest 3-member quorum mesh at microVM speed (6.5s p50, 48ms recreation) |
+
+** network/ — pod networking, DNS, IPv6
+
+| Document | Scope |
+|----------+-------|
+| [[file:network/networking.org][network/networking.org]] | Zero-daemon CNI, kube-proxy (nftables), multi-node routes |
+| [[file:network/dns-addons.org][network/dns-addons.org]] | CoreDNS (host-mode default), declarative addon applier |
+| [[file:network/ipv6.org][network/ipv6.org]] | IPv6 single-stack: family-agnostic CIDR math, family-switched dataplane |
+
+** hosts/ — hosting foreign opinions
+
+| Document | Scope |
+|----------+-------|
+| [[file:hosts/byod.org][hosts/byod.org]] | External-CNI mode, local PersistentVolumes, OCI-archive image seeding |
+
+** perf/ — measured performance work
+
+| Document | Scope |
+|----------+-------|
+| [[file:perf/perf-floor.org][perf/perf-floor.org]] | Profile → ranked costs → A/B-proven optimizations; recreation micro-pass; code cleanliness gate |
+| [[file:perf/prebake.org][perf/prebake.org]] | Build-time containerd content stores: boot-time import cost becomes a mount |
+
+** harness/ — test suites and embedding
+
+| Document | Scope |
+|----------+-------|
+| [[file:harness/vm-tests.org][harness/vm-tests.org]] | NixOS VM test suite proving the end-to-end flows |
+| [[file:harness/harness.org][harness/harness.org]] | Exported =lib.harness= helper (members attrset → test-node modules + driver snippets) and the dogfood check |
+| [[file:harness/embedding-gaps.org][harness/embedding-gaps.org]] | Small module gaps surfaced by embedding; deferrals recorded |
 
 Research reference (raw findings, kept verbatim): =air/context/research/{prior-art,control-plane-pki,runtime-node,networking-addons,fast-start}.md=
 
-* Implementation Order
+* Historical phase → area mapping
 
-1. =flake-packaging= (skeleton) → =pki= → =datastore= → =control-plane=
-2. =node-runtime= → =networking= → =dns-addons=
-3. =vm-tests= throughout; a doc is only =complete= when its VM test passes.
+Older citations (commit messages, bench/RESULTS.md history, external notes) may reference docs under their pre-2026-07-15 phase-directory paths — those directories carried version-shaped names, but they were phases of v0.1, not separate versions. To locate an old citation, find its document row by phase and filename; the new path is relative to this directory:
+
+| Phase (old directory) | Document | New path |
+|-----------------------+----------+----------|
+| v0.1 phase 1 | architecture.org | core/architecture.org |
+| v0.1 phase 1 | pki.org | core/pki.org |
+| v0.1 phase 1 | datastore.org | core/datastore.org |
+| v0.1 phase 1 | control-plane.org | core/control-plane.org |
+| v0.1 phase 1 | node-runtime.org | core/node-runtime.org |
+| v0.1 phase 1 | flake-packaging.org | core/flake-packaging.org |
+| v0.1 phase 1 | networking.org | network/networking.org |
+| v0.1 phase 1 | dns-addons.org | network/dns-addons.org |
+| v0.1 phase 1 | vm-tests.org | harness/vm-tests.org |
+| v0.1 phase 2 | microvm.org | microvm/microvm.org |
+| v0.1 phase 2 | kvm-validation.org | microvm/kvm-validation.org |
+| v0.1 phase 2 | multinode-microvm.org | microvm/multinode-microvm.org |
+| v0.1 phase 2 | snapshot-restore.org | snapshot/snapshot-restore.org |
+| v0.1 phase 3 | durable-ha.org | quorum/durable-ha.org |
+| v0.1 phase 4 | byod.org | hosts/byod.org |
+| v0.1 phase 4 | ipv6.org | network/ipv6.org |
+| v0.1 phase 4 | prebake.org | perf/prebake.org |
+| v0.1 phase 5 | perf-floor.org | perf/perf-floor.org |
+| v0.1 phase 5 | cp-growth.org | quorum/cp-growth.org |
+| v0.1 phase 6 | harness.org | harness/harness.org |
+| v0.1 phase 6 | embedding-gaps.org | harness/embedding-gaps.org |
+| v0.1 phase 7 | quorum-mesh.org | quorum/quorum-mesh.org |
+| v0.1 phase 8 | test-amplification.org | snapshot/test-amplification.org |
+| v0.1 phase 9 | portable-snapshots.org | snapshot/portable-snapshots.org |
+
+Bare phase citations map to: phase 7 → quorum/quorum-mesh.org, phase 8 → snapshot/test-amplification.org, phase 9 → snapshot/portable-snapshots.org. Each per-phase OVERVIEW.org was merged into this file (see below).
+
+* Phase history
+
+Purpose and closing records of the retired phase directories, preserved from their OVERVIEW.org files.
+
+** Phase 1 — Kubenyx: Drop-in Stock Kubernetes for NixOS
+
+A bootable, single-node-first, multi-node-capable Kubernetes cluster built from *stock upstream binaries* (nixpkgs =kubernetes= 1.36.x), wired as plain systemd services by NixOS modules, delivered as a Nix flake. No kubeadm, no k3s/k0s, no =services.kubernetes= from nixpkgs.
+
+Implementation order was: =flake-packaging= (skeleton) → =pki= → =datastore= → =control-plane=, then =node-runtime= → =networking= → =dns-addons=, with =vm-tests= throughout; a doc is only =complete= when its VM test passes.
+
+- 2026-07-05: Milestone created after the initial research pass.
+
+** Phase 2 — Instant Test Clusters
+
+Phase 2 pushed the testing-first mission (architecture.org, user steer 2026-07-05) past what full VMs can deliver: disposable Kubenyx clusters that appear in single-digit seconds via microVMs, with everything volatile by design.
+
+- 2026-07-06: Milestone opened with the microVM work.
+- 2026-07-07: KVM validation executed on EC2 metal: etcd-mem replaces kine (8.5s cluster-ready, single-digit claim now measured, not extrapolated), matrix green, ratio 0.71, snapshot/restore proven at 75ms. kubenyx-snap implementation was the open work item.
+
+** Phase 3 — Durable Clusters
+
+Phase 1 proved stock Kubernetes as NixOS services; phase 2 made disposable clusters instant. Phase 3 extended the same declared-membership model to clusters that are allowed to *matter*: persistent state, an HA control plane, and operator workflows — without taxing the testing-first fast path (every HA branch is gated on =length servers > 1= and the =balanced= profile; single-node testing boots stay byte-identical).
+
+Relationship to phase 2: the multi-node microVM mesh ([[file:microvm/multinode-microvm.org][multinode-microvm.org]]) and this phase share foundations, implemented once during the mesh work — =kubenyx.nodes.<name>.role= (membership knows the server set), the credential bundle format (one tar per node; shipped over the operator channel here, over the tap handoff there), and the endpoint abstraction (a single =controlPlaneEndpoint= string there; a local health-checking LB or external VIP here).
+
+- 2026-07-08: Milestone sketched (draft) alongside the multi-node design discussion, before mesh implementation, so shared schema decisions land once.
+- 2026-07-08: durable-ha.org implemented and complete in one campaign: etcd quorum from declared membership, offline-CA custody (6-file bundle incl. the SA keypair), kubenyx-lb with authenticated /readyz probing, hitless agent scale-out proven, all six test legs green, single-node fast path held bit-identical.
+
+** Phase 4 — Bring-Your-Own-Dataplane & Airgap Ergonomics
+
+phases 1–3 built the cluster kubenyx opinionatedly wants: zero-daemon bridge networking, volatile datastores, declared membership. Phase 4 made kubenyx a good HOST for clusters that want different opinions at the dataplane and workload layer — a CNI that enforces NetworkPolicy and encrypts, workloads that claim PersistentVolumes, airgap image sets in standard archive formats — without kubenyx growing any of those opinions itself. Every piece is a hand-off: kubenyx steps aside cleanly, it does not reimplement. The testing-first invariant continued to bind: the defaults are untouched, and the single-node fast path must stay unit-identical.
+
+- 2026-07-08: Milestone opened; byod.org drafted and moved to ready in one step (capabilities and their acceptance tests are fully specified by prior art in the modules).
+- 2026-07-08: byod.org implemented and complete same-session: external-CNI mode, storage.localVolumes, archive seeding — all legs green, default path byte-identical. IPv6 + pre-bake remained staged.
+- 2026-07-09: ipv6.org implemented and complete: all-v6 single-stack clusters (single + multi-node legs), 29 eval-level CIDR unit tests, v4 default path bit-identical (store-path-level).
+- 2026-07-09: prebake.org implemented and complete — the milestone is done. Build-time containerd stores (content + bolt, --no-unpack; sandbox cannot mount, store normalization would corrupt snapshots), overlay-mounted with tmpfs upper, native runtime snapshotter (overlay-upper-on-overlayfs is kernel-rejected, probed in-guest); 99.7% of a ~300 MB set's import cost eliminated, cluster-ready unregressed (paired A/B median −0.17 s), default path bit-identical.
+
+** Phase 5 — Performance Floor
+
+Every prior phase measured performance to prove it did no harm. Phase 5 turned the instruments on kubenyx itself: profile the cold-boot path end to end, attack the ranked costs with paired A/B evidence, and land only what measurably wins. The same discipline applied to the recreation path and the codebase (a cleanliness pass that must keep the whole 15-leg matrix green).
+
+- 2026-07-09: Milestone opened as part of the "complete everything" campaign (prebake + perf + cleanliness + full sweep).
+- 2026-07-09: Milestone complete: perf-floor (7.9s -> 3.4s cold boot, ranked attack with paired A/B per keep, bimodality explained as host CPU contention with an enforced bench contract) and cp-growth (learner-based declarative CP scale-out, server-add leg 156s) both landed; 18-leg matrix green.
+
+** Phase 6 — Flexible Testing Strategy
+
+Kubenyx's modules were proven inside kubenyx's own test matrix. Phase 6 turned the repo outward: make embedding a kubenyx cluster in *someone else's* NixOS test harness a first-class, low-boilerplate operation. The phase was driven by a real external embedding exercise — a large consumer test suite hosted kubenyx clusters inside its existing NixOS VM tests — and everything that exercise had to hand-write or work around landed here in generalized form.
+
+- 2026-07-11: Milestone opened; both documents drafted to ready from the embedding exercise's boilerplate/gap inventory.
+- 2026-07-11: Milestone complete: lib.harness landed with the =harness= dogfood check (server+agent stood up exclusively through the exported helper), four of five embedding gaps closed byte-identically for defaults (the deliberate agent CoreDNS unit delta is itemized in embedding-gaps.org), 19-leg matrix green. Sweep also surfaced and fixed a latent quiet-host calibration flake in the phase 5 server-add write-loop floor (pre-existing: the pre-phase-6 rev reproduced it). Deferred: etcd-mem stats/range revision semantics.
+
+** Phases 7–9 — single-doc phases
+
+Phase 7 (quorum mesh), phase 8 (test amplification) and phase 9 (portable snapshots) carried no OVERVIEW of their own — each was a single document, now at quorum/quorum-mesh.org, snapshot/test-amplification.org and snapshot/portable-snapshots.org respectively.
 
 * History
-- 2026-07-05: Milestone created after the initial research pass.
+- 2026-07-05: Phase 1 created after the initial research pass.
+- 2026-07-15: Restructured from phase directories (phases 1–9) to area subdirectories under this directory; per-phase OVERVIEWs merged into this index.

@@ -1,4 +1,4 @@
-# microVM guest + mesh construction (air/v0.2/multinode-microvm.org),
+# microVM guest + mesh construction (air/v0.1/microvm/multinode-microvm.org),
 # exported as flake `lib.microvm` so consumer flakes can instantiate a
 # mesh at ANY size — the flake's own cp1w2/cp1w6 presets are just two
 # calls into this file:
@@ -11,7 +11,7 @@
 #   }
 #   => { members, bootOrder, nodes, runners, launcher, shutdown }
 #
-# `servers > 1` builds a real etcd quorum (air/v0.7/quorum-mesh.org):
+# `servers > 1` builds a real etcd quorum (air/v0.1/quorum/quorum-mesh.org):
 # the launcher mints one CA per run and serves it over the bridge before
 # any VM boots (§D2), servers switch to backend = "etcd" (§D1), and
 # agents ride kubenyx-lb instead of a declared endpoint (§D6).
@@ -29,7 +29,7 @@
   baseModules,
 }:
 rec {
-  # Per-mesh subnet threading (air/v0.8, D2): every 10.100.0.x constant on
+  # Per-mesh subnet threading (air/v0.1/snapshot/test-amplification.org D2): every 10.100.0.x constant on
   # the mesh path flows from this one derivation. /24 only — mkGuestNet
   # renders "<address>/24" and the index→last-octet math assumes exactly
   # one octet of room. The default subnet MUST keep the historical names
@@ -41,11 +41,11 @@ rec {
   # exactly 15, taps go "kx-XXXX-tN" (12 at the 254-node ceiling).
   defaultSubnet = "10.100.0.0/24";
 
-  # CPU templates for snapshot portability (air/v0.9/portable-snapshots.org
+  # CPU templates for snapshot portability (air/v0.1/snapshot/portable-snapshots.org
   # §D1): the custom template is the unit of portability — two hosts running
   # the same template mint and consume interchangeable kubenyx-snap
   # artifacts. amx-mask is the narrow mask our own panic history proves is
-  # the live hazard (v0.2 XRSTORS #GP): AMX feature bits (leaf 0x7.0 EDX
+  # the live hazard (phase 2 XRSTORS #GP): AMX feature bits (leaf 0x7.0 EDX
   # 22/24/25, leaf 0x7.1 EAX 21) and the XTILE state components (leaf 0xD.0
   # EAX 17/18), authored from cpu-template-helper dumps at firecracker
   # 1.15.1 and checked with `template verify` — never SDM recall. The JSON
@@ -405,7 +405,7 @@ rec {
         ]
       );
 
-      # ---- per-subnet process scoping (air/v0.8, D2) ------------------------
+      # ---- per-subnet process scoping (air/v0.1/snapshot/test-amplification.org D2) ------------------------
       # The four fragments below exist in two flavors. Default subnet: the
       # historical GLOBAL text, byte-for-byte (the cp1/cp3 launcher scripts
       # are drv-identity gates). Any other subnet: per-mesh scoping, because

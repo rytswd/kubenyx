@@ -1,4 +1,4 @@
-# Control-plane scale-out (air/v0.5/cp-growth.org): a running 1-server +
+# Control-plane scale-out (air/v0.1/quorum/cp-growth.org): a running 1-server +
 # 1-agent durable cluster (operator-custody CA, persistent etcd) GROWS to 3
 # servers declaratively. Activate the 3-server declaration on the running
 # nodes (switch-to-configuration on pre-built specialisations, exactly like

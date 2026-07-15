@@ -1,4 +1,4 @@
-# Agent scale-out (air/v0.3/durable-ha.org §6, test matrix "agent-add"):
+# Agent scale-out (air/v0.1/quorum/durable-ha.org §6, test matrix "agent-add"):
 # a running 1-server + 1-agent cluster gains a declared agent2 with ZERO
 # disruption. Both configurations are built in this derivation — the
 # (N+1)-node config rides along as a NixOS specialisation of the running

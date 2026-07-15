@@ -43,13 +43,13 @@ A first-boot (and idempotent thereafter) oneshot generates: cluster CA, apiserve
 Reuse the nixpkgs containerd module; inject Kubenyx settings: crun as default runtime via =io.containerd.runc.v2= + =BinaryName=, systemd cgroups, overlayfs snapshotter, NRI disabled, nix-built pause image preloaded with =ctr image import= and pinned. Details: [[file:node-runtime.org]].
 
 ** D6. Zero-daemon CNI with deterministic addressing
-Nix renders a =bridge= + =host-local= + =portmap= conflist per node; node N gets pod CIDR =10.244.N.0/24= (derived from declared node index, not allocated at runtime). Multi-node pod routing = NixOS static routes (flannel host-gw datapath with zero daemons). No CNI DaemonSet, no network agent, nothing to pull or wait for. Details: [[file:networking.org]].
+Nix renders a =bridge= + =host-local= + =portmap= conflist per node; node N gets pod CIDR =10.244.N.0/24= (derived from declared node index, not allocated at runtime). Multi-node pod routing = NixOS static routes (flannel host-gw datapath with zero daemons). No CNI DaemonSet, no network agent, nothing to pull or wait for. Details: [[file:../network/networking.org]].
 
 ** D7. kube-proxy in nftables mode, as a systemd service
-GA since 1.33, O(1) service dispatch, SIG-Network's recommended replacement for iptables/IPVS. Runs on every node from a KubeProxyConfiguration file. Details: [[file:networking.org]].
+GA since 1.33, O(1) service dispatch, SIG-Network's recommended replacement for iptables/IPVS. Runs on every node from a KubeProxyConfiguration file. Details: [[file:../network/networking.org]].
 
 ** D8. CoreDNS runs on the host by default
-=kubenyx.dns.mode = "host" (default) | "cluster"=. Host mode: CoreDNS as a systemd service with a kubeconfig-backed =kubernetes= plugin, bound to a link-local dummy address on every node (NodeLocal-DNSCache pattern); kubelet's =clusterDNS= points at it. Result: zero in-cluster workloads for a functioning cluster, no DNS bootstrap loop, no DNS conntrack. Cluster mode renders the orthodox Deployment+Service for users who want it. Details: [[file:dns-addons.org]].
+=kubenyx.dns.mode = "host" (default) | "cluster"=. Host mode: CoreDNS as a systemd service with a kubeconfig-backed =kubernetes= plugin, bound to a link-local dummy address on every node (NodeLocal-DNSCache pattern); kubelet's =clusterDNS= points at it. Result: zero in-cluster workloads for a functioning cluster, no DNS bootstrap loop, no DNS conntrack. Cluster mode renders the orthodox Deployment+Service for users who want it. Details: [[file:../network/dns-addons.org]].
 
 ** D9. Addons = server-side apply of a Nix-rendered manifest directory
 A systemd oneshot runs =kubectl apply --server-side --force-conflicts= against a Nix store directory of rendered manifests once =/readyz= is up. The unit's store path changes when manifests change, so =nixos-rebuild switch= reconverges automatically. No addon-manager, no helm. Manifests are authored as Nix attrsets (=builtins.toJSON=).
@@ -58,7 +58,7 @@ A systemd oneshot runs =kubectl apply --server-side --force-conflicts= against a
 k8s components do not support sd_notify (kubernetes#8311). Kubenyx ships a small wrapper: =Type=notify=, wrapper execs the component, polls its health endpoint (=/readyz= or =/healthz=), then =READY=1=. Datastore → apiserver is a hard =After==; everything else gets correct ordered startup without crash-loop noise, and =systemctl start kubenyx.target= means "cluster is actually ready". kubelet additionally uses its native systemd watchdog (1.32+, =WatchdogSec=).
 
 ** D11. Performance defaults are on by default
-Single-node: =leader-elect=false= (removes multi-second lease waits), =profiling=false=, NodeRestriction admission, tuned event TTL, parallel image pulls, no swap for pods, tuned sysctls, GOMEMLIMIT where it measurably helps (see [[file:../context/research/fast-start.md]]). Every tuning default is an option with the stock value documented, so users can revert any of them.
+Single-node: =leader-elect=false= (removes multi-second lease waits), =profiling=false=, NodeRestriction admission, tuned event TTL, parallel image pulls, no swap for pods, tuned sysctls, GOMEMLIMIT where it measurably helps (see [[file:../../context/research/fast-start.md]]). Every tuning default is an option with the stock value documented, so users can revert any of them.
 
 ** D12. Performance profiles
 =kubenyx.profile = "testing" (default) | "balanced"=. The profile only moves defaults; every underlying option remains individually settable.

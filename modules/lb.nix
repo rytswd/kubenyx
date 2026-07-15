@@ -1,4 +1,4 @@
-# Client-side apiserver load balancing (air/v0.3/durable-ha.org §4,
+# Client-side apiserver load balancing (air/v0.1/quorum/durable-ha.org §4,
 # Decision 1): agents in a multi-server cluster run kubenyx-lb, a local
 # health-checking TCP forwarder, and every agent-side kubeconfig dials
 # https://127.0.0.1:6444. Failover is pure health-check policy (probe

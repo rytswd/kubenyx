@@ -1,4 +1,4 @@
-# Volatile quorum (air/v0.7/quorum-mesh.org, work plan item 6): the cp3
+# Volatile quorum (air/v0.1/quorum/quorum-mesh.org, work plan item 6): the cp3
 # POSTURE — testing profile, tmpfs datastore, real 3-member etcd quorum —
 # exercised as a NixOS test so the posture stays covered without firecracker.
 # The driver host plays the cp3 LAUNCHER: it mints the per-run CA and lands

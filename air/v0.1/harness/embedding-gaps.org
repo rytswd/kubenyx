@@ -133,7 +133,7 @@ per-machine modules; the assertion in #3 is the contract instead).
 - 2026-07-11: Drafted to ready from the generalized embedding
   feedback; dispositions decided (four land, etcd-mem stats deferred).
 - 2026-07-11: Complete. #1-#4 landed byte-identical for defaults
-  (toplevel drvPath compared unchanged against the pre-v0.6 rev after
+  (toplevel drvPath compared unchanged against the pre-phase-6 rev after
   all four; active paths eval-proven: v4/v6 flag render incl. the
   24/64 mask, both assertions fire, store-path string accepted,
   bare string refused, extraServerBlocks renders brace-balanced after

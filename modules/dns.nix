@@ -1,4 +1,4 @@
-# DNS (air/v0.1/dns-addons.org): CoreDNS on the host by default —
+# DNS (air/v0.1/network/dns-addons.org): CoreDNS on the host by default —
 # kubeconfig-backed kubernetes plugin on a link-local dummy address, the
 # NodeLocal-DNSCache pattern without the DaemonSet. Zero images, no DNS
 # bootstrap loop, DNS off the service dataplane.

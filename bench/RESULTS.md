@@ -7,9 +7,9 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
-## 2026-07-15 — v0.9 CPU templates: amx-mask costs nothing measurable, identity goes template-keyed
+## 2026-07-15 — phase 9 CPU templates: amx-mask costs nothing measurable, identity goes template-keyed
 
-air/v0.9/portable-snapshots.org D1–D3 landed together; single-node cp1
+air/v0.1/snapshot/portable-snapshots.org D1–D3 landed together; single-node cp1
 (firecracker, KVM host), bench contract enforced (idleness gate, cpuset
 8-15, performance governor). Template: `lib/cpu-templates/amx-mask.json`
 (sha256 `5dd93095…`, authored from `cpu-template-helper template dump`,
@@ -52,15 +52,15 @@ visible at this resolution.
   against an untemplated artifact.
 
 Identity detection is from the live VMM's `--config-file`, never a
-caller claim; template-less snapshots keep the v0.8 host-keyed
+caller claim; template-less snapshots keep the phase 8 host-keyed
 refusal unchanged (base-snap in the same session recorded the host
 fingerprint, byte-for-byte the old spelling). Cross-host restore
 remains UNPROVEN and gated (§D4) — these numbers open the door
 mechanics, not the door.
 
-## 2026-07-14 — v0.8 test amplification: in-driver savevm/loadvm, per-mesh subnets, snapshot identity
+## 2026-07-14 — phase 8 test amplification: in-driver savevm/loadvm, per-mesh subnets, snapshot identity
 
-air/v0.8/test-amplification.org D1–D3 landed together; numbers below are
+air/v0.1/snapshot/test-amplification.org D1–D3 landed together; numbers below are
 from the combined-tree verification run (KVM host).
 
 **D1 — `lib.harness` snapshot verbs** (`mkCluster { snapshotable = true; }`,
@@ -116,7 +116,7 @@ wave: cp1w2 program + check drvs move *only* through the kubenyx-tools
 
 ## 2026-07-12 — cp3 recreation: the quorum back in ~48 ms, quorum-write-probed
 
-air/v0.7 D8 — the gated fast-follow — closed. `kubenyx-snap` grew real
+air/v0.1/quorum/quorum-mesh.org D8 — the gated fast-follow — closed. `kubenyx-snap` grew real
 multi-server support (conventional addressing now mirrors the
 launcher's `mkMembers` exactly: `server`→.2 stays byte-stable,
 `serverN`→.1+N, agents shift after the servers; mesh ordering is
@@ -195,7 +195,7 @@ embedded runner paths.
 
 ## 2026-07-12 — cp3: honest 3-CP quorum mesh, 31 s → 6.5 s
 
-air/v0.7/quorum-mesh.org closed. `nix run .#cp3` boots a 3-control-plane
+air/v0.1/quorum/quorum-mesh.org closed. `nix run .#cp3` boots a 3-control-plane
 firecracker mesh with a REAL 3-member etcd quorum (volatile, tmpfs,
 launcher-minted per-run CA). Phase 2 landed it working at **29.9–31.2 s**
 MESH-READY; phase 3 instrumented first (a mesh-only journal-dump oneshot,
@@ -291,7 +291,7 @@ fresh `take` (snapshot written in 1.84 s) + `cycle -n 5` → 5/5, median
 
 ## 2026-07-09 — Performance floor: profiled attack, cold boot 7.3 s → 3.4 s
 
-air/v0.5/perf-floor.org rules of engagement executed: instrumented
+air/v0.1/perf/perf-floor.org rules of engagement executed: instrumented
 ranked costs, attacked in rank order, every change judged by an
 interleaved paired A/B (alternating order, paired median or revert) on
 the in-guest `KUBENYX-CLUSTER-READY` marker, single-node +
@@ -343,7 +343,7 @@ crash-free at ~3.6 s; kubenyx-snap recreation re-validated at median
 
 ## 2026-07-09 — Pre-baked image stores: 99.7% of import cost becomes a mount
 
-air/v0.4/prebake.org implemented — the last v0.4 item. The seed set
+air/v0.1/perf/prebake.org implemented — the last phase 4 item. The seed set
 (pause + seedImages, both formats) is imported into a containerd
 content store at BUILD time (`pkgs/prebake-store.nix`: containerd
 2.3.1 `--root $out` in the sandbox, CRI/runtime plugins disabled,
@@ -381,7 +381,7 @@ the vanished seed unit offsets the mount + native COW; raw medians
 
 ## 2026-07-09 — IPv6 single-stack: all-v6 clusters, v4 path bit-identical
 
-air/v0.4/ipv6.org implemented in one campaign. The sizing insight
+air/v0.1/network/ipv6.org implemented in one campaign. The sizing insight
 held: the runtime layer was already family-agnostic (kubenyx-pki,
 component flags, CoreDNS) — everything landed in the eval layer:
 
@@ -418,9 +418,9 @@ construction; raw medians 8.61/8.35/7.49 s were the box's known
 bimodal envelope). Six-leg sweep green: lib-tests, ipv6, ipv6-multi,
 single-node, external-cni, multi-node.
 
-## 2026-07-08 — v0.4 tier-1: bring-your-own-dataplane, gate held
+## 2026-07-08 — phase 4 tier-1: bring-your-own-dataplane, gate held
 
-Three hand-offs landed (air/v0.4/byod.org), each replacing a kubenyx
+Three hand-offs landed (air/v0.1/hosts/byod.org), each replacing a kubenyx
 opinion with a clean absence, each proven by its own test leg and an
 eval-level byte-identity dump of the default path (all 85 systemd unit
 texts + built-unit store paths + all 97 environment.etc sources):
@@ -472,7 +472,7 @@ overlapping the API probe, joined before return.
 
 ## 2026-07-08 — Multi-node campaign complete: fast path held, HA proven
 
-The v0.2 mesh + v0.3 durable/HA work landed as one campaign
+The phase 2 mesh + phase 3 durable/HA work landed as one campaign
 (nodes.role schema → mesh → kubenyx-lb + CA custody → etcd quorum →
 test legs → performance gate). The user's constraint was hard: the
 single-node testing path must not pay for any of it.
@@ -532,7 +532,7 @@ Two findings from the failover leg worth the whole exercise:
 
 ## 2026-07-08 — KVM: 3-node microVM mesh ready in 8.7s (median)
 
-`nix run .#microvm-cluster` (air/v0.2 §2–4): 1 server + 2 agent
+`nix run .#microvm-cluster` (air/v0.1/microvm/multinode-microvm.org §2–4): 1 server + 2 agent
 firecracker microVMs on bridged taps (kubenyx-br0), etcd-mem
 datastore, per-agent credential handoff over ports 10125/10126
 (socket-activated, IPAddressAllow per declared agent address). Wall
@@ -661,7 +661,7 @@ kernel-panics in XRSTORS (#GP) — the fresh VMM never re-acquires AMX
 xstate permission, and IA32_XSS/CET supervisor state doesn't restore
 either. Fix shipped in the firecracker variant's kernel params:
 `clearcpuid=amx_tile,amx_int8,amx_bf16 noxsaves` (no measured boot
-cost). Full findings + kubenyx-snap design: air/v0.2/snapshot-restore.org.
+cost). Full findings + kubenyx-snap design: air/v0.1/snapshot/snapshot-restore.org.
 
 ### Phase 4b — kubenyx-snap: recreation productized at 66 ms
 

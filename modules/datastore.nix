@@ -1,4 +1,4 @@
-# Datastore backends (air/v0.1/datastore.org): kine+sqlite, etcd-mem, or etcd.
+# Datastore backends (air/v0.1/core/datastore.org): kine+sqlite, etcd-mem, or etcd.
 # The unmodified kube-apiserver talks etcd-v3 gRPC to any of them.
 #
 # Access control: a plaintext localhost datastore would let ANY local
@@ -27,7 +27,7 @@ let
   # Both shims are single-writer, but only kube-apiserver ever talks to the
   # datastore — over a local unix socket, on the server. Agents never touch
   # it, so the correct constraint is "exactly one server", not "exactly one
-  # node" (air/v0.2/multinode-microvm.org §1). Multi-SERVER (quorum) is
+  # node" (air/v0.1/microvm/multinode-microvm.org §1). Multi-SERVER (quorum) is
   # backend = "etcd" — the multiServer branch below (durable-ha.org §2).
   servers = lib.filterAttrs (_: n: n.role == "server") cfg.nodes;
   serverCount = lib.length (lib.attrNames servers);
@@ -51,7 +51,7 @@ let
     else
       "kubenyx=https://127.0.0.1:2380";
 
-  # ---- CP growth (air/v0.5/cp-growth.org) ---------------------------------
+  # ---- CP growth (air/v0.1/quorum/cp-growth.org) ---------------------------------
   # Everything below the guard exists only at serverCount > 1; the
   # single-server unit stays byte-identical to v0.1.
   etcdCtl = lib.getExe' cfg.packages.etcd "etcdctl";
@@ -108,7 +108,7 @@ let
       echo "kubenyx: etcd member set changed since this datastore was bootstrapped:" >&2
       echo "  recorded: $have" >&2
       echo "  declared: $want" >&2
-      echo "kubenyx: the control-plane set is fixed at cluster creation (air/v0.3/durable-ha.org). Changing it means a new initial-cluster plus an 'etcdctl snapshot save/restore' migration — a documented runbook, not machinery. Refusing to start with mismatched bootstrap flags." >&2
+      echo "kubenyx: the control-plane set is fixed at cluster creation (air/v0.1/quorum/durable-ha.org). Changing it means a new initial-cluster plus an 'etcdctl snapshot save/restore' migration — a documented runbook, not machinery. Refusing to start with mismatched bootstrap flags." >&2
       exit 1
     fi
     if [ -e '${etcdDataDir}/member' ]; then
@@ -131,7 +131,7 @@ let
   # join semantics; unstarted members carry no name in `member list`,
   # which is why membership is matched by peer URL throughout). Nobody
   # answering within the probe window (etcd.joinProbeSec — the window IS
-  # the cp3 cold-boot tax, quorum-mesh.org §D3) is the v0.3
+  # the cp3 cold-boot tax, quorum-mesh.org §D3) is the phase 3
   # first-bootstrap path, unchanged. Once a healthy peer has answered we
   # NEVER fall through to bootstrap: on join-wait expiry the unit fails
   # loudly (DEGRADED marker) and systemd retries — a wedged join is
@@ -266,7 +266,7 @@ let
     # race: we are already a VOTING (unstarted, nameless) member next to
     # other nameless founders — a concurrent first bootstrap where a
     # quorum formed before we probed. etcd's cluster ID is derived
-    # deterministically from the initial-cluster set, so the v0.3
+    # deterministically from the initial-cluster set, so the phase 3
     # declared/new path converges into that same cluster.
     render_join() {
       list=$(${etcdCtl} --endpoints="$1" ${ctlCreds} --dial-timeout=2s --command-timeout=3s member list 2>/dev/null) || return 1
@@ -484,7 +484,7 @@ let
             *" $mid "*) ;;
             *)
               warned="$warned$mid "
-              log "WARNING: member $mid ($peer) is running but NOT in the declared server set. Refusing to remove it: shrinking the control plane is a destructive judgment call, not machinery (air/v0.5/cp-growth.org). Runbook: verify quorum health, then 'etcdctl member remove $mid' and drop the node from kubenyx.nodes."
+              log "WARNING: member $mid ($peer) is running but NOT in the declared server set. Refusing to remove it: shrinking the control plane is a destructive judgment call, not machinery (air/v0.1/quorum/cp-growth.org). Runbook: verify quorum health, then 'etcdctl member remove $mid' and drop the node from kubenyx.nodes."
               ;;
           esac
         fi
@@ -609,7 +609,7 @@ in
           Seconds a fresh multi-server member's join probe waits for an
           existing quorum before deciding first-bootstrap. The window is
           the safety margin against joining late vs splitting early
-          (air/v0.7/quorum-mesh.org §D3); the 15s default preserves the
+          (air/v0.1/quorum/quorum-mesh.org §D3); the 15s default preserves the
           original behavior. On an all-fresh cold boot the probe usually
           shortcuts it: when every declared peer actively REFUSES for
           three consecutive sweeps (nobody has state, all are fresh), it

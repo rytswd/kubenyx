@@ -1,4 +1,4 @@
-# External CNI (air/v0.4/byod.org §1): kubenyx.network.cni = "external"
+# External CNI (air/v0.1/hosts/byod.org §1): kubenyx.network.cni = "external"
 # hands the pod dataplane to an operator-deployed CNI. The TEST plays that
 # CNI's DaemonSet — it ships a bridge+host-local conflist at runtime
 # (driver-mediated, like an agent's credential dir) — and kubenyx must

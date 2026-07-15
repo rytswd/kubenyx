@@ -28,12 +28,12 @@ node-failure tests — all need ≥2 nodes and none justify real hosts.
 
 * Design
 
-** 0. Shared foundation with v0.3 (build this first)
-[[file:../v0.3/durable-ha.org][durable-ha.org]] (draft) needs the same membership-schema extension this
+** 0. Shared foundation with phase 3 (build this first)
+[[file:../quorum/durable-ha.org][durable-ha.org]] (draft) needs the same membership-schema extension this
 mesh needs: =nodes.<name>.role = "server" | "agent"= (default agent;
 assertion: the machine-level =kubenyx.role= matches its own entry).
 Implement it here, once — the mesh generator derives per-node config
-from it, and v0.3 later derives the etcd quorum and LB backend set
+from it, and phase 3 later derives the etcd quorum and LB backend set
 from the same field with no schema break. Same for the credential
 bundle: one tar format (=pki/nodes/<name>/=) whether it travels the
 operator channel (durable) or the tap handoff (here).
@@ -44,7 +44,7 @@ datastore, over a local unix socket. The correct constraint is
 "exactly one node with =role == server=" — agents never touch it.
 This keeps the <10ms in-memory datastore for multi-node test clusters
 instead of paying real etcd's startup on the boot path. (Multi-SERVER
-remains etcd-only — that is v0.3's quorum work, out of scope here.)
+remains etcd-only — that is phase 3's quorum work, out of scope here.)
 
 ** 2. Flake generator: =mkMicrovmCluster=
 #+begin_src nix

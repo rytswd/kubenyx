@@ -1,4 +1,4 @@
-# Pre-baked image stores (air/v0.4/prebake.org): prebakeImages = true
+# Pre-baked image stores (air/v0.1/perf/prebake.org): prebakeImages = true
 # ships the whole seed set (pause + both seed formats) as a build-time
 # containerd content store, overlay-mounted under /var/lib/containerd
 # with a tmpfs upper. The leg proves:

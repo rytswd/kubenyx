@@ -1,4 +1,4 @@
-# IPv6 single-stack, single node (air/v0.4/ipv6.org acceptance): ULA node
+# IPv6 single-stack, single node (air/v0.1/network/ipv6.org acceptance): ULA node
 # address, v6 cluster/service CIDRs, bridge CNI. Node Ready, pod Running
 # with an IP inside the carved /64, service VIP reachable from a pod, DNS
 # via the v6 DNS VIP. Same airgapped sandbox as single-node.nix.

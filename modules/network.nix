@@ -1,7 +1,7 @@
-# Networking (air/v0.1/networking.org): zero-daemon CNI (bridge +
+# Networking (air/v0.1/network/networking.org): zero-daemon CNI (bridge +
 # host-local, deterministic per-node subnets), nftables kube-proxy, static
 # routes for multi-node, and a firewall that stays ON.
-# air/v0.4/byod.org §1: cni = "external" hands the pod dataplane to an
+# air/v0.1/hosts/byod.org §1: cni = "external" hands the pod dataplane to an
 # operator-deployed CNI — no conflist (ABSENT, not empty: containerd loads
 # the lexically first conflist, so even a stub would shadow the external
 # CNI's), no static pod routes, no egress NAT, no cni0 firewall rules.

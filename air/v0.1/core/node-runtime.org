@@ -16,7 +16,7 @@ The node layer: containerd 2.x with crun as the default OCI runtime, a nix-built
 ** Non-Goals
 - CRI-O support (containerd only in v0.1; the option namespace must not bake in containerd assumptions that would preclude adding it).
 - Lazy-pull snapshotters (stargz/nydus) — redundant with nix-preloaded images; erofs snapshotter revisit once non-experimental.
-- nix-snapshotter integration — tracked as a v0.2+ candidate.
+- nix-snapshotter integration — tracked as a phase 2+ candidate.
 
 * Proposal
 
@@ -65,7 +65,7 @@ CLI remainder: =--config=, =--kubeconfig=, =--node-ip=, =--hostname-override=<de
 ** Host preparation (module-managed)
 
 - =boot.kernelModules = [ "br_netfilter" "overlay" ]=
-- sysctls: =vm.overcommit_memory=1=, =vm.panic_on_oom=0=, =kernel.panic=10=, =kernel.panic_on_oops=1=, =kernel.keys.root_max*=, =net.ipv4.ip_forward=1=, =net.bridge.bridge-nf-call-ip{,6}tables=1=, inotify/file-max/conntrack scale limits — the exact set =protectKernelDefaults= demands plus practical scale headroom (see [[file:../context/research/runtime-node.md]]).
+- sysctls: =vm.overcommit_memory=1=, =vm.panic_on_oom=0=, =kernel.panic=10=, =kernel.panic_on_oops=1=, =kernel.keys.root_max*=, =net.ipv4.ip_forward=1=, =net.bridge.bridge-nf-call-ip{,6}tables=1=, inotify/file-max/conntrack scale limits — the exact set =protectKernelDefaults= demands plus practical scale headroom (see [[file:../../context/research/runtime-node.md]]).
 - Unique lowercase RFC-1123 hostname asserted at eval time.
 
 * Design Details

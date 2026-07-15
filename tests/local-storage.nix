@@ -1,4 +1,4 @@
-# Local storage (air/v0.4/byod.org §2): kubenyx.storage.localVolumes
+# Local storage (air/v0.1/hosts/byod.org §2): kubenyx.storage.localVolumes
 # declares static local PVs + a default no-provisioner StorageClass through
 # the addons applier — zero daemons, zero images. The leg proves the
 # WaitForFirstConsumer contract end to end: the PVC pends until a pod

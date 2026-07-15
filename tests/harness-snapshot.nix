@@ -1,4 +1,4 @@
-# D1 snapshot verbs dogfood (air/v0.8/test-amplification.org): a 2-node
+# D1 snapshot verbs dogfood (air/v0.1/snapshot/test-amplification.org): a 2-node
 # cluster stood up through lib.harness with snapshotable = true, cut at
 # the fixed snapshot point (after waitReady, before any mutation), then
 # rewound. The honesty bar is deliberately higher than "the apiserver

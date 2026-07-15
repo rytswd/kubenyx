@@ -4,7 +4,7 @@
 
 * Summary
 
-Revises v0.3's Decision 3 (user steer 2026-07-09): the control-plane
+Revises phase 3's Decision 3 (user steer 2026-07-09): the control-plane
 set is no longer fixed at bootstrap — it GROWS declaratively. Add a
 =role = "server"= node to =kubenyx.nodes=, activate on the existing
 nodes, boot the new server: an etcd-learner-based reconcile brings it
@@ -15,7 +15,7 @@ destructive judgment call, not machinery.
 The door was built for this: the member-set guard's distinct "member
 set changed" error site, eval-derived initial-cluster/LB-backends/SAN
 sets, and the fingerprint living in the data dir were all designed in
-v0.3 with this exact hook named in comments.
+Phase 3 with this exact hook named in comments.
 
 * Design
 
@@ -75,7 +75,7 @@ what the probe taught:
   concurrent-by-design copies sharing the work.
 
 ** 2. The member-set guard learns "superset"
-The v0.3 guard (=<data-dir>/.kubenyx-member-set=) hard-errors on any
+The phase 3 guard (=<data-dir>/.kubenyx-member-set=) hard-errors on any
 change. Now: recorded set ⊂ declared set → allowed (reconcile is
 handling it; the guard rewrites its record AFTER the runtime member
 list matches the declaration). Shrink or rename → the existing hard
@@ -105,7 +105,7 @@ credentials exist by construction).
   etcd with =--initial-cluster-state existing= and the initial-cluster
   narrowed to the CURRENT member set + self (etcd join semantics).
 - Nobody answers and the declared set includes us at bootstrap →
-  the existing v0.3 bootstrap path (=new=), unchanged.
+  the existing phase 3 bootstrap path (=new=), unchanged.
 Bounded wait with a loud DEGRADED marker; never silently bootstraps a
 second cluster.
 
@@ -126,7 +126,7 @@ eval cannot know. Details fixed during implementation:
 - Missing client certs (custody flow, before the bundle ships) fail
   the unit loudly instead of probing blind: falling through to
   bootstrap certless would seed a datastore nobody asked for. This
-  keeps the multi-server custody choreography exactly as v0.3 (crash
+  keeps the multi-server custody choreography exactly as phase 3 (crash
   loop until shipped, =reset-failed=, restart).
 - Initialized data dir skips probing entirely (etcd ignores
   =--initial-*= on restart) — reboots pay zero probe cost
@@ -139,14 +139,14 @@ eval cannot know. Details fixed during implementation:
   initial-cluster set, so concurrent founders converge into one
   cluster.
 - Residual risk, accepted and documented: a fresh joiner that hears
-  NOBODY (partition) takes the v0.3 bootstrap path by spec. With ≥2
+  NOBODY (partition) takes the phase 3 bootstrap path by spec. With ≥2
   declared members it cannot form quorum alone — it wedges loudly, no
   split — but two+ partitioned-together fresh joiners could in
   principle vote each other into a second cluster. Boot new servers
   with the running quorum reachable; that is the same operator
   sequencing the rolling activation already assumes.
 
-** 4. What already just works (from v0.3's door-open design)
+** 4. What already just works (from phase 3's door-open design)
 - etcd cert SANs: every server issues the full declared-address set —
   a new declaration re-mints additively on rebuild (fingerprint-gated).
 - kubenyx-lb: backends are eval-derived from the declared servers;
@@ -196,7 +196,7 @@ design.
 - Shrink attempt (declare 2 of 3): reconcile refuses with the runbook
   warning; nothing is removed; the guard still passes (superset rule
   is one-directional).
-- v0.3 legs unaffected: multi-server, failover, server-reboot,
+- phase 3 legs unaffected: multi-server, failover, server-reboot,
   ca-custody green unchanged.
 - Fast path: byte-identity for default and single-server configs
   (reconcile and probe units exist only at serverCount > 1).
@@ -214,7 +214,7 @@ restoring the 3-server declaration the recorded set still validates
 and the member rejoins cleanly.
 
 * History
-- 2026-07-09: Drafted on user steer revising v0.3 Decision 3; ready.
+- 2026-07-09: Drafted on user steer revising phase 3 Decision 3; ready.
 - 2026-07-09: Implemented complete; state → complete. All machinery in
   =modules/datastore.nix= (guard superset rule, join probe + launcher,
   =kubenyx-etcd-reconcile=) plus the activation-restart bounds in
@@ -252,12 +252,12 @@ and the member rejoins cleanly.
   - =server-add= leg wall: 156s; the joiners' etcd went active 8.4s
     and 8.8s after their custody restart (probe join-wait + learner
     sync + peer-side promotion all inside the notify window).
-  - v0.3 legs re-run green at the final rev: multi-server, failover,
+  - phase 3 legs re-run green at the final rev: multi-server, failover,
     server-reboot, ca-custody.
 - 2026-07-11: Calibration fix in the acceptance leg (assertions
   unchanged): on a quiet fast host the whole growth converges in ~25s
   and undercut the write loop's 30-sample floor — reproduced at 24-25
-  writes on an idle box at BOTH the v0.5 rev and HEAD, so host speed,
+  writes on an idle box at BOTH the phase 5 rev and HEAD, so host speed,
   not a regression. The leg now holds the loop (post-growth, all gates
   already passed) until the 30 samples exist before stopping; the
   continuity claims (zero FAILs, single bounded retry, floor itself)

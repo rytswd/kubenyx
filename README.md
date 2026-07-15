@@ -229,7 +229,7 @@ the 3.5 GB memory image, and tmpfs makes that free.
 
 > Snapshots are VMM-version-locked; `kubenyx-snap` from the flake ships
 > the matching firecracker on PATH. Details, gotchas and design:
-> [`air/v0.2/snapshot-restore.org`](air/v0.2/snapshot-restore.org).
+> [`air/v0.1/snapshot/snapshot-restore.org`](air/v0.1/snapshot/snapshot-restore.org).
 
 </details>
 

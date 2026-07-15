@@ -1,5 +1,5 @@
 //! Firecracker snapshot/restore for Kubenyx microVMs (third boot-path tool,
-//! air/v0.2/snapshot-restore.org). Snapshot a cluster-ready guest once, then
+//! air/v0.1/snapshot/snapshot-restore.org). Snapshot a cluster-ready guest once, then
 //! recreate a live cluster in ~75ms — cheaper than any cold boot can get.
 //!
 //!   kubenyx-snap take   --runner <microvm-run> --out DIR
@@ -43,7 +43,7 @@
 //! flag refuses, --cpu-template against an untemplated artifact refuses.
 //! When templates match, a differing host fingerprint warns but does not
 //! refuse (that is the whole point of the template). Template-less
-//! manifests keep the v0.8 host-keyed refusal byte-for-byte.
+//! manifests keep the phase 8 host-keyed refusal byte-for-byte.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
@@ -418,7 +418,7 @@ fn wait_quorum_write(kubeconfig_addr: &str, deadline: Duration) -> bool {
 // A snapshot is a serialized xsave area, TSC state, and CPUID-shaped kernel
 // structures, written by one exact VMM build. Restoring it under a different
 // CPU feature set has a measured history of guest kernel panics (XRSTORS #GP
-// in restore_fpregs_from_fpstate on AMX hosts, air/v0.2), and a different
+// in restore_fpregs_from_fpstate on AMX hosts, air/v0.1/snapshot/snapshot-restore.org), and a different
 // firecracker build may misparse or refuse the vmstate. take/mesh-take record
 // an identity triple in the snapshot-dir manifest; resume/mesh-resume compare
 // what the live side can know (VMM binary, CPU fingerprint) BEFORE any VMM is
@@ -684,7 +684,7 @@ fn vmm_cpu_template(pid: i32) -> Option<String> {
 
 /// take-side cpu identity: template-keyed when the VMM ran under a
 /// template (host fingerprint demoted to the advisory cpu-host line),
-/// host-keyed exactly as v0.8 wrote it when not.
+/// host-keyed exactly as phase 8 wrote it when not.
 fn take_cpu_identity(template: Option<String>) -> (Option<String>, Option<String>) {
     match template {
         Some(t) => (
@@ -768,7 +768,7 @@ fn identity_mismatches(recorded: &SnapIdentity, live: &SnapIdentity) -> Vec<Iden
 /// --cpu-template spec ("sha256:<hex>" or a static NAME), None when the
 /// flag was not passed. Returns (fatal mismatches, warn-only lines):
 ///
-///   minted without template  → host fingerprint exact-match (v0.8 rule,
+///   minted without template  → host fingerprint exact-match (phase 8 rule,
 ///                              unchanged); a --cpu-template flag refuses
 ///   minted with template     → exact-string template compare; missing
 ///                              flag refuses; host fingerprint (cpu-host)
@@ -2285,7 +2285,7 @@ mod tests {
         let (cpu, host) = take_cpu_identity(Some("sha256:5dd9".into()));
         assert_eq!(cpu.as_deref(), Some("template:sha256:5dd9"));
         assert!(host.is_some());
-        // Untemplated: v0.8 spelling exactly — host-keyed cpu, no cpu-host.
+        // Untemplated: phase 8 spelling exactly — host-keyed cpu, no cpu-host.
         let (cpu, host) = take_cpu_identity(None);
         assert!(!cpu.unwrap().starts_with(TEMPLATE_PREFIX));
         assert!(host.is_none());
@@ -2294,7 +2294,7 @@ mod tests {
     #[test]
     fn cpu_gate_host_keyed_unchanged() {
         let fp = "GenuineIntel/6/143+avx,avx2";
-        // Match: no mismatch, no warning — byte-for-byte the v0.8 rule.
+        // Match: no mismatch, no warning — byte-for-byte the phase 8 rule.
         let (m, w) = cpu_identity_check(Some(fp), None, fp, None);
         assert!(m.is_empty() && w.is_empty());
         // Host drift refuses.

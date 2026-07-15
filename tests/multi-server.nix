@@ -1,4 +1,4 @@
-# Multi-server HA (air/v0.3/durable-ha.org, test matrix "multi-server"):
+# Multi-server HA (air/v0.1/quorum/durable-ha.org, test matrix "multi-server"):
 # 3 declared servers form an etcd quorum, 1 agent reaches the apiserver set
 # through kubenyx-lb. The servers run the durable posture (balanced profile,
 # persistent datastore), so the CA is operator custody: minted OFFLINE on

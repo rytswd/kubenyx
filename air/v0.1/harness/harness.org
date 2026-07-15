@@ -135,7 +135,7 @@ needs for basic bring-up, this check fails before any consumer does.
 ** The snapshot-fixture pattern, honestly
 
 The recreation numbers (33 ms via =kubenyx-snap cycle=, see
-air/v0.2/snapshot-restore.org and bench/RESULTS.md) make "restore a
+air/v0.1/snapshot/snapshot-restore.org and bench/RESULTS.md) make "restore a
 cluster-ready snapshot per test" the obvious fixture endgame. Status:
 
 *What works today (host-side, outside any test driver):*
@@ -164,7 +164,7 @@ REALTIME does not); AMX/CET hosts need the =clearcpuid=…= +
    (aged watches, lease timestamps) — bring-up gates written as "wait
    for condition" survive this; "assert event observed" style does not.
 4. Concurrent checks each need an isolated clone: per-clone host NAT /
-   address remap (staged in air/v0.2/snapshot-restore.org as future
+   address remap (staged in air/v0.1/snapshot/snapshot-restore.org as future
    work) is a prerequisite, not a nicety.
 
 *Related finding on fixture acceleration* (from the embedding

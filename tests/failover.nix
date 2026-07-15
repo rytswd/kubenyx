@@ -1,4 +1,4 @@
-# Failover (air/v0.3/durable-ha.org, test matrix "failover"): extends the
+# Failover (air/v0.1/quorum/durable-ha.org, test matrix "failover"): extends the
 # multi-server topology — same 3 servers + 1 agent, same offline-CA custody
 # bootstrap — then proves the two HA claims live:
 #
