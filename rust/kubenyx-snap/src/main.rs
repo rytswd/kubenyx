@@ -3,8 +3,8 @@
 //! recreate a live cluster in ~75ms — cheaper than any cold boot can get.
 //!
 //!   kubenyx-snap take   --runner <microvm-run> --out DIR
-//!   kubenyx-snap resume --snapshot DIR [--firecracker BIN]
-//!   kubenyx-snap cycle  --snapshot DIR [-n N]
+//!   kubenyx-snap resume --snapshot DIR [--firecracker BIN] [--cpu-template T]
+//!   kubenyx-snap cycle  --snapshot DIR [-n N] [--cpu-template T]
 //!
 //! `take` spawns the stock microvm.nix runner (which already passes
 //! `--api-sock kubenyx.sock` in CWD), waits for the KUBENYX-CLUSTER-READY
@@ -32,6 +32,18 @@
 //! §D3); resume/mesh-resume refuse a mismatching host or VMM before any
 //! process is spawned. --allow-identity-mismatch overrides, loudly. Old
 //! snapshots without identity fields warn and proceed.
+//!
+//! CPU templates (portable-snapshots.org §D3): a snapshot minted under a
+//! firecracker custom CPU template records `identity cpu
+//! template:sha256:<hash of canonicalized cpu-config JSON>` instead of the
+//! host fingerprint (detected from the live VMM's --config-file, never
+//! declared by the caller), plus an advisory `identity cpu-host` line.
+//! resume/mesh-resume gain --cpu-template <path|literal>; the gate is
+//! exact-string — wrong template refuses, a templated artifact without the
+//! flag refuses, --cpu-template against an untemplated artifact refuses.
+//! When templates match, a differing host fingerprint warns but does not
+//! refuse (that is the whole point of the template). Template-less
+//! manifests keep the v0.8 host-keyed refusal byte-for-byte.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
@@ -438,13 +450,26 @@ struct SnapIdentity {
     /// The VMM binary that wrote snap.vmstate (resolved via /proc, so it is
     /// the real store path, not whatever $PATH spelling spawned it).
     vmm: Option<String>,
-    /// Host CPU fingerprint: vendor/family/model + watchlist feature bits.
+    /// CPU identity, one of two spellings under the same manifest key
+    /// (portable-snapshots.org §D3): `template:sha256:<hash>` /
+    /// `template:<NAME>` when the take VMM ran under a CPU template, or
+    /// the host fingerprint (vendor/family/model + watchlist bits) when
+    /// not. Sharing the key is deliberate: a pre-template binary reading
+    /// a templated manifest compares its host fingerprint against the
+    /// `template:` string, always mismatches, and refuses — strictly
+    /// more conservative than the new rule, never less.
     cpu: Option<String>,
+    /// Advisory host fingerprint recorded NEXT TO a template-keyed cpu
+    /// (new `cpu-host` key, ignored by old parsers): when templates
+    /// match, a differing cpu-host prints a warn line — exactly the
+    /// signal a future cross-host incident report needs — but does not
+    /// refuse. Never written for host-keyed manifests.
+    cpu_host: Option<String>,
 }
 
 impl SnapIdentity {
     fn is_empty(&self) -> bool {
-        self.closure.is_none() && self.vmm.is_none() && self.cpu.is_none()
+        self.closure.is_none() && self.vmm.is_none() && self.cpu.is_none() && self.cpu_host.is_none()
     }
 }
 
@@ -487,10 +512,15 @@ fn cpu_fingerprint() -> String {
 /// after the node lines so pre-identity parsers of the node section (and
 /// read_manifest itself) keep working on byte-identical prefixes.
 fn identity_lines(id: &SnapIdentity) -> String {
-    [("closure", &id.closure), ("vmm", &id.vmm), ("cpu", &id.cpu)]
-        .iter()
-        .filter_map(|(k, v)| v.as_ref().map(|v| format!("{IDENTITY_PREFIX}{k} {v}\n")))
-        .collect()
+    [
+        ("closure", &id.closure),
+        ("vmm", &id.vmm),
+        ("cpu", &id.cpu),
+        ("cpu-host", &id.cpu_host),
+    ]
+    .iter()
+    .filter_map(|(k, v)| v.as_ref().map(|v| format!("{IDENTITY_PREFIX}{k} {v}\n")))
+    .collect()
 }
 
 fn parse_identity(manifest: &str) -> SnapIdentity {
@@ -498,6 +528,7 @@ fn parse_identity(manifest: &str) -> SnapIdentity {
         closure: None,
         vmm: None,
         cpu: None,
+        cpu_host: None,
     };
     for line in manifest.lines() {
         let Some(rest) = line.strip_prefix(IDENTITY_PREFIX) else {
@@ -511,12 +542,177 @@ fn parse_identity(manifest: &str) -> SnapIdentity {
             "closure" => id.closure = value,
             "vmm" => id.vmm = value,
             "cpu" => id.cpu = value,
+            "cpu-host" => id.cpu_host = value,
             // Future fields: this binary ignores them rather than refusing —
             // an unknown lock it cannot check is the legacy warning's job.
             _ => {}
         }
     }
     id
+}
+
+// ---- CPU templates (portable-snapshots.org §D3) ------------------------------
+
+const TEMPLATE_PREFIX: &str = "template:";
+
+/// Canonical JSON: the byte stream minus insignificant whitespace (outside
+/// string literals). This is exactly the form `builtins.toJSON` emits (the
+/// pinned microvm.nix rev renders the template as `writeText
+/// (builtins.toJSON cpu)`), so hashing the canonicalized runner-side
+/// cpu-config.json and the committed template file yields one identity for
+/// one template. Key ORDER is not normalized — the committed template is
+/// authored in toJSON's sorted-key form, and both sides of every compare
+/// hash files that went through toJSON or are committed in that form.
+fn canonicalize_json(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_str = false;
+    let mut esc = false;
+    for c in raw.chars() {
+        if in_str {
+            out.push(c);
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+        } else if c == '"' {
+            in_str = true;
+            out.push(c);
+        } else if !c.is_whitespace() {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `sha256:<hex>` of the canonicalized template JSON — the identity the
+/// manifest records and --cpu-template resolves to.
+fn template_hash(raw: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(canonicalize_json(raw).as_bytes());
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    format!("sha256:{hex}")
+}
+
+/// The value after `"<key>":` in our own tooling's JSON (the microvm.nix
+/// runner config, jq-pretty-printed): a quoted string is returned WITH its
+/// quotes, an inline object as its balanced-brace slice. Same posture as
+/// json_str_field on the launcher manifest — the writer is our pinned
+/// runner, so a scan beats a JSON dependency, and anything unexpected
+/// refuses loudly at the caller.
+fn json_value_after_key<'a>(obj: &'a str, key: &str) -> Option<&'a str> {
+    let pat = format!("\"{key}\"");
+    let after_key = obj.find(&pat)? + pat.len();
+    let rest = obj[after_key..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    let at = obj.len() - rest.len();
+    match rest.as_bytes().first()? {
+        b'"' => {
+            // Store paths carry no escapes; a backslash here is not ours.
+            let end = rest[1..].find('"')? + 2;
+            Some(&obj[at..at + end])
+        }
+        b'{' => {
+            let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+            for (i, c) in rest.char_indices() {
+                if in_str {
+                    if esc {
+                        esc = false;
+                    } else if c == '\\' {
+                        esc = true;
+                    } else if c == '"' {
+                        in_str = false;
+                    }
+                } else if c == '"' {
+                    in_str = true;
+                } else if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&obj[at..at + i + 1]);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The CPU template the VMM was ACTUALLY launched with, as an identity
+/// spec ("sha256:<hex>"), read off /proc/<pid>/cmdline → --config-file →
+/// the config's `cpu-config` key. Detected, never declared: a caller flag
+/// could record a template the guest never ran under, which is exactly
+/// the lie the identity manifest exists to prevent. The pinned microvm.nix
+/// rev renders a store-path string (CustomCpuTemplateOrPath's Path
+/// variant); an inline object (its other variant) hashes directly. No
+/// --config-file or no key means no template — a host-keyed take.
+fn vmm_cpu_template(pid: i32) -> Option<String> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let args: Vec<String> = raw
+        .split(|b| *b == 0)
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    let cfg_path = args
+        .windows(2)
+        .find_map(|w| (w[0] == "--config-file").then(|| w[1].clone()))?;
+    // From here on the VMM demonstrably ran with a config file: failing to
+    // read it must not silently downgrade to "untemplated".
+    let cfg = std::fs::read_to_string(&cfg_path)
+        .unwrap_or_else(|e| die(&format!("read VMM config {cfg_path}: {e}")));
+    let val = json_value_after_key(&cfg, "cpu-config")?;
+    let template_json = if let Some(quoted) = val.strip_prefix('"') {
+        let path = quoted.strip_suffix('"').unwrap_or(quoted);
+        if path.contains('\\') {
+            die(&format!("cpu-config path {path}: unexpected escape"));
+        }
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| die(&format!("read cpu-config {path}: {e}")))
+    } else {
+        val.to_string()
+    };
+    Some(template_hash(&template_json))
+}
+
+/// take-side cpu identity: template-keyed when the VMM ran under a
+/// template (host fingerprint demoted to the advisory cpu-host line),
+/// host-keyed exactly as v0.8 wrote it when not.
+fn take_cpu_identity(template: Option<String>) -> (Option<String>, Option<String>) {
+    match template {
+        Some(t) => (
+            Some(format!("{TEMPLATE_PREFIX}{t}")),
+            Some(cpu_fingerprint()),
+        ),
+        None => (Some(cpu_fingerprint()), None),
+    }
+}
+
+/// Resolve the --cpu-template argument to the identity spelling: an
+/// existing file is canonicalized and hashed ("sha256:<hex>"); anything
+/// else is taken literally (a static template NAME, or a precomputed
+/// "sha256:..." string). A path-looking argument that does not exist dies
+/// rather than string-comparing garbage into a refusal.
+fn resolve_template_spec(arg: &str) -> String {
+    let p = Path::new(arg);
+    if p.is_file() {
+        let raw = std::fs::read_to_string(p)
+            .unwrap_or_else(|e| die(&format!("read --cpu-template {arg}: {e}")));
+        template_hash(&raw)
+    } else if arg.contains('/') {
+        die(&format!(
+            "--cpu-template {arg}: looks like a path but is not a readable file"
+        ))
+    } else {
+        arg.to_string()
+    }
 }
 
 struct IdentityMismatch {
@@ -534,13 +730,24 @@ const WHY_CPU: &str = "snap.mem freezes guest xstate/CPUID against the take host
      features; restoring under a different feature set has a measured history of guest \
      XRSTORS #GP kernel panics (CPU-feature lock)";
 
-/// Field-by-field compare, skipping fields either side does not know.
+const WHY_TEMPLATE: &str = "the snapshot's CPU identity is keyed to a firecracker CPU \
+     template (portable-snapshots.org §D3); resume must present the same template via \
+     --cpu-template — exact string, no subset logic, because a half-right compatibility \
+     check fails as a guest panic instead of an error message (template lock)";
+
+const WHY_NOT_TEMPLATED: &str = "--cpu-template was passed but this snapshot was minted \
+     WITHOUT a template — its frozen xstate is keyed to the minting host, and claiming a \
+     template it never ran under would fake portability the artifact does not have \
+     (template lock)";
+
+/// Field-by-field compare of the closure and VMM locks, skipping fields
+/// either side does not know. The cpu lock has its own rule table —
+/// cpu_identity_check below.
 fn identity_mismatches(recorded: &SnapIdentity, live: &SnapIdentity) -> Vec<IdentityMismatch> {
     let mut out = Vec::new();
     let pairs = [
         ("closure", &recorded.closure, &live.closure, WHY_CLOSURE),
         ("vmm", &recorded.vmm, &live.vmm, WHY_VMM),
-        ("cpu", &recorded.cpu, &live.cpu, WHY_CPU),
     ];
     for (field, rec, liv, why) in pairs {
         if let (Some(r), Some(l)) = (rec, liv) {
@@ -555,6 +762,90 @@ fn identity_mismatches(recorded: &SnapIdentity, live: &SnapIdentity) -> Vec<Iden
         }
     }
     out
+}
+
+/// The §D3 rule table for the cpu lock. `resume_template` is the RESOLVED
+/// --cpu-template spec ("sha256:<hex>" or a static NAME), None when the
+/// flag was not passed. Returns (fatal mismatches, warn-only lines):
+///
+///   minted without template  → host fingerprint exact-match (v0.8 rule,
+///                              unchanged); a --cpu-template flag refuses
+///   minted with template     → exact-string template compare; missing
+///                              flag refuses; host fingerprint (cpu-host)
+///                              demoted to a warn line when templates match
+fn cpu_identity_check(
+    recorded_cpu: Option<&str>,
+    recorded_cpu_host: Option<&str>,
+    live_cpu: &str,
+    resume_template: Option<&str>,
+) -> (Vec<IdentityMismatch>, Vec<String>) {
+    let mut mismatches = Vec::new();
+    let mut warnings = Vec::new();
+    match recorded_cpu {
+        None => {
+            // No cpu lock recorded (partial manifest): nothing to enforce,
+            // but a --cpu-template claim against it is unverifiable.
+            if let Some(rt) = resume_template {
+                mismatches.push(IdentityMismatch {
+                    field: "cpu",
+                    recorded: "(no cpu identity recorded)".into(),
+                    live: format!("{TEMPLATE_PREFIX}{rt}"),
+                    why: WHY_NOT_TEMPLATED,
+                });
+            }
+        }
+        Some(rc) => {
+            if let Some(recorded_template) = rc.strip_prefix(TEMPLATE_PREFIX) {
+                match resume_template {
+                    None => mismatches.push(IdentityMismatch {
+                        field: "cpu",
+                        recorded: rc.into(),
+                        live: "(resume passed no --cpu-template)".into(),
+                        why: WHY_TEMPLATE,
+                    }),
+                    Some(rt) if rt != recorded_template => {
+                        mismatches.push(IdentityMismatch {
+                            field: "cpu",
+                            recorded: rc.into(),
+                            live: format!("{TEMPLATE_PREFIX}{rt}"),
+                            why: WHY_TEMPLATE,
+                        });
+                    }
+                    Some(_) => {
+                        // Templates match: the host fingerprint is advisory
+                        // (demoted, not deleted) — the warn line is the
+                        // breadcrumb a cross-host incident report needs.
+                        if let Some(rh) = recorded_cpu_host {
+                            if rh != live_cpu {
+                                warnings.push(format!(
+                                    "template-keyed identities match but the host CPU \
+                                     differs from the minting host\n  minted on: {rh}\n  \
+                                     this host: {live_cpu}\n  proceeding — the template is \
+                                     the lock; cross-host restore remains unproven \
+                                     (portable-snapshots.org §D4)"
+                                ));
+                            }
+                        }
+                    }
+                }
+            } else if let Some(rt) = resume_template {
+                mismatches.push(IdentityMismatch {
+                    field: "cpu",
+                    recorded: rc.into(),
+                    live: format!("{TEMPLATE_PREFIX}{rt}"),
+                    why: WHY_NOT_TEMPLATED,
+                });
+            } else if rc != live_cpu {
+                mismatches.push(IdentityMismatch {
+                    field: "cpu",
+                    recorded: rc.into(),
+                    live: live_cpu.into(),
+                    why: WHY_CPU,
+                });
+            }
+        }
+    }
+    (mismatches, warnings)
 }
 
 /// Resolve what `--firecracker` would actually execute: bare names walk
@@ -582,8 +873,9 @@ fn vmm_exe_of(pid: i32) -> Option<String> {
 
 /// Fallback for wrapped runners and attached/mesh takes: the firecracker
 /// process is findable by its CWD (where its API socket lives), the same
-/// handle kill_mesh_vmms uses on processes someone else spawned.
-fn find_vmm_exe_by_cwd(want: &Path) -> Option<String> {
+/// handle kill_mesh_vmms uses on processes someone else spawned. Returns
+/// (pid, exe): the pid is what template detection reads the cmdline from.
+fn find_vmm_by_cwd(want: &Path) -> Option<(i32, String)> {
     // /proc/<pid>/cwd readlinks are absolute and resolved; match in kind.
     let want = want.canonicalize().ok()?;
     for entry in std::fs::read_dir("/proc").ok()?.filter_map(|e| e.ok()) {
@@ -600,7 +892,7 @@ fn find_vmm_exe_by_cwd(want: &Path) -> Option<String> {
         if cwd == want {
             return std::fs::read_link(format!("/proc/{pid}/exe"))
                 .ok()
-                .map(|p| p.display().to_string());
+                .map(|p| (pid, p.display().to_string()));
         }
     }
     None
@@ -621,6 +913,7 @@ fn live_identity(firecracker: &str) -> SnapIdentity {
         closure: None,
         vmm,
         cpu: Some(cpu_fingerprint()),
+        cpu_host: None,
     }
 }
 
@@ -632,9 +925,23 @@ fn read_snapshot_identity(dir: &Path) -> Option<SnapIdentity> {
 
 /// The refusal gate, run before any VMM is spawned. Missing identity is a
 /// warning, not an error: pre-identity snapshots keep resuming (compat),
-/// they just do so unverified.
-fn enforce_identity(snapshot: &Path, firecracker: &str, allow_mismatch: bool) {
+/// they just do so unverified — unless the caller claims a template, which
+/// an identity-less manifest can never back up.
+fn enforce_identity(
+    snapshot: &Path,
+    firecracker: &str,
+    cpu_template: Option<&str>,
+    allow_mismatch: bool,
+) {
     let Some(recorded) = read_snapshot_identity(snapshot) else {
+        if cpu_template.is_some() && !allow_mismatch {
+            die(&format!(
+                "--cpu-template passed but {} has no identity fields in its \
+                 manifest (pre-identity snapshot) — the template claim cannot \
+                 be verified; drop the flag, or pass --allow-identity-mismatch",
+                snapshot.display()
+            ));
+        }
         eprintln!(
             "kubenyx-snap: warning: {} has no identity fields in its manifest \
              (pre-identity snapshot) — the CPU-feature and VMM locks cannot be \
@@ -643,7 +950,18 @@ fn enforce_identity(snapshot: &Path, firecracker: &str, allow_mismatch: bool) {
         );
         return;
     };
-    let mismatches = identity_mismatches(&recorded, &live_identity(firecracker));
+    let live = live_identity(firecracker);
+    let mut mismatches = identity_mismatches(&recorded, &live);
+    let (cpu_mismatches, warnings) = cpu_identity_check(
+        recorded.cpu.as_deref(),
+        recorded.cpu_host.as_deref(),
+        live.cpu.as_deref().unwrap_or(""),
+        cpu_template,
+    );
+    mismatches.extend(cpu_mismatches);
+    for w in &warnings {
+        eprintln!("kubenyx-snap: warning: {w}");
+    }
     if mismatches.is_empty() {
         return;
     }
@@ -773,24 +1091,32 @@ fn cmd_take(flags: &Flags) {
 
     // Identity (§D3) while the VMM is still alive: the runner usually
     // exec-chains into firecracker (same pid), else find it by CWD (it
-    // dropped kubenyx.sock here).
+    // dropped kubenyx.sock here). The pid also carries the CPU-template
+    // detection (--config-file off the live cmdline).
     let vm_pid = vm.id() as i32;
+    let vmm = vmm_exe_of(vm_pid).map(|exe| (vm_pid, exe)).or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|d| find_vmm_by_cwd(&d))
+    });
+    let template = vmm.as_ref().and_then(|(pid, _)| vmm_cpu_template(*pid));
+    if let Some(t) = &template {
+        eprintln!("take: CPU-template-keyed identity ({t})");
+    }
+    let (cpu, cpu_host) = take_cpu_identity(template);
     let identity = SnapIdentity {
         closure: PathBuf::from(&runner)
             .canonicalize()
             .ok()
             .map(|p| p.display().to_string()),
-        vmm: vmm_exe_of(vm_pid).or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|d| find_vmm_exe_by_cwd(&d))
-        }),
-        cpu: Some(cpu_fingerprint()),
+        vmm: vmm.map(|(_, exe)| exe),
+        cpu,
+        cpu_host,
     };
     if identity.vmm.is_none() {
         eprintln!(
             "take: warning: could not identify the VMM binary — resume will not \
-             verify the VMM lock for this snapshot"
+             verify the VMM lock (nor detect a CPU template) for this snapshot"
         );
     }
     std::fs::write(out.join("manifest"), identity_lines(&identity))
@@ -832,15 +1158,23 @@ fn cmd_take_attached(flags: &Flags) {
     // Identity (§D3): the attached VM's closure is its operator's knowledge,
     // not ours (no runner path in sight) — record what this side can prove.
     // The VMM binds its API socket relative to its own CWD, so the socket's
-    // directory is the CWD to scan for.
+    // directory is the CWD to scan for; the found pid also carries the
+    // CPU-template detection.
+    let vmm = sock
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .and_then(|d| find_vmm_by_cwd(&d));
+    let template = vmm.as_ref().and_then(|(pid, _)| vmm_cpu_template(*pid));
+    if let Some(t) = &template {
+        eprintln!("take: CPU-template-keyed identity ({t})");
+    }
+    let (cpu, cpu_host) = take_cpu_identity(template);
     let identity = SnapIdentity {
         closure: None,
-        vmm: sock
-            .canonicalize()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .and_then(|d| find_vmm_exe_by_cwd(&d)),
-        cpu: Some(cpu_fingerprint()),
+        vmm: vmm.map(|(_, exe)| exe),
+        cpu,
+        cpu_host,
     };
     if identity.vmm.is_none() {
         eprintln!(
@@ -954,10 +1288,14 @@ fn resume_flags(flags: &Flags) -> (String, PathBuf, PathBuf, String, String, boo
         .get("--poke")
         .unwrap_or_else(|| "10.100.0.2:10123".into());
     let enable_pci = !flags.has("--no-pci");
-    // Identity gate (§D3) before anything is spawned.
+    // Identity gate (§D3) before anything is spawned. --cpu-template is
+    // resolved here (path → sha256:<hex>, literal kept) so the gate's
+    // compare is a pure string rule.
+    let cpu_template = flags.get("--cpu-template").map(|t| resolve_template_spec(&t));
     enforce_identity(
         &snapshot,
         &firecracker,
+        cpu_template.as_deref(),
         flags.has("--allow-identity-mismatch"),
     );
     (
@@ -1410,14 +1748,22 @@ fn cmd_mesh_take(flags: &Flags) {
     }
     // Identity (§D3) before the kill below erases the evidence: the
     // launcher spawned every node from one eval, so the first node's VMM
-    // speaks for the mesh. Closure stays unknown — the launcher holds the
-    // eval, this tool only sees run dirs and API sockets.
+    // speaks for the mesh (one cpuTemplate flows to every node from the
+    // same mkCluster argument). Closure stays unknown — the launcher holds
+    // the eval, this tool only sees run dirs and API sockets.
+    let vmm = nodes
+        .iter()
+        .find_map(|n| find_vmm_by_cwd(&run_dir.join(&n.name)));
+    let template = vmm.as_ref().and_then(|(pid, _)| vmm_cpu_template(*pid));
+    if let Some(t) = &template {
+        eprintln!("mesh-take: CPU-template-keyed identity ({t})");
+    }
+    let (cpu, cpu_host) = take_cpu_identity(template);
     let identity = SnapIdentity {
         closure: None,
-        vmm: nodes
-            .iter()
-            .find_map(|n| find_vmm_exe_by_cwd(&run_dir.join(&n.name))),
-        cpu: Some(cpu_fingerprint()),
+        vmm: vmm.map(|(_, exe)| exe),
+        cpu,
+        cpu_host,
     };
     if identity.vmm.is_none() {
         eprintln!(
@@ -1569,10 +1915,13 @@ fn mesh_resume_flags(flags: &Flags) -> (PathBuf, Vec<MeshNode>, String, bool) {
         .get("--firecracker")
         .unwrap_or_else(|| "firecracker".into());
     let enable_pci = !flags.has("--no-pci");
-    // Identity gate (§D3) before anything is spawned.
+    // Identity gate (§D3) before anything is spawned; --cpu-template as in
+    // resume_flags.
+    let cpu_template = flags.get("--cpu-template").map(|t| resolve_template_spec(&t));
     enforce_identity(
         &snapshot,
         &firecracker,
+        cpu_template.as_deref(),
         flags.has("--allow-identity-mismatch"),
     );
     (snapshot, nodes, firecracker, enable_pci)
@@ -1818,6 +2167,16 @@ mod tests {
             closure: Some("/nix/store/aaa-microvm-run".into()),
             vmm: Some("/nix/store/bbb-firecracker/bin/firecracker".into()),
             cpu: Some("GenuineIntel/6/143+avx,avx2".into()),
+            cpu_host: None,
+        }
+    }
+
+    fn templated_identity() -> SnapIdentity {
+        SnapIdentity {
+            closure: None,
+            vmm: Some("/nix/store/bbb-firecracker/bin/firecracker".into()),
+            cpu: Some("template:sha256:5dd9".into()),
+            cpu_host: Some("GenuineIntel/6/173+avx,avx2,amx_tile".into()),
         }
     }
 
@@ -1852,30 +2211,20 @@ mod tests {
         // Exact match: nothing to refuse.
         assert!(identity_mismatches(&rec, &rec).is_empty());
         // Resume's live identity never knows the closure: skipped, and the
-        // two live-comparable locks pass.
+        // live-comparable vmm lock passes.
         let live = SnapIdentity {
             closure: None,
             ..full_identity()
         };
         assert!(identity_mismatches(&rec, &live).is_empty());
-        // CPU drift names the cpu field (feature lock).
-        let other_cpu = SnapIdentity {
-            cpu: Some("GenuineIntel/6/143+avx,avx2,amx_tile".into()),
-            ..live.clone()
-        };
-        let m = identity_mismatches(&rec, &other_cpu);
-        assert_eq!(m.len(), 1);
-        assert_eq!(m[0].field, "cpu");
-        assert_eq!(m[0].recorded, "GenuineIntel/6/143+avx,avx2");
-        assert_eq!(m[0].live, "GenuineIntel/6/143+avx,avx2,amx_tile");
-        // VMM drift names the vmm field (version lock); both at once report both.
+        // VMM drift names the vmm field (version lock).
         let other_vmm = SnapIdentity {
             vmm: Some("/nix/store/ccc-firecracker/bin/firecracker".into()),
-            ..other_cpu
+            ..live.clone()
         };
         let m = identity_mismatches(&rec, &other_vmm);
         let fields: Vec<&str> = m.iter().map(|x| x.field).collect();
-        assert_eq!(fields, ["vmm", "cpu"]);
+        assert_eq!(fields, ["vmm"]);
         // A field the SNAPSHOT does not carry is not enforceable either.
         let rec_no_vmm = SnapIdentity {
             vmm: None,
@@ -1884,6 +2233,130 @@ mod tests {
         assert!(identity_mismatches(&rec_no_vmm, &other_vmm)
             .iter()
             .all(|x| x.field != "vmm"));
+    }
+
+    // ---- CPU templates (portable-snapshots.org §D3) ---------------------------
+
+    #[test]
+    fn canonicalize_strips_only_insignificant_whitespace() {
+        // jq-pretty vs toJSON-minified: one canonical form.
+        let pretty = "{\n  \"a\": \"x y\\\" z\",\n  \"b\": [ 1, 2 ]\n}\n";
+        assert_eq!(canonicalize_json(pretty), r#"{"a":"x y\" z","b":[1,2]}"#);
+        // Whitespace INSIDE strings survives, including after escapes.
+        assert_eq!(canonicalize_json("\"a b\""), "\"a b\"");
+    }
+
+    #[test]
+    fn template_hash_is_format_independent() {
+        let minified = r#"{"cpuid_modifiers":[{"leaf":"0x7"}],"msr_modifiers":[]}"#;
+        let pretty = "{\n  \"cpuid_modifiers\": [\n    { \"leaf\": \"0x7\" }\n  ],\n  \"msr_modifiers\": []\n}";
+        assert_eq!(template_hash(minified), template_hash(pretty));
+        assert!(template_hash(minified).starts_with("sha256:"));
+        assert_eq!(template_hash(minified).len(), "sha256:".len() + 64);
+        // Content changes change the hash.
+        assert_ne!(
+            template_hash(minified),
+            template_hash(&minified.replace("0x7", "0xd"))
+        );
+    }
+
+    #[test]
+    fn json_value_extraction_from_runner_config() {
+        // The two CustomCpuTemplateOrPath variants, in jq-pretty shape.
+        let cfg = "{\n  \"boot-source\": { \"kernel_image_path\": \"/nix/store/k\" },\n  \
+                   \"cpu-config\": \"/nix/store/abc-cpu-config.json\",\n  \"machine-config\": {}\n}";
+        assert_eq!(
+            json_value_after_key(cfg, "cpu-config"),
+            Some("\"/nix/store/abc-cpu-config.json\"")
+        );
+        let inline = r#"{ "cpu-config": {"cpuid_modifiers":[{"leaf":"0x7","modifiers":[{"bitmap":"0bx{x"}]}]}, "x": 1 }"#;
+        assert_eq!(
+            json_value_after_key(inline, "cpu-config"),
+            Some(r#"{"cpuid_modifiers":[{"leaf":"0x7","modifiers":[{"bitmap":"0bx{x"}]}]}"#)
+        );
+        // Absent key: None — an untemplated take, not an error.
+        assert_eq!(json_value_after_key(cfg, "cpu-template"), None);
+    }
+
+    #[test]
+    fn take_cpu_identity_spellings() {
+        // Templated: cpu is the template spec, cpu-host carries the (real)
+        // host fingerprint next to it.
+        let (cpu, host) = take_cpu_identity(Some("sha256:5dd9".into()));
+        assert_eq!(cpu.as_deref(), Some("template:sha256:5dd9"));
+        assert!(host.is_some());
+        // Untemplated: v0.8 spelling exactly — host-keyed cpu, no cpu-host.
+        let (cpu, host) = take_cpu_identity(None);
+        assert!(!cpu.unwrap().starts_with(TEMPLATE_PREFIX));
+        assert!(host.is_none());
+    }
+
+    #[test]
+    fn cpu_gate_host_keyed_unchanged() {
+        let fp = "GenuineIntel/6/143+avx,avx2";
+        // Match: no mismatch, no warning — byte-for-byte the v0.8 rule.
+        let (m, w) = cpu_identity_check(Some(fp), None, fp, None);
+        assert!(m.is_empty() && w.is_empty());
+        // Host drift refuses.
+        let (m, _) = cpu_identity_check(Some(fp), None, "GenuineIntel/6/173+avx", None);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].field, "cpu");
+        // Claiming a template against an untemplated artifact refuses.
+        let (m, _) = cpu_identity_check(Some(fp), None, fp, Some("sha256:5dd9"));
+        assert_eq!(m.len(), 1);
+        assert!(m[0].why.contains("WITHOUT a template"));
+    }
+
+    #[test]
+    fn cpu_gate_template_keyed() {
+        let rec = "template:sha256:5dd9";
+        let host_a = "GenuineIntel/6/173+avx,amx_tile";
+        let host_b = "GenuineIntel/6/143+avx";
+        // Same template, same host: clean pass.
+        let (m, w) = cpu_identity_check(Some(rec), Some(host_a), host_a, Some("sha256:5dd9"));
+        assert!(m.is_empty() && w.is_empty());
+        // Same template, DIFFERENT host: warn-only — the demotion §D3 made.
+        let (m, w) = cpu_identity_check(Some(rec), Some(host_a), host_b, Some("sha256:5dd9"));
+        assert!(m.is_empty());
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains(host_a) && w[0].contains(host_b));
+        // Wrong template string: exact-string refusal.
+        let (m, _) = cpu_identity_check(Some(rec), Some(host_a), host_a, Some("sha256:beef"));
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].field, "cpu");
+        // Templated artifact without the flag: refusal, not fallback.
+        let (m, _) = cpu_identity_check(Some(rec), Some(host_a), host_a, None);
+        assert_eq!(m.len(), 1);
+        assert!(m[0].live.contains("no --cpu-template"));
+        // Static-name templates compare literally too.
+        let (m, _) = cpu_identity_check(Some("template:T2S"), None, host_a, Some("T2S"));
+        assert!(m.is_empty());
+        let (m, _) = cpu_identity_check(Some("template:T2S"), None, host_a, Some("T2CL"));
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn cpu_gate_partial_manifest() {
+        // No recorded cpu at all: nothing enforceable without a claim…
+        let (m, w) = cpu_identity_check(None, None, "any", None);
+        assert!(m.is_empty() && w.is_empty());
+        // …but a --cpu-template claim against it is unverifiable: refuse.
+        let (m, _) = cpu_identity_check(None, None, "any", Some("sha256:5dd9"));
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn templated_identity_round_trips_and_legacy_reads_conservatively() {
+        let id = templated_identity();
+        let lines = identity_lines(&id);
+        // The cpu line carries the template spelling; cpu-host is its own key.
+        assert!(lines.contains("identity cpu template:sha256:5dd9\n"));
+        assert!(lines.contains("identity cpu-host GenuineIntel/6/173+avx,avx2,amx_tile\n"));
+        assert_eq!(parse_identity(&lines), id);
+        // A pre-template parser maps the cpu key to its host-fingerprint
+        // gate: `template:...` never equals a live fingerprint, so an old
+        // binary REFUSES templated snapshots — strictly conservative.
+        assert_ne!(id.cpu.as_deref().unwrap(), "GenuineIntel/6/173+avx,avx2,amx_tile");
     }
 
     #[test]

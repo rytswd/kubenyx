@@ -10,4 +10,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 base64 = "0.22"
 libc = "0.2"
+# Template identity hashing (portable-snapshots.org §D3) — already in the
+# workspace lockfile via kubenyx-pki, so zero new crates in the closure.
+sha2 = "0.10"
 kubenyx-tls = { path = "../kubenyx-tls" }

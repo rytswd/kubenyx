@@ -40,6 +40,22 @@ rec {
   # IFNAMSIZ caps interface names at 15 chars: "kubenyx-br-XXXX" is
   # exactly 15, taps go "kx-XXXX-tN" (12 at the 254-node ceiling).
   defaultSubnet = "10.100.0.0/24";
+
+  # CPU templates for snapshot portability (air/v0.9/portable-snapshots.org
+  # §D1): the custom template is the unit of portability — two hosts running
+  # the same template mint and consume interchangeable kubenyx-snap
+  # artifacts. amx-mask is the narrow mask our own panic history proves is
+  # the live hazard (v0.2 XRSTORS #GP): AMX feature bits (leaf 0x7.0 EDX
+  # 22/24/25, leaf 0x7.1 EAX 21) and the XTILE state components (leaf 0xD.0
+  # EAX 17/18), authored from cpu-template-helper dumps at firecracker
+  # 1.15.1 and checked with `template verify` — never SDM recall. The JSON
+  # is committed in canonical builtins.toJSON form (sorted keys, no
+  # whitespace) so its sha256 IS the template identity kubenyx-snap records
+  # (§D3): the runner renders `writeText (builtins.toJSON cpu)`, which
+  # round-trips these bytes exactly.
+  cpuTemplates = {
+    amx-mask = builtins.fromJSON (builtins.readFile ./cpu-templates/amx-mask.json);
+  };
   subnetFor =
     subnet:
     let
@@ -145,6 +161,11 @@ rec {
       members,
       joinProbeSec ? 3,
       subnet ? defaultSubnet,
+      # Firecracker custom CPU template attrs (cpuTemplates.amx-mask, or a
+      # caller's own), rendered into microvm.firecracker.cpu ONLY when
+      # non-null — at the default every existing drv and launcher script
+      # stays byte-identical (portable-snapshots.org §D2, cp1w2 canary).
+      cpuTemplate ? null,
     }:
     name:
     let
@@ -156,57 +177,67 @@ rec {
       multiServer = lib.count (m: m.role == "server") (lib.attrValues members) > 1;
       mac = "02:00:00:00:00:${lib.fixedWidthString 2 "0" (lib.toLower (lib.toHexString (n.index + 1)))}";
     in
-    mkMicrovm "firecracker" {
-      imports = [
-        (mkGuestNet {
-          interface = {
-            type = "tap";
-            id = "${sn.tapPrefix}${toString n.index}";
-          };
-          inherit mac;
-          address = n.address;
-          gateway = sn.gateway;
-        })
-      ];
-      networking.hostName = name;
-      # Same snapshot-safe xstate config as the single-node firecracker
-      # variant (see its comment) — mesh snapshotting is phase 2, but
-      # keeping the kernels identical costs nothing.
-      boot.kernelParams = [
-        "clearcpuid=amx_tile,amx_int8,amx_bf16"
-        "noxsaves"
-      ];
-      kubenyx = {
-        nodes = members;
-        # The guest profile trusts this address for the kubeconfig handoff,
-        # the clockstep pokes and the launcher CA channel. The option's
-        # default equals the default subnet's gateway, so setting it here is
-        # a rendered no-op on the default subnet (byte-identity) and the
-        # actual fix on every other one.
-        hostGateway = sn.gateway;
+    mkMicrovm "firecracker" (
+      {
+        imports = [
+          (mkGuestNet {
+            interface = {
+              type = "tap";
+              id = "${sn.tapPrefix}${toString n.index}";
+            };
+            inherit mac;
+            address = n.address;
+            gateway = sn.gateway;
+          })
+        ];
+        networking.hostName = name;
+        # Same snapshot-safe xstate config as the single-node firecracker
+        # variant (see its comment) — mesh snapshotting is phase 2, but
+        # keeping the kernels identical costs nothing.
+        boot.kernelParams = [
+          "clearcpuid=amx_tile,amx_int8,amx_bf16"
+          "noxsaves"
+        ];
+        kubenyx = {
+          nodes = members;
+          # The guest profile trusts this address for the kubeconfig handoff,
+          # the clockstep pokes and the launcher CA channel. The option's
+          # default equals the default subnet's gateway, so setting it here is
+          # a rendered no-op on the default subnet (byte-identity) and the
+          # actual fix on every other one.
+          hostGateway = sn.gateway;
+        }
+        // lib.optionalAttrs (n.role == "agent") (
+          {
+            role = "agent";
+          }
+          # Multi-server agents declare NO endpoint, so lb.enable's default
+          # turns kubenyx-lb on and every agent kubeconfig dials
+          # https://127.0.0.1:6444 — the tests/multi-server.nix posture
+          # (quorum-mesh.org §D6). Single-server agents keep the declared
+          # endpoint, byte-identical to before.
+          // lib.optionalAttrs (!multiServer) {
+            controlPlaneEndpoint = members.server.address;
+          }
+        )
+        # A quorum needs real raft: the guest profile's etcd-mem default is
+        # single-member by design, so multi-server servers flip to the etcd
+        # backend (volatile stays on — tmpfs data dir, quorum-mesh.org §D1)
+        # and carry the launcher-chosen join-probe window (§D3).
+        // lib.optionalAttrs (multiServer && n.role == "server") {
+          datastore.backend = "etcd";
+          datastore.etcd.joinProbeSec = joinProbeSec;
+        };
       }
-      // lib.optionalAttrs (n.role == "agent") (
-        {
-          role = "agent";
-        }
-        # Multi-server agents declare NO endpoint, so lb.enable's default
-        # turns kubenyx-lb on and every agent kubeconfig dials
-        # https://127.0.0.1:6444 — the tests/multi-server.nix posture
-        # (quorum-mesh.org §D6). Single-server agents keep the declared
-        # endpoint, byte-identical to before.
-        // lib.optionalAttrs (!multiServer) {
-          controlPlaneEndpoint = members.server.address;
-        }
-      )
-      # A quorum needs real raft: the guest profile's etcd-mem default is
-      # single-member by design, so multi-server servers flip to the etcd
-      # backend (volatile stays on — tmpfs data dir, quorum-mesh.org §D1)
-      # and carry the launcher-chosen join-probe window (§D3).
-      // lib.optionalAttrs (multiServer && n.role == "server") {
-        datastore.backend = "etcd";
-        datastore.etcd.joinProbeSec = joinProbeSec;
-      };
-    };
+      # §D2: the pinned microvm.nix rev (048907f) renders this attrs value
+      # as a cpu-config.json store path in the firecracker config file —
+      # no runner surgery. The clearcpuid/noxsaves kernelParams above STAY
+      # even under a template: removing them changes every existing drv,
+      # which is a separate intended-target change with its own gate.
+      // lib.optionalAttrs (cpuTemplate != null) {
+        microvm.firecracker.cpu = cpuTemplate;
+      }
+    );
 
   # Host datapath decision, stated plainly (review finding on
   # multinode-microvm.org §2): the guest modules assume L2 adjacency
@@ -237,6 +268,11 @@ rec {
       # rendered for servers > 1 — single-server drvs never see it.
       joinProbeSec ? 3,
       subnet ? defaultSubnet,
+      # Custom firecracker CPU template for every node in the mesh
+      # (portable-snapshots.org §D2): null (the default) renders nothing
+      # and keeps all drvs byte-identical; cpuTemplates.amx-mask keys the
+      # mesh's snapshots to the template instead of the minting host.
+      cpuTemplate ? null,
       name ? "kubenyx-cluster",
       runDir ? "/tmp/${name}",
     }:
@@ -246,7 +282,12 @@ rec {
       members = mkMembers { inherit servers agents subnet; };
       bootOrder = bootOrderFor members;
       nodes = lib.genAttrs bootOrder (mkNode {
-        inherit members joinProbeSec subnet;
+        inherit
+          members
+          joinProbeSec
+          subnet
+          cpuTemplate
+          ;
       });
       runners = lib.mapAttrs (_: node: node.config.microvm.declaredRunner) nodes;
       tapFor = n: "${sn.tapPrefix}${toString members.${n}.index}";

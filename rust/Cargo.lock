@@ -726,6 +726,7 @@ dependencies = [
  "libc",
  "rustls",
  "rustls-pemfile",
+ "sha2",
 ]
 
 [[package]]

@@ -7,6 +7,57 @@ meaningless, only kubenyx-vs-k3s ratios in identical VMs count. KVM =
 EC2 metal (Xeon 6975P-C Granite Rapids, 384 cores, /dev/kvm): absolute
 numbers are real.
 
+## 2026-07-15 — v0.9 CPU templates: amx-mask costs nothing measurable, identity goes template-keyed
+
+air/v0.9/portable-snapshots.org D1–D3 landed together; single-node cp1
+(firecracker, KVM host), bench contract enforced (idleness gate, cpuset
+8-15, performance governor). Template: `lib/cpu-templates/amx-mask.json`
+(sha256 `5dd93095…`, authored from `cpu-template-helper template dump`,
+`template verify` green) — masks AMX/XTILE at KVM level: leaf 0x7.0 EDX
+22/24/25, leaf 0x7.1 EAX 21 (AMX-FP16 — present on Granite Rapids,
+missed by SDM recall, caught by the dump), leaf 0xD.0 EAX 17/18.
+
+**D5 A/B cost budget — HOLDS** (3 runs per variant, medians; per-variant
+snapshot dirs, both on /dev/shm):
+
+| Wall | baseline | amx-mask template | delta | budget |
+|---|---|---|---|---|
+| cold boot median (3×) | 3.31 s (3.49/3.31/3.31) | 3.37 s (3.37/3.43/3.36) | +1.8% | >2% ⇒ investigate |
+| resume median-of-medians (3× cycle -n 10) | 31.4 ms (30.9/31.4/33.0) | 32.8 ms (32.8/31.9/33.3) | +1.4 ms | >2 ms ⇒ investigate |
+
+Honesty notes: 3 runs each per this session's scope, not the D5-spec
+N≥20 — the +1.8% cold delta sits inside the measured idle-host
+envelope (baseline's own spread was 3.31–3.49 s) but a 20-run pass
+should confirm before template-by-default ships. Template application
+itself is pre-boot KVM_SET_CPUID2/SET_MSRS; no boot-phase regression
+visible at this resolution.
+
+**D4 one-host proofs — all green (2026-07-15):**
+
+- Mask proof: in-guest *userspace CPUID* prober (`pkgs/cpuid-probe.nix`;
+  /proc/cpuinfo would lie — clearcpuid scrubs it kernel-side):
+  baseline guest `amx_bf16=1 amx_tile=1 amx_int8=1 amx_fp16=1
+  xtilecfg=1 xtiledata=1`, templated guest all-zeros. Cross-checked
+  against `cpu-template-helper template dump -t` on the host (same
+  bits flip, KVM level).
+- Bake-in proof: take under template → manifest records
+  `identity cpu template:sha256:5dd93095…` + advisory
+  `identity cpu-host <fingerprint>`; the runner-rendered
+  cpu-config.json is byte-identical to the committed template (same
+  sha256). Resume passes no CPU config by construction — post-restore
+  prober tick in resume-console.log still all-zeros. Restore wall of
+  the proof run: load 24.9 ms, TLS answer +14.0 ms.
+- Mismatch drills, all refuse pre-spawn: wrong `--cpu-template`
+  literal; templated artifact without the flag; `--cpu-template`
+  against an untemplated artifact.
+
+Identity detection is from the live VMM's `--config-file`, never a
+caller claim; template-less snapshots keep the v0.8 host-keyed
+refusal unchanged (base-snap in the same session recorded the host
+fingerprint, byte-for-byte the old spelling). Cross-host restore
+remains UNPROVEN and gated (§D4) — these numbers open the door
+mechanics, not the door.
+
 ## 2026-07-14 — v0.8 test amplification: in-driver savevm/loadvm, per-mesh subnets, snapshot identity
 
 air/v0.8/test-amplification.org D1–D3 landed together; numbers below are
