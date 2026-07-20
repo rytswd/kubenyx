@@ -646,25 +646,6 @@ Two harness gotchas worth knowing (found the hard way, recorded in
   identical VMs count. On this project TCG turned out to be ~6.5×
   slower than KVM, not the 12–15× folklore.
 
-## 🗺 Repository Layout
-
-| Path | What |
-|---|---|
-| `modules/` | The NixOS module: control plane, datastore, PKI, node runtime, DNS, addons, network, storage |
-| `guests/`, `flake.nix` | MicroVM guest profile + firecracker/cloud-hypervisor/qemu variants + mesh generators |
-| `lib/` | CIDR math (v4/v6), `microvm.nix` (mesh construction, per-mesh subnets, CPU templates), `harness.nix` (test embedding + snapshot verbs) |
-| `rust/` | The tools — one multicall `kubenyx` binary (verbs: `snap`, `pki`, `ready`, `clockstep`, `lb`, `etcd-mem`); per-tool crates are libraries behind the dispatcher |
-| `tests/` | The 21-leg NixOS VM test matrix + the k3s benchmark |
-| `bench/RESULTS.md` | Every measurement, newest first, including the honest corrections |
-| `air/` | Design docs (planning-first workflow): architecture, per-subsystem specs, session plans |
-| `templates/` | `nix flake init -t` starting point |
-
-Design decisions live in `air/` — start with
-[`air/context/architecture.md`](air/context/architecture.md) and the
-per-version `OVERVIEW.org` files. The short version of the philosophy:
-stock Kubernetes, Nix as the source of truth, everything measured, and
-when a dependency is the bottleneck, replace it with 300 lines of Rust.
-
 ## 📚 Reference
 
 <details>
