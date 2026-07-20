@@ -89,14 +89,11 @@ When you want kubenyx around permanently, pick your layer:
 
 | You want | Do this |
 |---|---|
-| The `kubenyx` CLI on your PATH (snapshots, PKI custody, probes) | `nix profile install github:rytswd/kubenyx#kubenyx` |
+| The `kubenyx` CLI for this shell session | `nix shell github:rytswd/kubenyx#kubenyx` — snapshots, PKI custody, probes on PATH, gone when the shell is |
+| The CLI declaratively | NixOS: add the flake input and `environment.systemPackages = [ kubenyx.packages.${system}.kubenyx ];` — home-manager: the same package in `home.packages` |
 | The cluster module in your own NixOS flake | `nix flake init -t github:rytswd/kubenyx`, or add the flake input by hand — see [Beyond microVMs](#beyond-microvms) |
 | The test-harness / mesh libraries | `kubenyx.lib.harness` and `kubenyx.lib.microvm` from the flake input — see [Beyond microVMs](#beyond-microvms) |
-
-The whole toolset also compiles to a single **static musl binary**
-(~4.2 MB, no runtime dependencies) — groundwork for a planned
-fully Nix-free distribution (binary + downloadable guest bundles).
-Until that ships, the Nix paths above are the supported ones.
+| A host without Nix | download the `kubenyx` binary — a single static musl file (~4.2 MB, zero dependencies). The CLI verbs work standalone today; the self-contained microVM guest bundles it will launch are planned work |
 
 ### Run Strategies
 
