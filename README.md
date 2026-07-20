@@ -649,13 +649,16 @@ Two harness gotchas worth knowing (found the hard way, recorded in
 ## 📚 Reference
 
 A few directories whose purpose isn't obvious from the file view:
-`air/` holds the planning docs — the *why* behind every phase, organized
-by area (start at [`air/v0.1/OVERVIEW.org`](air/v0.1/OVERVIEW.org));
-`rust/` is all the tools as one multicall `kubenyx` binary (per-tool
-crates are libraries behind the dispatcher); `guests/` is the shared
-microVM guest profile (fast-boot units, credential handoff, phase
-markers); `bench/` carries the measurement methodology and the running
-results log ([`bench/RESULTS.md`](bench/RESULTS.md)).
+
+- `air/` — the planning docs, written with [Air](https://github.com/withre/air):
+  the *why* behind every phase, organized by area — start at
+  [`air/v0.1/OVERVIEW.org`](air/v0.1/OVERVIEW.org)
+- `rust/` — all the tools as one multicall `kubenyx` binary; per-tool
+  crates are libraries behind the dispatcher
+- `guests/` — the shared microVM guest profile (fast-boot units,
+  credential handoff, phase markers)
+- `bench/` — measurement methodology and the running results log
+  ([`bench/RESULTS.md`](bench/RESULTS.md))
 
 <details>
 <summary><b><code>nix run</code> apps & packages</b></summary>
