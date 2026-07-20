@@ -103,10 +103,10 @@ the package:
 inputs.kubenyx.url = "github:rytswd/kubenyx";
 
 # NixOS
-environment.systemPackages = [ inputs.kubenyx.packages.${pkgs.system}.kubenyx ];
+environment.systemPackages = [ inputs.kubenyx.packages.${pkgs.stdenv.hostPlatform.system}.kubenyx ];
 
 # …or home-manager
-home.packages = [ inputs.kubenyx.packages.${pkgs.system}.kubenyx ];
+home.packages = [ inputs.kubenyx.packages.${pkgs.stdenv.hostPlatform.system}.kubenyx ];
 ```
 
 **Without Nix** — the CLI is a single static binary (musl, ~4.2 MB,
