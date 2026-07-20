@@ -775,7 +775,7 @@ answers to its legacy standalone name (`kubenyx-pki …` ≡
 |---|---|
 | `kubenyx pki mint-ca` | `--out DIR` — offline CA custody bundle (6 files: both CAs + the SA keypair) for durable servers; also what the mesh launchers mint per run |
 | `kubenyx pki serve` | `--dir DIR --listen ADDR:PORT [--count N]` — bounded tar-over-HTTP custody handoff (exits after N transfers); the mesh launchers' CA channel |
-| `kubenyx pki server\|agent` | `--pki-dir`, `--kubeconfig-dir`, `--node-name`, `--node-address`, `--service-ip`, `--cluster-domain`, `--etcd`, `--etcd-san`, `--extra-san`, `--leaf-days`, `--renew-days`, `--require-shipped-ca` |
+| `kubenyx pki --mode server\|agent` | the guest-unit form (systemd-invoked, not a subcommand): `--pki-dir`, `--kubeconfig-dir`, `--node-name`, `--node-address`, `--node name=addr` (per member), `--api-url`, `--service-ip`, `--cluster-domain`, `--etcd`, `--etcd-san`, `--extra-san`, `--leaf-days`, `--renew-days`, `--require-shipped-ca` |
 | `kubenyx lb` | `--listen`, `--backend addr` (repeat), `--probe-interval-ms`, `--fail-threshold`, `--dial-timeout-ms`, `--drain-timeout-ms`, `--probe-cert`/`--probe-key` (pair), `--probe-http` |
 | `kubenyx clockstep` | `--listen` (`0.0.0.0:10123`), `--allow-from IP`, `--min-step-ms` (500) |
 | `kubenyx ready` | `--url`, `--cacert`/`--cert`/`--key` or `--insecure`, then `-- <command>` to wrap; `--wait` gates a unit start on its own first API request |
