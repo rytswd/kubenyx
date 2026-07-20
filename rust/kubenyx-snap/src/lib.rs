@@ -469,7 +469,10 @@ struct SnapIdentity {
 
 impl SnapIdentity {
     fn is_empty(&self) -> bool {
-        self.closure.is_none() && self.vmm.is_none() && self.cpu.is_none() && self.cpu_host.is_none()
+        self.closure.is_none()
+            && self.vmm.is_none()
+            && self.cpu.is_none()
+            && self.cpu_host.is_none()
     }
 }
 
@@ -1291,7 +1294,9 @@ fn resume_flags(flags: &Flags) -> (String, PathBuf, PathBuf, String, String, boo
     // Identity gate (§D3) before anything is spawned. --cpu-template is
     // resolved here (path → sha256:<hex>, literal kept) so the gate's
     // compare is a pure string rule.
-    let cpu_template = flags.get("--cpu-template").map(|t| resolve_template_spec(&t));
+    let cpu_template = flags
+        .get("--cpu-template")
+        .map(|t| resolve_template_spec(&t));
     enforce_identity(
         &snapshot,
         &firecracker,
@@ -1917,7 +1922,9 @@ fn mesh_resume_flags(flags: &Flags) -> (PathBuf, Vec<MeshNode>, String, bool) {
     let enable_pci = !flags.has("--no-pci");
     // Identity gate (§D3) before anything is spawned; --cpu-template as in
     // resume_flags.
-    let cpu_template = flags.get("--cpu-template").map(|t| resolve_template_spec(&t));
+    let cpu_template = flags
+        .get("--cpu-template")
+        .map(|t| resolve_template_spec(&t));
     enforce_identity(
         &snapshot,
         &firecracker,
@@ -2013,9 +2020,11 @@ fn cmd_mesh_cycle(flags: &Flags) {
     );
 }
 
-fn main() {
+/// Entry point (multicall library form): `args` is everything after the
+/// program name / verb — exactly what `std::env::args().skip(1)` used to
+/// yield. Error paths keep exiting through `die` (code 2), as before.
+pub fn run(args: &[String]) -> i32 {
     install_signal_cleanup();
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first().map(String::as_str) else {
         die("usage: kubenyx-snap take|resume|cycle|mesh-take|mesh-resume|mesh-cycle [flags]");
     };
@@ -2029,6 +2038,7 @@ fn main() {
         "mesh-cycle" => cmd_mesh_cycle(&flags),
         other => die(&format!("unknown subcommand {other}")),
     }
+    0
 }
 
 #[cfg(test)]
@@ -2356,7 +2366,10 @@ mod tests {
         // A pre-template parser maps the cpu key to its host-fingerprint
         // gate: `template:...` never equals a live fingerprint, so an old
         // binary REFUSES templated snapshots — strictly conservative.
-        assert_ne!(id.cpu.as_deref().unwrap(), "GenuineIntel/6/173+avx,avx2,amx_tile");
+        assert_ne!(
+            id.cpu.as_deref().unwrap(),
+            "GenuineIntel/6/173+avx,avx2,amx_tile"
+        );
     }
 
     #[test]

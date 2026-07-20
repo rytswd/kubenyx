@@ -8,8 +8,10 @@
 # Presence gating is the point: lb.enable defaults on exactly where the LB
 # is needed (agent + >1 server + no external endpoint), servers keep
 # dialing their own apiserver directly, and single-server clusters get ZERO
-# units and ZERO closure weight — the kubenyx-lb package (deliberately
-# separate from internal.tools) is only referenced inside the gated config.
+# units — the kubenyx-lb package is only referenced inside the gated
+# config. (Since the multicall fold the lb code rides the kubenyx binary
+# everywhere anyway — a measured 52 KiB, see pkgs/kubenyx-lb.nix — so the
+# gate is about units and surface, no longer about closure weight.)
 #
 # The backend list is rendered from kubenyx.nodes at eval time and re-read
 # on every service restart — never frozen at bootstrap — so a future grown
@@ -68,7 +70,7 @@ in
       type = lib.types.package;
       default = pkgs.callPackage ../pkgs/kubenyx-lb.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ../pkgs/kubenyx-lb.nix { }";
-      description = "kubenyx-lb package; deliberately separate from internal.tools so non-LB guests carry zero LB closure.";
+      description = "kubenyx-lb package; a thin symlink view over kubenyx-tools since the multicall fold (52 KiB measured lb delta), referenced only when lb.enable is on.";
     };
   };
 

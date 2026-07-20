@@ -435,10 +435,13 @@ fn sd_notify_ready() {
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() {
+/// Entry point (multicall library form): `args` is everything after the
+/// program name / verb — exactly what `std::env::args().skip(1)` used to
+/// yield. Never returns: the drain path exits 0, errors exit through
+/// `die` (code 2); the i32 satisfies the dispatcher's uniform signature.
+pub fn run(args: &[String]) -> i32 {
     START.set(Instant::now()).ok();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let cfg = parse_args(&args).unwrap_or_else(|e| die(&e));
+    let cfg = parse_args(args).unwrap_or_else(|e| die(&e));
 
     let backends: Arc<Vec<Backend>> =
         Arc::new(cfg.backends.iter().map(|s| resolve_backend(s)).collect());

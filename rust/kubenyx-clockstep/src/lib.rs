@@ -36,12 +36,15 @@ fn console_log(msg: &str) {
     println!("{msg}");
 }
 
-fn main() {
+/// Entry point (multicall library form): `args` is everything after the
+/// program name / verb — exactly what `std::env::args().skip(1)` used to
+/// yield. Never returns in practice (poke loop); the i32 satisfies the
+/// dispatcher's uniform signature.
+pub fn run(args: &[String]) -> i32 {
     let mut listen = "0.0.0.0:10123".to_string();
     let mut allow_from: Option<String> = None;
     let mut min_step_ms: i64 = 500;
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {

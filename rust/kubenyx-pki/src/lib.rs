@@ -50,7 +50,7 @@ struct Cfg {
     count: Option<u64>,
 }
 
-fn parse_args() -> Cfg {
+fn parse_args(args: &[String]) -> Cfg {
     let mut cfg = Cfg {
         mode: "server".into(),
         pki: "/var/lib/kubenyx/pki".into(),
@@ -72,7 +72,7 @@ fn parse_args() -> Cfg {
         listen: String::new(),
         count: None,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = args.iter().cloned();
     while let Some(a) = it.next() {
         let mut val = || {
             it.next()
@@ -136,15 +136,18 @@ fn die(msg: &str) -> ! {
     exit(1);
 }
 
-fn main() {
-    let cfg = parse_args();
+/// Entry point (multicall library form): `args` is everything after the
+/// program name / verb — exactly what `std::env::args().skip(1)` used to
+/// yield. All error paths keep exiting through `die` (code 1), as before.
+pub fn run(args: &[String]) -> i32 {
+    let cfg = parse_args(args);
     if cfg.mode == "mint-ca" {
         mint_ca(&cfg);
-        return;
+        return 0;
     }
     if cfg.mode == "serve" {
         serve(&cfg);
-        return;
+        return 0;
     }
     fs::create_dir_all(&cfg.pki).unwrap_or_else(|e| die(&format!("mkdir pki: {e}")));
     fs::create_dir_all(&cfg.kc).unwrap_or_else(|e| die(&format!("mkdir kubeconfigs: {e}")));
@@ -156,6 +159,7 @@ fn main() {
         "agent" => agent(&cfg),
         m => die(&format!("unknown mode {m}")),
     }
+    0
 }
 
 // ---------------------------------------------------------------------------

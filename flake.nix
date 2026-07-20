@@ -172,15 +172,25 @@
         {
           kubenyx-tools = pkgs.callPackage ./pkgs/kubenyx-tools.nix { };
           # Agent-side apiserver LB for multi-server clusters (durable-ha
-          # §4). Separate from kubenyx-tools on purpose: single-server guest
-          # closures must not grow (the module only references this package
-          # when lb.enable gates it on).
+          # §4). Since the multicall fold this is a thin symlink view over
+          # kubenyx-tools (measured 52 KiB lb delta — see
+          # pkgs/kubenyx-lb.nix); the module still only references it when
+          # lb.enable gates it on.
           kubenyx-lb = pkgs.callPackage ./pkgs/kubenyx-lb.nix { };
-          # Host-side snapshot/restore CLI with the matching firecracker on
-          # PATH (snapshots are only portable across identical VMM versions).
-          # take: boot the runner to cluster-ready and write snap.vmstate +
-          # snap.mem; resume: fresh VMM + /snapshot/load + time pokes, ~75ms
-          # to a serving apiserver; cycle: the recreation benchmark.
+          # The multicall CLI with the matching firecracker on PATH (the
+          # snap verb drives the VMM, and snapshots are only portable
+          # across identical VMM versions): `nix run .#kubenyx -- snap
+          # take ...`, plus pki|ready|clockstep|lb|etcd-mem verbs.
+          kubenyx = pkgs.writeShellScriptBin "kubenyx" ''
+            export PATH=${pkgs.firecracker}/bin:$PATH
+            exec ${self.packages.${pkgs.stdenv.hostPlatform.system}.kubenyx-tools}/bin/kubenyx "$@"
+          '';
+          # Alias for the snap verb under its historical name — same
+          # wrapper semantics (pinned firecracker on PATH), dispatched via
+          # the argv[0] compat symlink. take: boot the runner to
+          # cluster-ready and write snap.vmstate + snap.mem; resume: fresh
+          # VMM + /snapshot/load + time pokes, ~75ms to a serving
+          # apiserver; cycle: the recreation benchmark.
           kubenyx-snap = pkgs.writeShellScriptBin "kubenyx-snap" ''
             export PATH=${pkgs.firecracker}/bin:$PATH
             exec ${self.packages.${pkgs.stdenv.hostPlatform.system}.kubenyx-tools}/bin/kubenyx-snap "$@"

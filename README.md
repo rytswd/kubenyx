@@ -193,19 +193,19 @@ KVM):
 $ mkdir work && cd work    # short path — API sockets live in CWD
 
 # One-time: boot to cluster-ready, snapshot, tear down (~9s total)
-$ nix run github:rytswd/kubenyx#kubenyx-snap -- take \
+$ nix run github:rytswd/kubenyx#kubenyx -- snap take \
     --runner "$(nix build github:rytswd/kubenyx#microvm-firecracker --print-out-paths)/bin/microvm-run" \
     --out /dev/shm/kubenyx-snap
 
 # From now on: a live cluster in ~28ms, as many times as you like
-$ nix run github:rytswd/kubenyx#kubenyx-snap -- resume --snapshot /dev/shm/kubenyx-snap
+$ nix run github:rytswd/kubenyx#kubenyx -- snap resume --snapshot /dev/shm/kubenyx-snap
 spawn_to_sock_ms=2.1 load_ms=11.9 load_to_api_ms=14.1 total_ms=26.0 pid=12345 ...
 cluster:    https://10.100.0.2:6443
 kubeconfig: curl -s 10.100.0.2:10124 > kubenyx.kubeconfig && kubectl --kubeconfig kubenyx.kubeconfig get nodes
 stop:       kill 12345
 
 # Benchmark the loop yourself
-$ nix run github:rytswd/kubenyx#kubenyx-snap -- cycle --snapshot /dev/shm/kubenyx-snap -n 5
+$ nix run github:rytswd/kubenyx#kubenyx -- snap cycle --snapshot /dev/shm/kubenyx-snap -n 5
 cycles=5 median_total_ms=28.4 min=26.0 max=31.5
 ```
 
@@ -603,7 +603,7 @@ Two harness gotchas worth knowing (found the hard way, recorded in
 | `modules/` | The NixOS module: control plane, datastore, PKI, node runtime, DNS, addons, network, storage |
 | `guests/`, `flake.nix` | MicroVM guest profile + firecracker/cloud-hypervisor/qemu variants + mesh generators |
 | `lib/` | CIDR math (v4/v6), `microvm.nix` (mesh construction, per-mesh subnets, CPU templates), `harness.nix` (test embedding + snapshot verbs) |
-| `rust/` | The boot-path tools: `kubenyx-pki`, `kubenyx-ready`, `etcd-mem`, `kubenyx-snap`, `kubenyx-clockstep`, `kubenyx-lb` |
+| `rust/` | The tools — one multicall `kubenyx` binary (verbs: `snap`, `pki`, `ready`, `clockstep`, `lb`, `etcd-mem`); per-tool crates are libraries behind the dispatcher |
 | `tests/` | The 21-leg NixOS VM test matrix + the k3s benchmark |
 | `bench/RESULTS.md` | Every measurement, newest first, including the honest corrections |
 | `air/` | Design docs (planning-first workflow): architecture, per-subsystem specs, session plans |
@@ -638,9 +638,10 @@ when a dependency is the bottleneck, replace it with 300 lines of Rust.
 
 | Package | Contents |
 |---|---|
-| `.#kubenyx-snap` | Snapshot CLI with the version-matched firecracker on PATH |
-| `.#kubenyx-tools` | Guest boot-path tools: `kubenyx-pki`, `kubenyx-ready`, `etcd-mem`, `kubenyx-clockstep`, `kubenyx-snap` |
-| `.#kubenyx-lb` | Client-side apiserver LB (separate package by design — it must never ride into guest closures) |
+| `.#kubenyx` | **The CLI** — one multicall binary, every tool a verb (`snap`, `pki`, `ready`, `clockstep`, `lb`, `etcd-mem`), wrapped with the version-matched firecracker on PATH: `nix run .#kubenyx -- snap take …` |
+| `.#kubenyx-snap` | Alias of the same binary for the `snap` verb (kept for muscle memory; `kubenyx-snap take` ≡ `kubenyx snap take`) |
+| `.#kubenyx-tools` | The multicall binary as guests ship it, plus legacy-name symlinks (`kubenyx-pki`, `kubenyx-ready`, `etcd-mem`, `kubenyx-clockstep`, `kubenyx-snap`) — argv0 dispatch, so every unit and script path resolves unchanged |
+| `.#kubenyx-lb` | Thin symlink package over the same binary (`bin/kubenyx-lb`). Its old keep-out-of-guest-closures rationale was retired by measurement: folding lb into the multicall costs 52 KB — the weight was the TLS stack the other verbs already share |
 | `.#microvm-cluster-{server,agent1,agent2}`, `.#microvm-cluster7-{server,agent1..6}` | Per-node mesh runners |
 | `.#pause-image`, `.#test-image` | Airgap seed images |
 
@@ -679,7 +680,23 @@ and the per-variant `nixosConfigurations`.
 </details>
 
 <details>
-<summary><b><code>kubenyx-snap</code> CLI</b></summary>
+<summary><b>The <code>kubenyx</code> CLI</b> — one binary, every tool a verb</summary>
+
+All the tools live in **one multicall binary** with subcommands:
+
+```console
+$ nix run .#kubenyx -- --help
+kubenyx <verb> …   verbs: snap | pki | ready | clockstep | lb | etcd-mem
+```
+
+Two equivalent surfaces, by design: `kubenyx snap take …` and the
+legacy name `kubenyx-snap take …` dispatch to the same code (argv0
+symlinks) — so scripts, systemd units, and muscle memory written
+against the per-tool names keep working verbatim, while the
+single-binary form is what a future no-Nix distribution ships
+(the whole toolset is one **4.2 MB static musl binary**).
+
+### `kubenyx snap` — snapshot verbs
 
 | Subcommand | Option | Default | Meaning |
 |---|---|---|---|
@@ -707,17 +724,22 @@ and the per-variant `nixosConfigurations`.
 <details>
 <summary><b>Other CLIs & firecracker fine print</b></summary>
 
-### The other CLIs
+### The other verbs
 
-Mostly systemd-invoked; `kubenyx-pki mint-ca` is the operator-facing one.
+Mostly systemd-invoked inside guests; `kubenyx pki mint-ca` and
+`kubenyx pki serve` are the operator-facing ones. Every verb also
+answers to its legacy standalone name (`kubenyx-pki …` ≡
+`kubenyx pki …`).
 
-| Tool | Key flags |
+| Verb | Key flags |
 |---|---|
-| `kubenyx-pki mint-ca` | `--out DIR` — offline CA custody bundle (6 files: both CAs + the SA keypair) for durable servers |
-| `kubenyx-pki server\|agent` | `--pki-dir`, `--kubeconfig-dir`, `--node-name`, `--node-address`, `--service-ip`, `--cluster-domain`, `--etcd`, `--etcd-san`, `--extra-san`, `--leaf-days`, `--renew-days`, `--require-shipped-ca` |
-| `kubenyx-lb` | `--listen`, `--backend addr` (repeat), `--probe-interval-ms`, `--fail-threshold`, `--dial-timeout-ms`, `--drain-timeout-ms`, `--probe-cert`/`--probe-key` (pair), `--probe-http` |
-| `kubenyx-clockstep` | `--listen` (`0.0.0.0:10123`), `--allow-from IP`, `--min-step-ms` (500) |
-| `kubenyx-ready` | `--url`, `--cacert`/`--cert`/`--key` or `--insecure`, then `-- <command>` to wrap |
+| `kubenyx pki mint-ca` | `--out DIR` — offline CA custody bundle (6 files: both CAs + the SA keypair) for durable servers; also what the mesh launchers mint per run |
+| `kubenyx pki serve` | `--dir DIR --listen ADDR:PORT [--count N]` — bounded tar-over-HTTP custody handoff (exits after N transfers); the mesh launchers' CA channel |
+| `kubenyx pki server\|agent` | `--pki-dir`, `--kubeconfig-dir`, `--node-name`, `--node-address`, `--service-ip`, `--cluster-domain`, `--etcd`, `--etcd-san`, `--extra-san`, `--leaf-days`, `--renew-days`, `--require-shipped-ca` |
+| `kubenyx lb` | `--listen`, `--backend addr` (repeat), `--probe-interval-ms`, `--fail-threshold`, `--dial-timeout-ms`, `--drain-timeout-ms`, `--probe-cert`/`--probe-key` (pair), `--probe-http` |
+| `kubenyx clockstep` | `--listen` (`0.0.0.0:10123`), `--allow-from IP`, `--min-step-ms` (500) |
+| `kubenyx ready` | `--url`, `--cacert`/`--cert`/`--key` or `--insecure`, then `-- <command>` to wrap; `--wait` gates a unit start on its own first API request |
+| `kubenyx etcd-mem` | the in-memory etcd shim (guest-internal; unix socket, single member by design) |
 
 ### Firecracker snapshot fine print
 

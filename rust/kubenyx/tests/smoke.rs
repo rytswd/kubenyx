@@ -3,7 +3,9 @@
 //! nix checkPhase) — the backends speak plaintext HTTP, so the LB gets
 //! --probe-http (the probe transport is the only difference from
 //! production; eviction, readmission, forwarding and drain are the real
-//! code paths).
+//! code paths). Since the multicall fold the LB process is the `kubenyx`
+//! binary invoked with the `lb` verb, so this also smokes the dispatcher.
+#![cfg(feature = "lb")]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -105,8 +107,9 @@ fn failover_and_drain() {
     let b1 = DummyBackend::start("b1");
     let b2 = DummyBackend::start("b2");
 
-    let mut lb = Command::new(env!("CARGO_BIN_EXE_kubenyx-lb"))
+    let mut lb = Command::new(env!("CARGO_BIN_EXE_kubenyx"))
         .args([
+            "lb",
             "--listen",
             "127.0.0.1:0",
             "--backend",

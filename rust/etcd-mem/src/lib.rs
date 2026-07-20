@@ -33,11 +33,25 @@ fn parse_socket_path(addr: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Entry point (multicall library form): `args` is everything after the
+/// program name / verb — exactly what `std::env::args().skip(1)` used to
+/// yield. Error path mirrors the old `fn main() -> Result<..>` Termination
+/// behavior (Debug-printed with an `Error: ` prefix, exit code 1).
+pub fn run(args: &[String]) -> i32 {
+    match serve(args) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            1
+        }
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse --listen-address (only flag we support)
     let mut listen = String::from("unix:///run/kubenyx/etcd-mem/etcd-mem.sock");
-    let mut args = std::env::args().skip(1).peekable();
+    let mut args = args.iter().cloned().peekable();
     while let Some(arg) = args.next() {
         if arg == "--listen-address" || arg == "--listen-addr" {
             if let Some(val) = args.next() {

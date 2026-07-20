@@ -1,0 +1,29 @@
+# kubenyx: the multicall binary. Every boot-path tool lives in its own
+# library crate; this crate is only the dispatcher (argv[0] basename for
+# the legacy tool names, first subcommand otherwise) plus the single
+# [[bin]] the packages install. One binary dedups the shared dependency
+# graph (rustls/ring above all) that the per-tool binaries each carried.
+[package]
+name = "kubenyx"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["lb"]
+# Folded in after measurement (see pkgs/kubenyx-lb.nix): the unified
+# binary with lb is well under 1 MB bigger than without, so the old
+# separate-package closure argument is gone. The feature stays so a
+# closure-obsessed guest build can still exclude it.
+lb = ["dep:kubenyx-lb"]
+
+[dependencies]
+kubenyx-snap = { path = "../kubenyx-snap" }
+kubenyx-pki = { path = "../kubenyx-pki" }
+kubenyx-ready = { path = "../kubenyx-ready" }
+kubenyx-clockstep = { path = "../kubenyx-clockstep" }
+etcd-mem = { path = "../etcd-mem" }
+kubenyx-lb = { path = "../kubenyx-lb", optional = true }
+
+[dev-dependencies]
+# The lb failover/drain smoke (tests/smoke.rs) SIGTERMs the spawned LB.
+libc = "0.2"

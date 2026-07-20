@@ -216,8 +216,12 @@ fn sd_notify_ready() {
     }
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// Entry point (multicall library form): `args` is everything after the
+/// program name / verb — exactly what `std::env::args().skip(1)` used to
+/// yield. Never returns: every path exits with the wrapped child's exit
+/// semantics (or `die`, code 2); the i32 satisfies the dispatcher's
+/// uniform signature.
+pub fn run(args: &[String]) -> i32 {
     let mut url = None;
     let mut cacert = None;
     let mut cert = None;
