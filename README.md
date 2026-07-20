@@ -85,15 +85,39 @@ lives in the sections below.
 
 Nothing to install for the quick paths — every command in this README
 works via `nix run github:rytswd/kubenyx#…` and fetches what it needs.
-When you want kubenyx around permanently, pick your layer:
+When you want the `kubenyx` CLI (snapshots, PKI custody, probes)
+around for longer:
 
-| You want | Do this |
-|---|---|
-| The `kubenyx` CLI for this shell session | `nix shell github:rytswd/kubenyx#kubenyx` — snapshots, PKI custody, probes on PATH, gone when the shell is |
-| The CLI declaratively | NixOS: add the flake input and `environment.systemPackages = [ kubenyx.packages.${system}.kubenyx ];` — home-manager: the same package in `home.packages` |
-| The cluster module in your own NixOS flake | `nix flake init -t github:rytswd/kubenyx`, or add the flake input by hand — see [Beyond microVMs](#beyond-microvms) |
-| The test-harness / mesh libraries | `kubenyx.lib.harness` and `kubenyx.lib.microvm` from the flake input — see [Beyond microVMs](#beyond-microvms) |
-| A host without Nix | download the `kubenyx` binary — a single static musl file (~4.2 MB, zero dependencies). The CLI verbs work standalone today; the self-contained microVM guest bundles it will launch are planned work |
+**In a shell, for the session** — on PATH now, gone with the shell:
+
+```console
+$ nix shell github:rytswd/kubenyx#kubenyx
+$ kubenyx --help
+```
+
+**Declaratively, on NixOS or home-manager** — add the flake input and
+the package:
+
+```nix
+# flake.nix
+inputs.kubenyx.url = "github:rytswd/kubenyx";
+
+# NixOS
+environment.systemPackages = [ inputs.kubenyx.packages.${pkgs.system}.kubenyx ];
+
+# …or home-manager
+home.packages = [ inputs.kubenyx.packages.${pkgs.system}.kubenyx ];
+```
+
+**Without Nix** — the CLI is a single static binary (musl, ~4.2 MB,
+zero dependencies): download `kubenyx`, `chmod +x`, done. The CLI
+verbs work standalone today; the self-contained microVM guest bundles
+it will launch are planned work.
+
+The *cluster module* and the *libraries* (`lib.harness`,
+`lib.microvm`) live in your own flake instead of on a PATH:
+`nix flake init -t github:rytswd/kubenyx` scaffolds it, or add the
+input by hand — see [Beyond microVMs](#beyond-microvms).
 
 ### Run Strategies
 
