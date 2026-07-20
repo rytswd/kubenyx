@@ -142,10 +142,8 @@ nodes + *M* workers (`cp1` alone = single node, also the bare
 `nix run github:rytswd/kubenyx` default). Every target has a `-down`
 twin for teardown.
 
-#### Single node — cold start (~3.4 s)
-
 <details>
-<summary>Walkthrough — boot, the console, host-side kubectl, hypervisors, shutdown</summary>
+<summary>🖥️⚡ <b>Single node — cold start</b> · <b>~3.4 s</b> · console, host-side kubectl, hypervisors, shutdown</summary>
 
 ##### Boot
 
@@ -228,10 +226,8 @@ VM, run it again, get a fresh honest cluster.
 
 </details>
 
-#### Single node — snapshot recreation (~28 ms)
-
 <details>
-<summary>Walkthrough — take once, resume a fresh cluster as many times as you like</summary>
+<summary>🖥️📸 <b>Single node — snapshot recreation</b> · <b>~28 ms</b> · take once, resume fresh forever</summary>
 
 Cold boot is the slow path. Snapshot a ready cluster once, then
 recreate it from memory whenever a test wants one (needs the tap and
@@ -289,10 +285,8 @@ the 3.5 GB memory image, and tmpfs makes that free.
 
 </details>
 
-#### Multi-node mesh — cold start (~3.8 s)
-
 <details>
-<summary>Walkthrough — 3 or 7 nodes all-Ready with one command; any size via <code>lib.microvm</code></summary>
+<summary>🌐⚡ <b>Multi-node mesh — cold start</b> · <b>~3.8 s</b> · 3 or 7 nodes, one command; any size via <code>lib.microvm</code></summary>
 
 ```console
 $ nix run github:rytswd/kubenyx#cp1w2
@@ -342,10 +336,8 @@ durable HA the quorum posture under *In your own NixOS configuration*).
 
 </details>
 
-#### Multi-node mesh — snapshot recreation (~45 ms)
-
 <details>
-<summary>Walkthrough — consistent cut across all nodes, whole cluster back with connections intact</summary>
+<summary>🌐📸 <b>Multi-node mesh — snapshot recreation</b> · <b>~45 ms</b> · consistent cut, connections intact</summary>
 
 With a mesh running (previous section), snapshot all nodes with a
 consistent cut — every node is paused before any is snapshotted, so
@@ -365,10 +357,8 @@ count — the 7-node mesh recreates in the same tens-of-ms band
 
 </details>
 
-#### Multi-CP quorum mesh (~6.5 s)
-
 <details>
-<summary>Walkthrough — 3 control planes, a real etcd quorum, per-run CA custody, failover</summary>
+<summary>🏛️ <b>Multi-CP quorum mesh</b> · <b>~6.5 s / ~48 ms</b> · real etcd quorum, per-run CA, failover</summary>
 
 ```console
 $ nix run github:rytswd/kubenyx#cp3
@@ -440,10 +430,8 @@ The same module and libraries run outside the disposable microVM path —
 on real NixOS hosts (where the durable features live) and inside the
 standard NixOS test driver.
 
-#### In your own NixOS configuration
-
 <details>
-<summary>Walkthrough — flake template, options, declared multi-node, durable HA</summary>
+<summary>🏠 <b>In your own NixOS configuration</b> · flake template, options, declared multi-node, durable HA</summary>
 
 ##### Single node
 
@@ -556,10 +544,8 @@ Beyond that, declared membership scales in both directions:
 
 </details>
 
-#### Embedding in NixOS VM tests
-
 <details>
-<summary>Walkthrough — <code>lib.harness.mkCluster</code>, driver helpers, snapshot verbs between subtests</summary>
+<summary>🧪 <b>Embedding in NixOS VM tests</b> · <code>lib.harness.mkCluster</code>, snapshot verbs between subtests</summary>
 
 `lib.harness.mkCluster` turns one members attrset into the node modules
 *and* the driver Python a `runNixOSTest` needs — addresses resolved from
