@@ -45,7 +45,13 @@ Everything in the fast path that used to be a bottleneck was rebuilt in
 Rust (`rust/`): PKI generation, readiness probing, an in-memory etcd
 shim, and the snapshot tool.
 
-## 📋 Requirements
+## 📖 How to Use
+
+Everything from a 3-second throwaway cluster to a durable HA
+deployment. Start at *Getting Started*, then pick a topology under
+*Run Strategies*.
+
+### Requirements
 
 - **Nix** with flakes enabled (`experimental-features = nix-command flakes`)
 - **x86_64-linux**
@@ -56,7 +62,7 @@ shim, and the snapshot tool.
   to qemu automatically, and the NixOS test matrix never needs KVM) —
   just ~6.5× slower.
 
-## 🚀 Getting Started
+### Getting Started
 
 The shortest path to a real cluster you can `kubectl` against:
 
@@ -75,7 +81,24 @@ kubenyx   Ready    <none>   16s   v1.36.2
 That's it — a fresh, honest, fully volatile cluster. Everything else
 lives in the sections below.
 
-## 📖 How to Use
+### Installation
+
+Nothing to install for the quick paths — every command in this README
+works via `nix run github:rytswd/kubenyx#…` and fetches what it needs.
+When you want kubenyx around permanently, pick your layer:
+
+| You want | Do this |
+|---|---|
+| The `kubenyx` CLI on your PATH (snapshots, PKI custody, probes) | `nix profile install github:rytswd/kubenyx#kubenyx` |
+| The cluster module in your own NixOS flake | `nix flake init -t github:rytswd/kubenyx`, or add the flake input by hand — see [Beyond microVMs](#beyond-microvms) |
+| The test-harness / mesh libraries | `kubenyx.lib.harness` and `kubenyx.lib.microvm` from the flake input — see [Beyond microVMs](#beyond-microvms) |
+
+The whole toolset also compiles to a single **static musl binary**
+(~4.2 MB, no runtime dependencies) — groundwork for a planned
+fully Nix-free distribution (binary + downloadable guest bundles).
+Until that ships, the Nix paths above are the supported ones.
+
+### Run Strategies
 
 The microVM variants below are the disposable fast path (the mesh is
 all-firecracker; single-node picks its hypervisor at run time, see
@@ -98,10 +121,12 @@ nodes + *M* workers (`cp1` alone = single node, also the bare
 `nix run github:rytswd/kubenyx` default). Every target has a `-down`
 twin for teardown.
 
-<details>
-<summary><b>Single node — cold start</b> — boot in ~3.4 s: console, host-side kubectl, shutdown</summary>
+#### Single node — cold start (~3.4 s)
 
-### Boot
+<details>
+<summary>Walkthrough — boot, the console, host-side kubectl, hypervisors, shutdown</summary>
+
+##### Boot
 
 If you ran the mesh launcher (`nix run .#cp1w2`, below) on
 this host boot, skip the tap commands from Getting Started: the
@@ -124,7 +149,7 @@ That marker means: node Ready, RBAC + addons applied. The serial
 console autologs you in as root (press Enter if the prompt needs a
 redraw) and `kubectl` works immediately in the guest.
 
-### The console is the VM's stdio
+##### The console is the VM's stdio
 
 `exit` just re-logs you in (autologin), and there is no detach escape —
 park this terminal and do everything from a second one (host-side
@@ -133,7 +158,7 @@ kubectl below), or background the VM from the start:
 Do NOT Ctrl-Z the console — that suspends the VMM and freezes the
 guest's vCPUs, not just the terminal.
 
-### Host-side kubectl
+##### Host-side kubectl
 
 Credentials are minted per boot inside the guest, so this is the
 credential path — and it never touches your `~/.kube/config`:
@@ -149,7 +174,7 @@ is restricted to the tap gateway, so in-cluster workloads can't reach
 it; any local host process can, which on a disposable volatile test
 cluster is the same trust as the tap itself.
 
-### Shutdown
+##### Shutdown
 
 `poweroff` in the guest shell, or from another terminal (same
 directory — the control socket is relative):
@@ -162,7 +187,7 @@ Bounded graceful attempt, then SIGTERM, then SIGKILL — firecracker
 guests have no i8042, so Ctrl-Alt-Del alone would hang forever; the
 ladder guarantees a fast exit either way.
 
-### Hypervisors
+##### Hypervisors
 
 `cp1` picks the hypervisor at run time: **firecracker** when `/dev/kvm`
 is usable, otherwise a loud fallback to **qemu** — the only variant
@@ -182,8 +207,10 @@ VM, run it again, get a fresh honest cluster.
 
 </details>
 
+#### Single node — snapshot recreation (~28 ms)
+
 <details>
-<summary><b>Single node — snapshot recreation</b> — a fresh cluster in ~28 ms, as many times as you like</summary>
+<summary>Walkthrough — take once, resume a fresh cluster as many times as you like</summary>
 
 Cold boot is the slow path. Snapshot a ready cluster once, then
 recreate it from memory whenever a test wants one (needs the tap and
@@ -241,8 +268,10 @@ the 3.5 GB memory image, and tmpfs makes that free.
 
 </details>
 
+#### Multi-node mesh — cold start (~3.8 s)
+
 <details>
-<summary><b>Multi-node mesh — cold start</b> — 3 or 7 nodes all-Ready in ~3.8 s, one command</summary>
+<summary>Walkthrough — 3 or 7 nodes all-Ready with one command; any size via <code>lib.microvm</code></summary>
 
 ```console
 $ nix run github:rytswd/kubenyx#cp1w2
@@ -292,8 +321,10 @@ durable HA the quorum posture under *In your own NixOS configuration*).
 
 </details>
 
+#### Multi-node mesh — snapshot recreation (~45 ms)
+
 <details>
-<summary><b>Multi-node mesh — snapshot recreation</b> — the whole cluster back in ~45 ms</summary>
+<summary>Walkthrough — consistent cut across all nodes, whole cluster back with connections intact</summary>
 
 With a mesh running (previous section), snapshot all nodes with a
 consistent cut — every node is paused before any is snapshotted, so
@@ -313,8 +344,10 @@ count — the 7-node mesh recreates in the same tens-of-ms band
 
 </details>
 
+#### Multi-CP quorum mesh (~6.5 s)
+
 <details>
-<summary><b>Multi-CP quorum mesh</b> — 3 control planes, a real etcd quorum, all-Ready in ~6.5 s</summary>
+<summary>Walkthrough — 3 control planes, a real etcd quorum, per-run CA custody, failover</summary>
 
 ```console
 $ nix run github:rytswd/kubenyx#cp3
@@ -380,10 +413,18 @@ inside `snap.mem`) resumes consistently. Numbers and gates:
 
 </details>
 
-<details>
-<summary><b>In your own NixOS configuration</b> — flake template, options, declared multi-node</summary>
+### Beyond microVMs
 
-### Single node
+The same module and libraries run outside the disposable microVM path —
+on real NixOS hosts (where the durable features live) and inside the
+standard NixOS test driver.
+
+#### In your own NixOS configuration
+
+<details>
+<summary>Walkthrough — flake template, options, declared multi-node, durable HA</summary>
+
+##### Single node
 
 ```console
 $ nix flake init -t github:rytswd/kubenyx
@@ -448,7 +489,7 @@ IPv6 single-stack works through the same options — declare v6
 addresses and CIDRs and everything (SANs, routes, service VIPs, DNS)
 follows; family mixing is an eval-time error.
 
-### Multi-node
+##### Multi-node
 
 Membership is declared in Nix — no runtime discovery, no join tokens.
 The server mints per-node credentials; you ship an agent its directory
@@ -494,8 +535,10 @@ Beyond that, declared membership scales in both directions:
 
 </details>
 
+#### Embedding in NixOS VM tests
+
 <details>
-<summary><b>Embedding in NixOS VM tests</b> — <code>lib.harness.mkCluster</code></summary>
+<summary>Walkthrough — <code>lib.harness.mkCluster</code>, driver helpers, snapshot verbs between subtests</summary>
 
 `lib.harness.mkCluster` turns one members attrset into the node modules
 *and* the driver Python a `runNixOSTest` needs — addresses resolved from
@@ -531,7 +574,7 @@ minimal on purpose. Generated `waitReady` covers single-server clusters;
 multi-server bring-up needs the CA custody ceremony from
 [`tests/multi-server.nix`](tests/multi-server.nix).
 
-### Rewinding the cluster between subtests
+##### Rewinding the cluster between subtests
 
 `mkCluster { snapshotable = true; }` adds in-driver snapshot verbs to
 the generated Python: `kubenyx_snapshot_all()` freezes every node with
@@ -562,7 +605,7 @@ observed" style does not. The
 [`harness-snapshot`](tests/harness-snapshot.nix) check is the dogfood
 (rewind-twice proven).
 
-### Which verb at which layer
+##### Which verb at which layer
 
 | Layer | Verb | Cost | What it buys |
 |---|---|---|---|
