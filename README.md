@@ -635,6 +635,33 @@ $ nix build .#checks.x86_64-linux.bench-vs-k3s.driver -o b && b/bin/nixos-test-d
 $ nix run .#native-bench
 ```
 
+### Why not kind / k3d / minikube?
+
+Measured head-to-head on the same quiet 384-core KVM host
+(2026-07-21; rootless podman 5.8.2, one warm-up then medians of ≥3
+timed runs, image caches warm — full method, raws, and tool versions
+in [`bench/RESULTS.md`](bench/RESULTS.md)):
+
+| | create → node Ready | fresh cluster again | milliseconds path |
+|---|---|---|---|
+| **kubenyx** `cp1` | **~3.4 s** (cold boot) | cold-boot again, ~3.4 s | snapshot recreation **~28–33 ms** |
+| kind v0.31.0 | 31.3 s | delete + create, 42.6 s | — |
+| minikube v1.38.1 | 33.8 s | delete + create, 42.9 s | — |
+| k3d v5.8.3 | not benchable on that host¹ | — | — |
+
+Honest caveat, stated plainly: kind/minikube/k3d run **containers
+sharing the host kernel** — no hardware isolation — while kubenyx
+boots **hardware-isolated microVMs**, so kubenyx is doing strictly
+more work per cluster and still reaches node-Ready ~9× sooner. Their
+API-usable milestone (first `kubectl` success) is ~15–16 s. The gap
+that matters most for test harnesses is the second column: their only
+fresh-cluster-again story is delete + create at ~43 s; kubenyx
+restores a snapshot in tens of milliseconds (~1000×).
+
+¹ k3s hard-requires the cpuset cgroup-v2 controller, which rootless
+podman user slices don't delegate by default; k3d itself likely works
+rootful or under docker.
+
 Two harness gotchas worth knowing (found the hard way, recorded in
 `bench/RESULTS.md`):
 
