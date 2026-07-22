@@ -1,0 +1,66 @@
+# CI: eval gate + packages fast, one full-stack VM leg behind KVM.
+#
+# Binary cache is hestia (https://github.com/Mic92/hestia): build results
+# land in the GitHub Actions cache — no accounts, no secrets, no server.
+# Chunk-level dedup keeps nixpkgs bumps cheap; gc.yml keeps the repo
+# inside GitHub's 10 GB cache quota.
+#
+# The VM job builds the microVM guest closure (custom kernel + erofs
+# store image) — the FIRST run on a cold cache builds the kernel on a
+# 4-core runner and is slow (an hour-plus); every later run pulls it
+# from hestia in seconds. That is the trade the cache exists for.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  eval-and-packages:
+    name: eval + packages (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: NixOS/nix-installer-action@main
+      - uses: Mic92/hestia@v2
+      # Eval gate: every check leg, module, and package must evaluate.
+      - name: nix flake check (eval only)
+        run: nix flake check --no-build
+      # The tools: multicall binary (runs the workspace test suite in its
+      # checkPhase), the lb symlink package, and the wrapped CLI app.
+      - name: Build packages
+        run: nix build .#kubenyx-tools .#kubenyx-lb .#kubenyx
+      - name: CLI smoke
+        run: |
+          nix run .#kubenyx -- --help
+          nix run .#kubenyx-snap -- --help || true  # alias dispatch path
+
+  vm-check:
+    name: checks.single-node (KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+      - uses: NixOS/nix-installer-action@main
+      - uses: Mic92/hestia@v2
+      # The fastest full-stack leg: boots the guest, single node Ready,
+      # RBAC + addons applied. Everything heavier stays on real hardware
+      # (see bench/RESULTS.md for the matrix this repo actually runs).
+      - name: Run single-node check
+        run: nix build -L .#checks.x86_64-linux.single-node

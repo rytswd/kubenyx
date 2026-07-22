@@ -1,5 +1,7 @@
 # Kubenyx
 
+[![CI](https://github.com/rytswd/kubenyx/actions/workflows/ci.yml/badge.svg)](https://github.com/rytswd/kubenyx/actions/workflows/ci.yml)
+
 **Stock Kubernetes as NixOS systemd services — real clusters in
 seconds, recreated in milliseconds.**
 

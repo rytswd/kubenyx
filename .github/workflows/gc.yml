@@ -1,0 +1,48 @@
+# Garbage collection for the hestia binary cache
+# (adapted from Mic92/hestia's reference gc.yml for consumer repos:
+# the released binary via the action, no build-from-source path).
+#
+# GC must run on the default branch: a PR job's cache scope is read-only
+# towards the default branch and dies with the PR, but the default-branch
+# scope grows forever without GC. The microVM guest closures this repo
+# caches are large — without GC the 10 GB quota fills in a few kernel or
+# image rebuilds.
+name: Cache GC
+
+# GC handles concurrent pushes, but not a concurrent GC: queue manual
+# runs behind the nightly one instead of overlapping it.
+concurrency:
+  group: hestia-gc
+  cancel-in-progress: false
+
+on:
+  schedule:
+    # Daily, off-peak (UTC).
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Plan only; do not repack, touch, or delete anything.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  gc:
+    runs-on: ubuntu-latest
+    permissions:
+      # REST cache deletes need actions:write.
+      actions: write
+      contents: read
+    steps:
+      - uses: NixOS/nix-installer-action@main
+      # The action downloads the released binary and captures the cache
+      # API tokens GC needs; HESTIA_BIN points at the binary afterwards.
+      - uses: Mic92/hestia@v2
+      - name: Run garbage collection
+        run: |
+          "$HESTIA_BIN" gc ${{ inputs.dry-run && '--dry-run' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
