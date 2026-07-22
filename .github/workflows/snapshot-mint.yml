@@ -1,0 +1,77 @@
+# Scheduled snapshot minting for CI consumers.
+#
+# Boots a fresh cp1 cluster on the runner, takes a firecracker snapshot,
+# verifies it resumes, and saves it to the GitHub Actions cache keyed by
+# (guest closure, host CPU fingerprint). Runners are CPU-heterogeneous,
+# so one snapshot per CPU class accumulates; consumers restore by prefix
+# and the snapshot identity gate refuses a wrong-CPU hit, falling back
+# to a cold boot (~5-8 s on a runner — the snapshot pays when the
+# cluster carries expensive state, not for a bare boot).
+#
+# Triggers: weekly schedule, manual dispatch, and repository_dispatch
+# (type "mint-snapshot") so external automation can request a fresh
+# snapshot:  curl -X POST -H "Authorization: Bearer $PAT" \
+#   https://api.github.com/repos/rytswd/kubenyx/dispatches \
+#   -d '{"event_type":"mint-snapshot"}'
+name: Snapshot Mint
+
+on:
+  schedule:
+    - cron: "47 4 * * 1" # weekly, Monday off-peak UTC
+  workflow_dispatch:
+  repository_dispatch:
+    types: [mint-snapshot]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snapshot-mint
+  cancel-in-progress: false
+
+jobs:
+  mint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: NixOS/nix-installer-action@main
+      - uses: Mic92/hestia@v2
+      - name: Host tap
+        run: |
+          sudo ip tuntap add kubenyx-tap0 mode tap user "$(id -un)"
+          sudo ip addr add 10.100.0.1/24 dev kubenyx-tap0
+          sudo ip link set kubenyx-tap0 up
+      - name: Boot, snapshot, verify
+        id: mint
+        run: |
+          set -euo pipefail
+          RUNNER=$(nix build .#microvm-firecracker --print-out-paths)
+          mkdir -p /tmp/w && cd /tmp/w
+          # Boot-fresh take: spawns, waits for CLUSTER-READY, snapshots,
+          # tears down. ~30-60 s on a 4-core runner.
+          nix run "$GITHUB_WORKSPACE#kubenyx" -- snap take \
+            --runner "$RUNNER/bin/microvm-run" --out snap
+          # Cache key = closure hash + CPU-identity hash from the manifest
+          # the take just wrote (same string the resume gate compares).
+          CPU=$(grep '^identity cpu ' snap/manifest | sha256sum | cut -c1-16)
+          CLO=$(basename "$RUNNER" | cut -c1-16)
+          echo "key=kubenyx-snap-cp1-${CLO}-${CPU}" >> "$GITHUB_OUTPUT"
+          # Verify before caching: resume must reach a serving apiserver.
+          OUT=$(nix run "$GITHUB_WORKSPACE#kubenyx" -- snap resume --snapshot snap)
+          echo "$OUT"
+          PID=$(echo "$OUT" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+          kill "$PID"
+          tar --zstd -cf snap.tzst snap
+          ls -la snap.tzst
+      - name: Save to Actions cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/w/snap.tzst
+          key: ${{ steps.mint.outputs.key }}-${{ github.run_id }}

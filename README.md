@@ -624,6 +624,94 @@ observed" style does not. The
 
 </details>
 
+### CI on GitHub Actions
+
+GitHub's hosted Linux runners expose `/dev/kvm`, so kubenyx runs at
+full speed there — no TCG fallback needed. One udev rule opens the
+device (this repo's own [`ci.yml`](.github/workflows/ci.yml) does
+exactly this and runs the `single-node` check in ~5 minutes cold,
+seconds warm behind the [hestia](https://github.com/Mic92/hestia)
+cache):
+
+```yaml
+- name: Enable KVM for the runner user
+  run: |
+    echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+      | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger --name-match=kvm
+```
+
+Two shapes, cheapest first:
+
+**Declarative** — write your tests as NixOS test legs with
+`lib.harness.mkCluster` and run them as flake checks
+(`nix build .#checks.x86_64-linux.<leg>`). Sandboxed, cache-amortized,
+and the in-driver `savevm`/`loadvm` verbs give you pristine state per
+subtest within the run.
+
+**Imperative** — boot a real cluster in the job and drive it with
+`kubectl`. On a 4-core runner the cold boot dilates to ~5–8 s (restores
+barely dilate — they are memory-bound):
+
+```yaml
+- name: Cluster up
+  run: |
+    sudo ip tuntap add kubenyx-tap0 mode tap user "$(id -un)"
+    sudo ip addr add 10.100.0.1/24 dev kubenyx-tap0
+    sudo ip link set kubenyx-tap0 up
+    nix run github:rytswd/kubenyx#cp1 > console.log 2>&1 &
+    until curl -sf 10.100.0.2:10124 -o kubeconfig; do sleep 1; done
+    kubectl --kubeconfig kubeconfig get nodes
+```
+
+The trick that makes suites fly: **mint a snapshot inside the job**
+(`kubenyx snap take`, ~2 s) and `snap cycle` a pristine cluster per
+test at ~0.1 s each. Take and resume happen on the same runner, so the
+snapshot identity gate never gets in the way.
+
+<details>
+<summary>📦⏰ <b>Cross-job snapshots via the Actions cache</b> — a scheduled mint workflow feeds later runs</summary>
+
+Snapshots can also cross jobs through the GitHub Actions cache:
+[`snapshot-mint.yml`](.github/workflows/snapshot-mint.yml) (schedule +
+`workflow_dispatch` + `repository_dispatch`) boots cp1, takes a
+snapshot, verifies it resumes, and saves it keyed by *(guest closure,
+host CPU fingerprint)*. Runners are CPU-heterogeneous, so consumers
+restore by key prefix and let the identity gate arbitrate — a
+wrong-CPU hit is refused and the job falls back to a cold boot:
+
+```yaml
+- uses: actions/cache/restore@v4
+  with:
+    path: snap.tzst
+    key: kubenyx-snap-cp1-        # never exact-matches
+    restore-keys: kubenyx-snap-cp1-
+- name: Cluster up (snapshot if compatible, else cold)
+  run: |
+    if [ -f snap.tzst ] && tar --zstd -xf snap.tzst \
+       && nix run github:rytswd/kubenyx#kubenyx -- snap resume --snapshot snap; then
+      echo "resumed from cached snapshot"
+    else
+      nix run github:rytswd/kubenyx#cp1 > console.log 2>&1 &   # cold fallback
+    fi
+```
+
+Honest cost label: a bare cp1 cold boot (~5–8 s) is usually *faster*
+than downloading a ~300 MB snapshot from the cache. The cached
+snapshot pays when the state it carries is expensive — preloaded
+images, deployed workloads, warmed addons — i.e. when it replaces
+minutes of cluster prep, not seconds of boot.
+
+</details>
+
+> [!NOTE]
+> No KVM (TCG emulation)? Cold boots still work through the qemu
+> fallback at ~6.5× the wall (~20–25 s for cp1). Firecracker snapshots
+> are KVM-only, but qemu's `savevm`/`loadvm` — the harness verbs and
+> the [snapshot-as-derivation](#beyond-microvms) mint/restore pair —
+> work under TCG too, just proportionally slower.
+
 ## 🔬 Tests & Benchmarks
 
 ```console
