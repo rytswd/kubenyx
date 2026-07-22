@@ -39,8 +39,16 @@ jobs:
       - id: pick
         run: |
           ALL=$(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames)
+          # snapshot-mint/-restore pin the Skylake-Server-v4 CPU template
+          # (see tests/snapshot-mint.nix) — hosted runners are a CPU
+          # lottery (AMD, feature-masked Intel), so they only run when
+          # asked for by name.
+          METAL_ONLY='["snapshot-mint","snapshot-restore"]'
           case "$WANT" in
-            all)           LEGS="$ALL"; IMP=true;  CRES=true ;;
+            all)
+              LEGS=$(echo "$ALL" | jq -c --argjson m "$METAL_ONLY" 'map(select(. as $l | $m | index($l) | not))')
+              echo "excluded (pinned-CPU, run by name on metal-class hosts): $METAL_ONLY"
+              IMP=true; CRES=true ;;
             imperative)    LEGS='[]';   IMP=true;  CRES=false ;;
             cached-resume) LEGS='[]';   IMP=false; CRES=true ;;
             *)
@@ -78,6 +86,15 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - uses: NixOS/nix-installer-action@main
       - uses: Mic92/hestia@v2
+      # Multi-VM legs overcommit the 16 GB runner (multi-server is
+      # 4 nodes x 4 GB); guests touch pages lazily, swap absorbs the rest.
+      - name: Add swap on the scratch disk
+        run: |
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
       - name: Run check
         run: nix build -L .#checks.x86_64-linux.${{ matrix.leg }}
 
@@ -104,15 +121,22 @@ jobs:
           sudo ip link set kubenyx-tap0 up
       - name: Boot, drive with kubectl, snapshot, cycle
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+          command -v kubectl
+          # Build the guest closure in the foreground so any build error
+          # is visible here, not buried in console.log.
+          nix build --no-link .#microvm-firecracker
           # 1. Cold boot a real cluster and talk to it like any client.
           nix run .#cp1 > console.log 2>&1 &
           CP1=$!
-          for _ in $(seq 180); do
-            curl -sf 10.100.0.2:10124 -o kubeconfig && break
+          ok=""
+          for _ in $(seq 120); do
+            if curl -sf --connect-timeout 1 --max-time 2 10.100.0.2:10124 -o kubeconfig; then
+              ok=1; break
+            fi
             sleep 1
           done
-          test -s kubeconfig
+          test -n "$ok"
           kubectl --kubeconfig kubeconfig get nodes
           kubectl --kubeconfig kubeconfig get pods -A
           # 2. Attached snapshot: pause, cut, resume — the cluster keeps
@@ -124,9 +148,9 @@ jobs:
           pkill -f firecracker || true
           sleep 2
           nix run .#kubenyx -- snap cycle --snapshot snap -n 3
-      - name: Console log on failure
-        if: failure()
-        run: tail -100 console.log || true
+      - name: Console log
+        if: always()
+        run: tail -200 console.log || true
 
   cached-resume:
     name: cached-resume — respawn from the Actions-cache snapshot
@@ -175,11 +199,14 @@ jobs:
             nix run "$GITHUB_WORKSPACE#cp1" > console.log 2>&1 &
             PATH_TAKEN="cold boot (fallback)"
           fi
-          for _ in $(seq 180); do
-            curl -sf 10.100.0.2:10124 -o kubeconfig && break
+          ok=""
+          for _ in $(seq 120); do
+            if curl -sf --connect-timeout 1 --max-time 2 10.100.0.2:10124 -o kubeconfig; then
+              ok=1; break
+            fi
             sleep 1
           done
-          test -s kubeconfig
+          test -n "$ok"
           T1=$(date +%s%3N)
           kubectl --kubeconfig kubeconfig get nodes
           echo "SHOWCASE cluster served via: $PATH_TAKEN in $((T1 - T0)) ms"
