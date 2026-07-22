@@ -35,7 +35,7 @@ ships alongside; recreation stays ~flat in node count.
 | What | Measured¹ |
 |---|---|
 | Fresh microVM cluster, cold boot → node Ready | **~3.4 s** |
-| Recreating a cluster from a snapshot (`kubenyx-snap`) | **~28 ms** |
+| Recreating a cluster from a snapshot (`kubenyx snap`) | **~28 ms** |
 | 3-node mesh: launch → all-Ready / recreate all nodes | **~3.8 s / ~45 ms** |
 | Full-VM node Ready vs k3s in identical airgapped VMs | **0.67–0.80×** (faster) |
 | PKI: full cluster CA + 18 certs + kubeconfigs, per boot | **~6 ms** |
@@ -135,9 +135,9 @@ Every topology supports both start modes — pick your cell:
 
 | | Cold start | Snapshot recreation |
 |---|---|---|
-| **Single node** | `nix run .#cp1` — **~3.4 s** | `kubenyx-snap resume` — **~28 ms** |
-| **Multi-node mesh** | `nix run .#cp1w2` — **~3.8 s** | `kubenyx-snap mesh-resume` — **~45 ms** |
-| **Multi-CP quorum** | `nix run .#cp3` — **~6.5 s** | `kubenyx-snap mesh-resume` — **~48 ms** |
+| **Single node** | `nix run .#cp1` — **~3.4 s** | `kubenyx snap resume` — **~28 ms** |
+| **Multi-node mesh** | `nix run .#cp1w2` — **~3.8 s** | `kubenyx snap mesh-resume` — **~45 ms** |
+| **Multi-CP quorum** | `nix run .#cp3` — **~6.5 s** | `kubenyx snap mesh-resume` — **~48 ms** |
 
 Target names spell the composition: `cp<N>w<M>` = *N* control-plane
 nodes + *M* workers (`cp1` alone = single node, also the bare
@@ -260,7 +260,7 @@ terminal)? Snapshot it in place — pause → snapshot → resume, the guest
 never notices (~1.3 s, run from the VM's directory):
 
 ```console
-$ nix run github:rytswd/kubenyx#kubenyx-snap -- take --sock kubenyx.sock --out /dev/shm/kubenyx-snap
+$ nix run github:rytswd/kubenyx#kubenyx -- snap take --sock kubenyx.sock --out /dev/shm/kubenyx-snap
 ```
 
 `resume` leaves the VM running and prints its pid; kill that pid to free
@@ -273,7 +273,7 @@ vmgenid, so clones are safe to treat as fresh clusters.
 Keep the snapshot on tmpfs (`/dev/shm`) as shown — restores demand-page
 the 3.5 GB memory image, and tmpfs makes that free.
 
-> Snapshots are VMM-version-locked; `kubenyx-snap` from the flake ships
+> Snapshots are VMM-version-locked; the `kubenyx` CLI from the flake ships
 > the matching firecracker on PATH. They are also host-locked artifacts,
 > and the manifest enforces it: `take` records the node closure hash,
 > VMM store path and host CPU fingerprint, and `resume`/`mesh-resume`
@@ -347,8 +347,8 @@ monotonic clocks freeze together and cross-node TCP survives the
 restore:
 
 ```console
-$ nix run .#kubenyx-snap -- mesh-take --run-dir /tmp/kubenyx-cluster --out /dev/shm/mesh-snap
-$ nix run .#kubenyx-snap -- mesh-cycle --snapshot /dev/shm/mesh-snap -n 5
+$ nix run .#kubenyx -- snap mesh-take --run-dir /tmp/kubenyx-cluster --out /dev/shm/mesh-snap
+$ nix run .#kubenyx -- snap mesh-cycle --snapshot /dev/shm/mesh-snap -n 5
 mesh_cycles=5 nodes=3 median_total_ms=45.0 min=34.2 max=53.2
 ```
 
@@ -411,7 +411,7 @@ bootstrap tail turned out to be a host-bench artifact, see
 memory/tmpfs footprint.
 
 **Snapshot recreation** works on the quorum too: the same
-`kubenyx-snap mesh-take` / `mesh-cycle` verbs bring all three control
+`kubenyx snap mesh-take` / `mesh-cycle` verbs bring all three control
 planes back in **~48 ms** (5-cycle median), and on multi-server meshes
 each round prints two probes — the first apiserver TLS answer (~18 ms)
 and the first *committed* etcd write (~97 ms; a 401 can fake TLS, only
@@ -619,7 +619,7 @@ observed" style does not. The
 | Layer | Verb | Cost | What it buys |
 |---|---|---|---|
 | Cold boot (microVM) | `nix run .#cp1` / `.#cp3` | ~3.4 s / ~6.5 s | A fresh cluster from nothing; mints the snapshots below |
-| Recreation (microVM, per host) | `kubenyx-snap resume` / `mesh-resume` | ~28–48 ms | A live cluster per test *run*, cheaper than a fork |
+| Recreation (microVM, per host) | `kubenyx snap resume` / `mesh-resume` | ~28–48 ms | A live cluster per test *run*, cheaper than a fork |
 | Rewind (NixOS test driver) | `kubenyx_restore_all()` | seconds | Pristine state per *subtest* inside one driver run |
 
 </details>
@@ -720,7 +720,7 @@ A few directories whose purpose isn't obvious from the file view:
 </details>
 
 <details>
-<summary><b>Checks matrix</b> — 21 legs, all green</summary>
+<summary><b>Checks matrix</b> — 23 legs, all green</summary>
 
 `nix build .#checks.x86_64-linux.<name>.driver -o d && d/bin/nixos-test-driver`
 — give each **concurrent** run its own `XDG_RUNTIME_DIR` (the driver keys
@@ -731,6 +731,8 @@ vde sockets and vm-state off it with no per-run namespace).
 | `single-node` / `single-node-etcd` | Happy path on kine / real etcd | 37 s / 153 s |
 | `harness` | `lib.harness` dogfood: server+agent stood up exclusively through the exported helper | 39 s |
 | `harness-snapshot` | In-driver snapshot verbs: consistent savevm cut after Ready, mutate, loadvm rewind-twice; per-node walls parallel | 62 s (testScript) |
+| `snapshot-mint` | A snapshot as a *derivation output*: boot to Ready, parallel savevm cut, per-node qcow2 + identity manifest into `$out` | 26 s |
+| `snapshot-restore` | Consumes the mint drv as a real input: identity gate, paused spawn, parallel loadvm, pre-mint mutation gone, fresh write lands | 19 s |
 | `multi-node` / `multi-node-mem` | Server + agent on etcd / on etcd-mem | 38 s / 22 s |
 | `multi-server` | 3-server etcd quorum + LB agent + CA custody | 50 s |
 | `quorum-volatile` | The cp3 posture: pre-seeded CA custody, quorum on tmpfs, join-probe fast-exit, cross-server write/read; require-shipped-ca refuses before the ship | 34 s |
