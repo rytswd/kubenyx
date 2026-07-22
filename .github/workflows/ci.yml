@@ -32,9 +32,20 @@ jobs:
       - uses: actions/checkout@v6
       - uses: NixOS/nix-installer-action@main
       - uses: Mic92/hestia@v2
-      # Eval gate: every check leg, module, and package must evaluate.
-      - name: nix flake check (eval only)
-        run: nix flake check --no-build
+      # Eval gate: every check leg must evaluate. One `nix flake check`
+      # evaluator OOMs the 16 GB runner (23 NixOS systems in a single
+      # process — fine on a big box, fatal here), so nix-eval-jobs
+      # evaluates per-attribute in bounded workers instead.
+      - name: Evaluate all checks (bounded workers)
+        run: |
+          nix run nixpkgs#nix-eval-jobs -- \
+            --flake .#checks.x86_64-linux \
+            --workers 2 --max-memory-size 3072 \
+            | tee eval.jsonl
+          errors=$(jq -rs '[.[] | select(.error != null)] | length' eval.jsonl)
+          jq -rs '.[] | select(.error != null) | "EVAL ERROR \(.attr): \(.error)"' eval.jsonl
+          echo "evaluated $(wc -l < eval.jsonl) attrs, $errors errors"
+          test "$errors" = 0
       # The tools: multicall binary (runs the workspace test suite in its
       # checkPhase), the lb symlink package, and the wrapped CLI app.
       - name: Build packages
