@@ -673,8 +673,9 @@ snapshot identity gate never gets in the way.
 Every scenario is also runnable on demand:
 [`showcase.yml`](.github/workflows/showcase.yml) fans out one job per
 check leg — `workflow_dispatch` takes a single scenario name,
-`imperative` (the boot + kubectl + snapshot-cycle job above), or
-`all`. The leg list is evaluated from the flake at run time, so new
+`imperative` (the boot + kubectl + snapshot-cycle job above),
+`cached-resume` (respawn from the Actions-cache snapshot below, with
+cold-boot fallback), or `all`. The leg list is evaluated from the flake at run time, so new
 checks appear with zero workflow edits. That matrix includes the
 **stock-Kubernetes version legs** (`single-node-k8s-1_34`,
 `multi-node-mem-k8s-1_33`, …): kubenyx runs unpatched upstream
