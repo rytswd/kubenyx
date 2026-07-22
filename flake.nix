@@ -8,6 +8,12 @@
     # single-digit seconds on any KVM host.
     microvm.url = "github:astro/microvm.nix";
     microvm.inputs.nixpkgs.follows = "nixpkgs";
+    # Older stable channels pin older stock Kubernetes releases,
+    # binary-cached upstream. The k8s version matrix in checks swaps
+    # only kubenyx.packages.{kubernetes,kubectl} from these — stock
+    # Kubernetes means the version is just a package option.
+    nixpkgs-2511.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs-2505.url = "github:NixOS/nixpkgs/nixos-25.05";
   };
 
   outputs =
@@ -15,6 +21,8 @@
       self,
       nixpkgs,
       microvm,
+      nixpkgs-2511,
+      nixpkgs-2505,
     }:
     let
       systems = [
@@ -514,6 +522,38 @@
             }
           );
         }
+        # Stock Kubernetes means the version is just a package option:
+        # these legs re-run representative scenarios with
+        # kubenyx.packages.{kubernetes,kubectl} swapped in from older
+        # stable nixpkgs channels (binary-cached upstream). Everything
+        # else — containerd, etcd, CNI — stays on the primary pin, the
+        # same mixed-component reality a real host lives with.
+        // nixpkgs.lib.concatMapAttrs (
+          _: channel:
+          let
+            kp = channel.legacyPackages.${pkgs.stdenv.hostPlatform.system};
+            ver = nixpkgs.lib.versions.majorMinor kp.kubernetes.version;
+            tag = nixpkgs.lib.replaceStrings [ "." ] [ "_" ] ver;
+            runTestOn =
+              leg: path:
+              pkgs.testers.runNixOSTest {
+                imports = [ (import path { kubenyx = self; }) ];
+                name = nixpkgs.lib.mkForce "kubenyx-${leg}-k8s-${ver}";
+                # `defaults` merges as a module, so this composes with
+                # anything the base test already sets there.
+                defaults = {
+                  kubenyx.packages = {
+                    kubernetes = kp.kubernetes;
+                    kubectl = kp.kubectl;
+                  };
+                };
+              };
+          in
+          {
+            "single-node-k8s-${tag}" = runTestOn "single-node" ./tests/single-node.nix;
+            "multi-node-mem-k8s-${tag}" = runTestOn "multi-node-mem" ./tests/multi-node-mem.nix;
+          }
+        ) { inherit nixpkgs-2511 nixpkgs-2505; }
       );
 
       devShells = forAllSystems (pkgs: {

@@ -8,19 +8,14 @@
 # to a cold boot (~5-8 s on a runner — the snapshot pays when the
 # cluster carries expensive state, not for a bare boot).
 #
-# Triggers: weekly schedule, manual dispatch, and repository_dispatch
-# (type "mint-snapshot") so external automation can request a fresh
-# snapshot:  curl -X POST -H "Authorization: Bearer $PAT" \
-#   https://api.github.com/repos/rytswd/kubenyx/dispatches \
-#   -d '{"event_type":"mint-snapshot"}'
+# Triggers: weekly schedule, plus workflow_dispatch for on-demand
+# mints (Actions tab, or `gh workflow run snapshot-mint.yml`).
 name: Snapshot Mint
 
 on:
   schedule:
     - cron: "47 4 * * 1" # weekly, Monday off-peak UTC
   workflow_dispatch:
-  repository_dispatch:
-    types: [mint-snapshot]
 
 permissions:
   contents: read

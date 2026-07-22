@@ -670,13 +670,25 @@ The trick that makes suites fly: **mint a snapshot inside the job**
 test at ~0.1 s each. Take and resume happen on the same runner, so the
 snapshot identity gate never gets in the way.
 
+Every scenario is also runnable on demand:
+[`showcase.yml`](.github/workflows/showcase.yml) fans out one job per
+check leg — `workflow_dispatch` takes a single scenario name,
+`imperative` (the boot + kubectl + snapshot-cycle job above), or
+`all`. The leg list is evaluated from the flake at run time, so new
+checks appear with zero workflow edits. That matrix includes the
+**stock-Kubernetes version legs** (`single-node-k8s-1_34`,
+`multi-node-mem-k8s-1_33`, …): kubenyx runs unpatched upstream
+Kubernetes, so the version is just a package option —
+`kubenyx.packages.kubernetes` — and the matrix proves 1.33, 1.34, and
+1.36 side by side, each pulled binary-cached from its nixpkgs
+channel.
+
 <details>
 <summary>📦⏰ <b>Cross-job snapshots via the Actions cache</b> — a scheduled mint workflow feeds later runs</summary>
 
 Snapshots can also cross jobs through the GitHub Actions cache:
-[`snapshot-mint.yml`](.github/workflows/snapshot-mint.yml) (schedule +
-`workflow_dispatch` + `repository_dispatch`) boots cp1, takes a
-snapshot, verifies it resumes, and saves it keyed by *(guest closure,
+[`snapshot-mint.yml`](.github/workflows/snapshot-mint.yml) (weekly
+schedule + `workflow_dispatch`) boots cp1, takes a snapshot, verifies it resumes, and saves it keyed by *(guest closure,
 host CPU fingerprint)*. Runners are CPU-heterogeneous, so consumers
 restore by key prefix and let the identity gate arbitrate — a
 wrong-CPU hit is refused and the job falls back to a cold boot:
@@ -808,7 +820,7 @@ A few directories whose purpose isn't obvious from the file view:
 </details>
 
 <details>
-<summary><b>Checks matrix</b> — 23 legs, all green</summary>
+<summary><b>Checks matrix</b> — 27 legs, all green</summary>
 
 `nix build .#checks.x86_64-linux.<name>.driver -o d && d/bin/nixos-test-driver`
 — give each **concurrent** run its own `XDG_RUNTIME_DIR` (the driver keys
@@ -821,6 +833,8 @@ vde sockets and vm-state off it with no per-run namespace).
 | `harness-snapshot` | In-driver snapshot verbs: consistent savevm cut after Ready, mutate, loadvm rewind-twice; per-node walls parallel | 62 s (testScript) |
 | `snapshot-mint` | A snapshot as a *derivation output*: boot to Ready, parallel savevm cut, per-node qcow2 + identity manifest into `$out` | 26 s |
 | `snapshot-restore` | Consumes the mint drv as a real input: identity gate, paused spawn, parallel loadvm, pre-mint mutation gone, fresh write lands | 19 s |
+| `single-node-k8s-1_33` / `-1_34` | Stock-Kubernetes version matrix: the same single-node leg with `kubenyx.packages.{kubernetes,kubectl}` swapped in from older stable nixpkgs | as base leg |
+| `multi-node-mem-k8s-1_33` / `-1_34` | The 2-node mesh under the same version swap — server, agent, CA custody all on older stock k8s | as base leg |
 | `multi-node` / `multi-node-mem` | Server + agent on etcd / on etcd-mem | 38 s / 22 s |
 | `multi-server` | 3-server etcd quorum + LB agent + CA custody | 50 s |
 | `quorum-volatile` | The cp3 posture: pre-seeded CA custody, quorum on tmpfs, join-probe fast-exit, cross-server write/read; require-shipped-ca refuses before the ship | 34 s |
