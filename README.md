@@ -676,7 +676,12 @@ check leg — `workflow_dispatch` takes a single scenario name,
 `imperative` (the boot + kubectl + snapshot-cycle job above),
 `cached-resume` (respawn from the Actions-cache snapshot below, with
 cold-boot fallback), or `all`. The leg list is evaluated from the flake at run time, so new
-checks appear with zero workflow edits. That matrix includes the
+checks appear with zero workflow edits. Two families sit out of `all`
+on hosted runners, loudly and by name only: the pinned-CPU snapshot
+artifact legs (runner CPU lottery vs the Skylake-Server-v4 template)
+and the 3-server quorum legs (12–16 declared vCPUs against 4 hosted
+ones churns raft elections) — both run everywhere a bigger machine
+exists. That matrix includes the
 **stock-Kubernetes version legs** (`single-node-k8s-1_34`,
 `multi-node-mem-k8s-1_33`, …): kubenyx runs unpatched upstream
 Kubernetes, so the version is just a package option —

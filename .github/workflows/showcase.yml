@@ -39,15 +39,25 @@ jobs:
       - id: pick
         run: |
           ALL=$(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames)
-          # snapshot-mint/-restore pin the Skylake-Server-v4 CPU template
-          # (see tests/snapshot-mint.nix) — hosted runners are a CPU
-          # lottery (AMD, feature-masked Intel), so they only run when
-          # asked for by name.
+          # Two honest exclusions from "all" on hosted runners — both
+          # stay runnable by name:
+          # - snapshot-mint/-restore pin the Skylake-Server-v4 CPU
+          #   template (see tests/snapshot-mint.nix) and hosted runners
+          #   are a CPU lottery (AMD, feature-masked Intel).
+          # - The 3-server quorum family schedules 12-16 declared vCPUs
+          #   on a 4-vCPU runner; etcd's 100 ms raft heartbeats churn
+          #   elections under that steal and the legs flap (measured
+          #   across three fan-outs — swap fixed the memory half, the
+          #   CPU half needs a bigger machine). server-reboot stays: it
+          #   passes consistently with swap.
           METAL_ONLY='["snapshot-mint","snapshot-restore"]'
+          NEEDS_CORES='["multi-server","server-add","quorum-volatile"]'
           case "$WANT" in
             all)
-              LEGS=$(echo "$ALL" | jq -c --argjson m "$METAL_ONLY" 'map(select(. as $l | $m | index($l) | not))')
-              echo "excluded (pinned-CPU, run by name on metal-class hosts): $METAL_ONLY"
+              LEGS=$(echo "$ALL" | jq -c --argjson m "$METAL_ONLY" --argjson h "$NEEDS_CORES" \
+                'map(select(. as $l | ($m + $h) | index($l) | not))')
+              echo "excluded (pinned CPU template, run by name on metal-class hosts): $METAL_ONLY"
+              echo "excluded (needs >4 vCPUs for a 3-server quorum, run by name on bigger runners): $NEEDS_CORES"
               IMP=true; CRES=true ;;
             imperative)    LEGS='[]';   IMP=true;  CRES=false ;;
             cached-resume) LEGS='[]';   IMP=false; CRES=true ;;
